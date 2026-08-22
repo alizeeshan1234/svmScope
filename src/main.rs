@@ -10,7 +10,7 @@ mod diffs;
 mod compute;
 
 use clap::Parser;
-use std::fs;
+use std::env;
 
 /// Command-line arguments.
 #[derive(Parser)]
@@ -20,17 +20,31 @@ struct Args {
     tx_file: String,
 }
 
+use solana_client::rpc_client::RpcClient;
+use solana_client::rpc_request::RpcRequest;
+use serde_json::json;
+
 fn main() {
-    let args = Args::parse();
+    // let args = Args::parse();
 
-    // Read the file and parse it into a generic JSON value.
-    // (Later you can swap this for typed `solana-transaction-status` structs.)
-    let raw = fs::read_to_string(&args.tx_file)
-        .unwrap_or_else(|e| panic!("could not read {}: {e}", args.tx_file));
-    let tx: serde_json::Value =
-        serde_json::from_str(&raw).expect("file is not valid JSON");
+    // // Read the file and parse it into a generic JSON value.
+    // // (Later you can swap this for typed `solana-transaction-status` structs.)
+    // let raw = fs::read_to_string(&args.tx_file)
+    //     .unwrap_or_else(|e| panic!("could not read {}: {e}", args.tx_file));
+    // let tx: serde_json::Value =
+    //     serde_json::from_str(&raw).expect("file is not valid JSON");
 
-    println!("== svmscope :: {} ==\n", args.tx_file);
+    // println!("== svmscope :: {} ==\n", args.tx_file);
+
+    let args: Vec<String> = env::args().collect();
+    let tx_signatre = &args[1] as &str;
+
+    let client = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
+
+    let tx: serde_json::Value = client.send(RpcRequest::GetTransaction, json!([tx_signatre, {
+        "encoding": "json",
+        "maxSupportedTransactionVersion": 0
+    }])).expect("Rpc call failed");
 
     // ---- YOUR FIRST BRICK ----
     cpi_tree::print_cpi_tree(&tx);
