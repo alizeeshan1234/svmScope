@@ -1,52 +1,33 @@
-//! svmscope — transaction autopsy for Solana (v0.1)
+//! svmscope — transaction autopsy for Solana.
 //!
-//! v0.1 goal: take a saved `getTransaction` JSON and print
-//!   1. the CPI call tree   <- YOUR first brick (src/cpi_tree.rs)
-//!   2. compute units per program   (later)
-//!   3. account balance diffs        (later)
+//! Fetches a transaction by signature and prints its CPI call tree,
+//! account balance changes, and compute units per program.
 
+mod compute;
 mod cpi_tree;
 mod diffs;
-mod compute;
 
-use clap::Parser;
-use std::env;
-
-/// Command-line arguments.
-#[derive(Parser)]
-#[command(name = "svmscope", about = "Transaction autopsy for Solana")]
-struct Args {
-    /// Path to a saved getTransaction JSON file (e.g. sample_tx.json)
-    tx_file: String,
-}
-
+use serde_json::json;
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_request::RpcRequest;
-use serde_json::json;
+use std::env;
 
 fn main() {
-    // let args = Args::parse();
-
-    // // Read the file and parse it into a generic JSON value.
-    // // (Later you can swap this for typed `solana-transaction-status` structs.)
-    // let raw = fs::read_to_string(&args.tx_file)
-    //     .unwrap_or_else(|e| panic!("could not read {}: {e}", args.tx_file));
-    // let tx: serde_json::Value =
-    //     serde_json::from_str(&raw).expect("file is not valid JSON");
-
-    // println!("== svmscope :: {} ==\n", args.tx_file);
-
     let args: Vec<String> = env::args().collect();
-    let tx_signatre = &args[1] as &str;
+    let signature = &args[1];
 
     let client = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
 
-    let tx: serde_json::Value = client.send(RpcRequest::GetTransaction, json!([tx_signatre, {
-        "encoding": "json",
-        "maxSupportedTransactionVersion": 0
-    }])).expect("Rpc call failed");
+    let tx: serde_json::Value = client
+        .send(
+            RpcRequest::GetTransaction,
+            json!([signature, {
+                "encoding": "json",
+                "maxSupportedTransactionVersion": 0
+            }]),
+        )
+        .expect("RPC call failed");
 
-    // ---- YOUR FIRST BRICK ----
     cpi_tree::print_cpi_tree(&tx);
 
     println!("\n-- account balance changes --");
