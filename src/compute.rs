@@ -10,6 +10,7 @@ pub fn print_cu_per_program(tx: &Value) {
 
     for line in log_messages {
         let line = line.as_str().expect("logMessage should be str");
+        // Only "consumed" lines carry CU info; every other line is skipped.
         if line.contains("consumed") {
             let words: Vec<&str> = line.split_whitespace().collect();
             let program_id = words[1];

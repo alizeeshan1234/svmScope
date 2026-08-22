@@ -2,9 +2,16 @@ use serde_json::Value;
 
 /// Full account list for a transaction: static keys, then accounts loaded
 /// from Address Lookup Tables (writable, then readonly).
+///
+/// Missing `loadedAddresses` is normal (legacy / simple transactions have no
+/// lookup tables), so we simply skip it — it is not an error.
 pub fn resolve_account_keys(tx: &Value) -> Vec<String> {
     let mut keys: Vec<String> = Vec::new();
-    for k in tx["transaction"]["message"]["accountKeys"].as_array().unwrap() {
+
+    for k in tx["transaction"]["message"]["accountKeys"]
+        .as_array()
+        .unwrap()
+    {
         keys.push(k.as_str().unwrap().to_string());
     }
     if let Some(w) = tx["meta"]["loadedAddresses"]["writable"].as_array() {
@@ -17,5 +24,6 @@ pub fn resolve_account_keys(tx: &Value) -> Vec<String> {
             keys.push(k.as_str().unwrap().to_string());
         }
     }
+
     keys
 }

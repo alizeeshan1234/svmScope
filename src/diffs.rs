@@ -1,7 +1,7 @@
 //! Prints the lamport balance change for every account a transaction touched.
 
-use serde_json::Value;
 use crate::utils::resolve_account_keys;
+use serde_json::Value;
 
 /// Print the lamport balance change for every account that changed.
 pub fn print_account_diffs(tx: &Value) {
@@ -20,9 +20,9 @@ pub fn print_account_diffs(tx: &Value) {
         let post_balance = post[i].as_u64().expect("postBalance should be u64");
         let delta = post_balance as i64 - pre_balance as i64;
 
+        // delta == 0 just means this account didn't change — skip it.
         if delta != 0 {
-            let account_key = account_keys[i].as_str();
-            println!("{:<44} {:+} lamports", account_key, delta);
+            println!("{:<44} {:+} lamports", &account_keys[i], delta);
         }
     }
 }

@@ -12,22 +12,32 @@ use serde_json::json;
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_request::RpcRequest;
 use std::env;
+use std::error::Error;
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
-    let signature = &args[1];
+
+    // Missing argument -> clean usage message instead of an index-out-of-bounds panic.
+    let signature = args
+        .get(1)
+        .ok_or("usage: svmscope <transaction-signature>")?;
 
     let client = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
 
-    let tx: serde_json::Value = client
-        .send(
-            RpcRequest::GetTransaction,
-            json!([signature, {
-                "encoding": "json",
-                "maxSupportedTransactionVersion": 0
-            }]),
-        )
-        .expect("RPC call failed");
+    // A network/RPC failure (bad signature format, node down, ...) becomes an
+    // error that `?` returns out of main and prints cleanly.
+    let tx: serde_json::Value = client.send(
+        RpcRequest::GetTransaction,
+        json!([signature, {
+            "encoding": "json",
+            "maxSupportedTransactionVersion": 0
+        }]),
+    )?;
+
+    // A well-formed but nonexistent signature comes back as JSON null.
+    if tx.is_null() {
+        return Err(format!("transaction not found: {signature}").into());
+    }
 
     cpi_tree::print_cpi_tree(&tx);
 
@@ -36,4 +46,6 @@ fn main() {
 
     println!("\n-- compute units per program --");
     compute::print_cu_per_program(&tx);
+
+    Ok(())
 }
