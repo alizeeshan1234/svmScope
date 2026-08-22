@@ -6,6 +6,7 @@
 mod compute;
 mod cpi_tree;
 mod diffs;
+mod utils;
 
 use serde_json::json;
 use solana_client::rpc_client::RpcClient;
