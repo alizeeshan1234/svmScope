@@ -4,9 +4,9 @@
 > see exactly where it breaks.
 
 This document describes the full end-to-end system `svmscope` is being built toward.
-The current tool (see [README](./README.md)) is **Stage 1** of this pipeline — a
-read-only decoder. The rest of this document is the roadmap from there to a real
-simulation and chaos-testing lab.
+The current tool (see [README](./README.md)) implements **Stages 1–4** — decode, state
+reconstruction, local replay, and the what-if mutation engine. This document describes
+the full pipeline and what remains (Stage 5: invariants & generated tests).
 
 ---
 
@@ -71,7 +71,7 @@ fetch and reconstruct — which is why Stage 1 exists first.
 
 ## The stages in detail
 
-### Stage 1 — Fetch & Decode  ✅ *(current tool)*
+### Stage 1 — Fetch & Decode  ✅
 Fetch a transaction by signature and produce a readable report:
 - **CPI call tree** from `innerInstructions` + `stackHeight`.
 - **Account balance changes** from `pre/postBalances`.
@@ -80,7 +80,7 @@ Fetch a transaction by signature and produce a readable report:
 
 This is the foundation and the human-readable "what happened" view.
 
-### Stage 2 — Reconstruct State
+### Stage 2 — Reconstruct State  ✅
 To replay a transaction you need the world it ran in:
 - Fetch every account it touched (`getMultipleAccounts`) — data, owner, lamports.
 - Fetch the **program binaries** for every program it invoked (executable + programdata
@@ -92,13 +92,13 @@ not the state at the transaction's slot. For recent transactions, current ≈ pr
 For older ones, this requires archival data or a forked snapshot — and is the deepest
 challenge in the whole project.
 
-### Stage 3 — Deterministic Replay
+### Stage 3 — Deterministic Replay  ✅
 Load the reconstructed state into an embedded SVM (e.g. [LiteSVM](https://github.com/LiteSVM/litesvm)),
 re-execute the transaction, and confirm you get the **same result** — same success or
 failure, same logs, same state changes. This is the moment `svmscope` stops being a
 decoder and becomes a *simulator*: a transaction you can run, not just read.
 
-### Stage 4 — "What-If" Mutation Engine
+### Stage 4 — "What-If" Mutation Engine  ✅
 Once you can replay deterministically, you can change one thing and replay again:
 - Crash or stale an **oracle price**.
 - Remove or swap a **signer**.
@@ -131,8 +131,9 @@ under different conditions.
   invariants     invariant definitions + checks + test emission     (Stage 5)
 ```
 
-Today, `cli`, `fetch`, and `decode` exist (as `main`, the RPC call, and the
-`cpi_tree` / `diffs` / `compute` / `utils` modules). The rest is the build ahead.
+Today, `cli`, `fetch`, `decode`, `state`, `replay`, and `mutate` all exist (across
+`main`, the `cpi_tree` / `diffs` / `compute` / `utils` modules, `state`, and `replay`).
+Stage 5 (`invariants`) is the build ahead.
 
 ---
 
@@ -160,9 +161,9 @@ invariant layer*, not in re-implementing an SVM.
 
 - [x] **Stage 1 — Fetch & Decode**: CPI tree, balance diffs, CU per program, ALT
       resolution, graceful error handling.
-- [ ] **Stage 2 — State reconstruction**: fetch accounts + program binaries.
-- [ ] **Stage 3 — Deterministic replay**: LiteSVM harness, replay & compare.
-- [ ] **Stage 4 — Mutation engine**: oracle / signer / account / time / compute.
+- [x] **Stage 2 — State reconstruction**: fetch accounts + program binaries.
+- [x] **Stage 3 — Deterministic replay**: LiteSVM harness, replay & compare.
+- [x] **Stage 4 — Mutation engine** (lamports + data): oracle / signer / account / time / compute.
 - [ ] **Stage 5 — Invariants & test generation**.
 
 Adjacent quality-of-life: file mode (offline analysis), configurable RPC endpoint,

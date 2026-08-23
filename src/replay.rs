@@ -12,7 +12,6 @@ use solana_address::Address;
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_request::RpcRequest;
 use solana_transaction::versioned::VersionedTransaction;
-use std::ops::Add;
 use std::str::FromStr;
 
 const NATIVE_LOADER: &str = "NativeLoader1111111111111111111111111111111";
@@ -137,6 +136,10 @@ fn fetch_transaction(client: &RpcClient, signature: &str) -> VersionedTransactio
 }
 
 /// A change to apply to an account before replaying.
+///
+/// `Data` is part of the mutation API (verified working) even though the CLI
+/// currently only constructs `Lamports` — hence the allow.
+#[allow(dead_code)]
 pub enum Mutation {
     Lamports { address: String, value: u64 },
     Data { address: String, bytes: Vec<u8> },
