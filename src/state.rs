@@ -6,7 +6,6 @@
 
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_request::RpcRequest;
-use solana_client::rpc_response::OptionSerializer::Some;
 
 /// Fetch and print the on-chain state of each account in the list.
 ///

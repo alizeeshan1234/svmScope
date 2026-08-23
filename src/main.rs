@@ -6,6 +6,7 @@
 mod compute;
 mod cpi_tree;
 mod diffs;
+mod replay;
 mod state;
 mod utils;
 
@@ -52,6 +53,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let account_keys = utils::resolve_account_keys(&tx);
     println!("\n-- account states --");
     state::fetch_account_states(&client, &account_keys);
+
+    // Stage 3: reconstruct state and replay the transaction locally.
+    println!("\n-- replay --");
+    replay::replay_transaction(&client, signature, &account_keys);
+
+    let mutations = vec![
+        replay::Mutation {
+            address: account_keys[0].clone(),
+            new_lamports: 0
+        }
+    ];
+    replay::mutate_and_replay(&client, signature, &account_keys, &mutations);
 
     Ok(())
 }
