@@ -6,6 +6,7 @@ pub mod api;
 pub mod compute;
 pub mod cpi_tree;
 pub mod decode;
+pub mod fixture;
 pub mod diffs;
 pub mod replay;
 pub mod state;
@@ -126,5 +127,32 @@ pub fn simulate_suite(
     }
     let account_keys = utils::resolve_account_keys(&tx);
     let ctx = replay::build_context(client, signature, &account_keys);
+    Ok(replay::run_suite(&ctx, &scenarios))
+}
+
+/// Capture a transaction's full state into a portable, self-contained fixture.
+/// Freeze once, then replay deterministically forever with no RPC.
+pub fn capture_fixture(client: &RpcClient, signature: &str) -> Result<fixture::Fixture, String> {
+    let tx: serde_json::Value = client
+        .send(
+            RpcRequest::GetTransaction,
+            json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
+        )
+        .map_err(|e| format!("RPC error: {e}"))?;
+    if tx.is_null() {
+        return Err(format!("transaction not found: {signature}"));
+    }
+    let slot = tx["slot"].as_u64();
+    let account_keys = utils::resolve_account_keys(&tx);
+    let ctx = replay::build_context(client, signature, &account_keys);
+    Ok(ctx.to_fixture(signature, slot))
+}
+
+/// Run a scenario suite against a frozen fixture — deterministic, offline, CI-safe.
+pub fn run_fixture_suite(
+    fx: &fixture::Fixture,
+    scenarios: Vec<replay::ScenarioSpec>,
+) -> Result<Vec<replay::ScenarioOutcome>, String> {
+    let ctx = replay::ReplayContext::from_fixture(fx)?;
     Ok(replay::run_suite(&ctx, &scenarios))
 }

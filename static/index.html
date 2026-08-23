@@ -337,6 +337,7 @@
           <button class="btn" id="runSuite">▶ Run all tests</button>
           <span class="spacer"></span>
           <span id="suiteResult" class="suite-result"></span>
+          <button class="btn ghost sm" id="freezeFixture" title="capture a self-contained snapshot so the suite runs deterministically offline">❄ Freeze fixture</button>
           <button class="btn ghost sm" id="exportSuite">⤓ Export suite</button>
         </div>
         <div id="suite" class="suite"></div>
@@ -692,9 +693,31 @@ async function runSuite() {
   } catch (e) { el.className = 'suite-result fail'; el.textContent = 'error: ' + e.message; }
   finally { btn.disabled = false; }
 }
+async function freezeFixture() {
+  if (!currentSig) return;
+  const btn = $('freezeFixture'), old = btn.textContent;
+  btn.disabled = true; btn.textContent = '❄ Freezing…';
+  try {
+    const res = await fetch('/freeze/' + encodeURIComponent(currentSig));
+    if (!res.ok) throw new Error(await res.text());
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'fixture.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    btn.textContent = '❄ Saved fixture.json ✓';
+    setTimeout(() => { btn.textContent = old; }, 2500);
+  } catch (e) {
+    btn.textContent = old;
+    $('suiteResult').className = 'suite-result fail';
+    $('suiteResult').textContent = 'freeze failed: ' + e.message;
+  } finally { btn.disabled = false; }
+}
 function exportSuite() {
   if (!suiteRows.length) return;
-  const spec = { signature: currentSig, scenarios: suiteRows.map(r => {
+  // A fixture-referencing suite: hermetic and CI-safe once you freeze the fixture.
+  const spec = { fixture: 'fixture.json', scenarios: suiteRows.map(r => {
     const o = { name: r.name, expect: r.expect };
     if (r.expect === 'revert' && r.contains) o.contains = r.contains;
     o.mutations = r.muts; return o;
@@ -702,7 +725,9 @@ function exportSuite() {
   const json = JSON.stringify(spec, null, 2);
   const box = $('exportBox'); box.classList.remove('hidden');
   box.innerHTML = `<pre>${esc(json)}</pre>
-    <div class="cmd">▶ save as suite.json, then run in CI: <b>svmscope test suite.json</b> (exits non-zero on any failure)</div>
+    <div class="cmd">1. click <b>❄ Freeze fixture</b> to save <b>fixture.json</b><br>
+       2. save this as <b>suite.json</b> beside it (add <code>"asserts"</code> to check resulting balances)<br>
+       3. run in CI: <b>svmscope test suite.json</b> — deterministic, offline, exits non-zero on any failure</div>
     <button class="btn ghost sm" id="copyExport" style="margin-top:10px">Copy JSON</button>`;
   $('copyExport').addEventListener('click', async () => { try { await navigator.clipboard.writeText(json); } catch {} $('copyExport').textContent = 'Copied ✓'; });
   box.scrollIntoView({ block: 'nearest' });
@@ -1000,6 +1025,7 @@ $('expandAll').addEventListener('click', toggleExpandAll);
 $('stageBtn').addEventListener('click', stageAll);
 $('simBtn').addEventListener('click', simulate);
 $('runSuite').addEventListener('click', runSuite);
+$('freezeFixture').addEventListener('click', freezeFixture);
 $('exportSuite').addEventListener('click', exportSuite);
 $('addScenario').addEventListener('click', addScenarioFromEditor);
 </script>

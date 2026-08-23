@@ -3,6 +3,7 @@
 //! Loads the transaction's accounts AND programs into an in-process SVM
 //! (LiteSVM) so the transaction can be re-executed locally.
 
+use crate::fixture::{Fixture, FixtureEntry};
 use base64::Engine;
 use litesvm::types::TransactionResult;
 use litesvm::LiteSVM;
@@ -173,6 +174,81 @@ pub fn build_context(client: &RpcClient, signature: &str, account_keys: &[String
     ReplayContext { tx, loaded }
 }
 
+fn b64_encode(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+impl ReplayContext {
+    /// Freeze this context into a portable, self-contained [`Fixture`] — the tx
+    /// wire bytes plus every account/program, so it can replay offline forever.
+    pub fn to_fixture(&self, signature: &str, captured_slot: Option<u64>) -> Fixture {
+        let tx_bytes = bincode::serialize(&self.tx).expect("serialize tx");
+        let entries = self
+            .loaded
+            .iter()
+            .map(|(addr, l)| match l {
+                Loaded::Data(a) => FixtureEntry::Data {
+                    address: addr.to_string(),
+                    owner: a.owner.to_string(),
+                    lamports: a.lamports,
+                    data_b64: b64_encode(&a.data),
+                },
+                Loaded::Program(elf) => FixtureEntry::Program {
+                    address: addr.to_string(),
+                    elf_b64: b64_encode(elf),
+                },
+            })
+            .collect();
+        Fixture {
+            signature: signature.to_string(),
+            captured_slot,
+            tx_b64: b64_encode(&tx_bytes),
+            entries,
+        }
+    }
+
+    /// Rebuild a replay context from a frozen fixture — **no network**. This is
+    /// what makes fixture-backed suites deterministic and CI-safe.
+    pub fn from_fixture(fx: &Fixture) -> Result<ReplayContext, String> {
+        let tx_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&fx.tx_b64)
+            .map_err(|e| format!("bad tx base64: {e}"))?;
+        let tx: VersionedTransaction =
+            bincode::deserialize(&tx_bytes).map_err(|e| format!("deserialize tx: {e}"))?;
+
+        let mut loaded = Vec::with_capacity(fx.entries.len());
+        for e in &fx.entries {
+            match e {
+                FixtureEntry::Data { address, owner, lamports, data_b64 } => {
+                    let addr = Address::from_str(address).map_err(|_| format!("bad address {address}"))?;
+                    let owner_addr = Address::from_str(owner).map_err(|_| format!("bad owner {owner}"))?;
+                    let data = base64::engine::general_purpose::STANDARD
+                        .decode(data_b64)
+                        .map_err(|e| format!("bad data base64 for {address}: {e}"))?;
+                    loaded.push((
+                        addr,
+                        Loaded::Data(Account {
+                            lamports: *lamports,
+                            data,
+                            owner: owner_addr,
+                            executable: false,
+                            rent_epoch: 0,
+                        }),
+                    ));
+                }
+                FixtureEntry::Program { address, elf_b64 } => {
+                    let addr = Address::from_str(address).map_err(|_| format!("bad address {address}"))?;
+                    let elf = base64::engine::general_purpose::STANDARD
+                        .decode(elf_b64)
+                        .map_err(|e| format!("bad elf base64 for {address}: {e}"))?;
+                    loaded.push((addr, Loaded::Program(elf)));
+                }
+            }
+        }
+        Ok(ReplayContext { tx, loaded })
+    }
+}
+
 /// Fetch the raw transaction (base64 wire bytes) and deserialize it.
 fn fetch_transaction(client: &RpcClient, signature: &str) -> VersionedTransaction {
     let resp: serde_json::Value = client
@@ -309,22 +385,139 @@ impl Expect {
     }
 }
 
-/// One named test case: a set of mutations plus the outcome it asserts.
+/// A comparison operator for numeric state assertions.
+#[derive(Clone, Copy)]
+pub enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl CmpOp {
+    fn test(self, a: u64, b: u64) -> bool {
+        match self {
+            CmpOp::Eq => a == b,
+            CmpOp::Ne => a != b,
+            CmpOp::Lt => a < b,
+            CmpOp::Le => a <= b,
+            CmpOp::Gt => a > b,
+            CmpOp::Ge => a >= b,
+        }
+    }
+    pub fn symbol(self) -> &'static str {
+        match self {
+            CmpOp::Eq => "==",
+            CmpOp::Ne => "!=",
+            CmpOp::Lt => "<",
+            CmpOp::Le => "<=",
+            CmpOp::Gt => ">",
+            CmpOp::Ge => ">=",
+        }
+    }
+}
+
+/// A check on an account's state *after* the transaction replays. This is what
+/// makes a scenario a real test — asserting on resulting state, not just pass/fail.
+pub enum StateCheck {
+    /// The account's lamports satisfy `op value`.
+    Lamports { op: CmpOp, value: u64 },
+    /// The little-endian u64 at `offset` satisfies `op value`
+    /// (e.g. an SPL token amount at offset 64).
+    U64At { offset: usize, op: CmpOp, value: u64 },
+}
+
+/// A post-replay assertion targeting one account.
+pub struct AccountAssert {
+    pub address: String,
+    pub check: StateCheck,
+}
+
+impl AccountAssert {
+    fn describe(&self) -> String {
+        match &self.check {
+            StateCheck::Lamports { op, value } => {
+                format!("{} lamports {} {}", short(&self.address), op.symbol(), value)
+            }
+            StateCheck::U64At { offset, op, value } => {
+                format!("{} u64@{} {} {}", short(&self.address), offset, op.symbol(), value)
+            }
+        }
+    }
+
+    fn eval(&self, svm: &LiteSVM) -> Result<bool, String> {
+        let addr = Address::from_str(&self.address).map_err(|_| format!("bad address {}", self.address))?;
+        let acc = svm.get_account(&addr);
+        match &self.check {
+            StateCheck::Lamports { op, value } => {
+                Ok(op.test(acc.map(|a| a.lamports).unwrap_or(0), *value))
+            }
+            StateCheck::U64At { offset, op, value } => {
+                let acc = acc.ok_or_else(|| format!("account not found: {}", self.address))?;
+                if offset + 8 > acc.data.len() {
+                    return Err(format!("u64@{offset} out of range (len {})", acc.data.len()));
+                }
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&acc.data[*offset..offset + 8]);
+                Ok(op.test(u64::from_le_bytes(b), *value))
+            }
+        }
+    }
+}
+
+fn short(s: &str) -> String {
+    if s.len() > 12 {
+        format!("{}…{}", &s[..4], &s[s.len() - 4..])
+    } else {
+        s.to_string()
+    }
+}
+
+/// One named test case: mutations, the transaction-level outcome it asserts, and
+/// optional post-replay state assertions.
 pub struct ScenarioSpec {
     pub name: String,
     pub mutations: Vec<Mutation>,
     pub expect: Expect,
+    pub asserts: Vec<AccountAssert>,
+}
+
+/// The result of one post-replay assertion.
+#[derive(serde::Serialize)]
+pub struct AssertOutcome {
+    pub description: String,
+    pub pass: bool,
 }
 
 /// The result of running one scenario.
 #[derive(serde::Serialize)]
 pub struct ScenarioOutcome {
     pub name: String,
-    /// Human description of what was asserted, e.g. `reverts with "DivisionByZero"`.
+    /// Human description of the transaction-level expectation.
     pub expect: String,
-    /// Whether the actual replay matched the assertion.
+    /// Whether everything asserted (outcome + all state checks) held.
     pub pass: bool,
     pub actual: ReplayResult,
+    pub asserts: Vec<AssertOutcome>,
+}
+
+impl ReplayContext {
+    /// Run mutations and keep the post-replay SVM so state can be inspected.
+    fn run_full(&self, mutations: &[Mutation]) -> (ReplayResult, LiteSVM) {
+        let mut svm = svm_from_loaded(&self.loaded);
+        for m in mutations {
+            if let Err(e) = apply_mutation(&mut svm, m) {
+                return (
+                    ReplayResult { success: false, error: Some(e), logs: vec![], compute_units: 0 },
+                    svm,
+                );
+            }
+        }
+        let result = to_replay_result(svm.send_transaction(self.tx.clone()));
+        (result, svm)
+    }
 }
 
 /// Run a suite of scenarios against one pre-fetched context and report pass/fail.
@@ -332,13 +525,26 @@ pub fn run_suite(ctx: &ReplayContext, scenarios: &[ScenarioSpec]) -> Vec<Scenari
     scenarios
         .iter()
         .map(|s| {
-            let actual = ctx.run(&s.mutations);
-            let pass = s.expect.matches(&actual);
+            let (actual, svm) = ctx.run_full(&s.mutations);
+            let outcome_pass = s.expect.matches(&actual);
+
+            let asserts: Vec<AssertOutcome> = s
+                .asserts
+                .iter()
+                .map(|a| AssertOutcome {
+                    description: a.describe(),
+                    // A failed eval (missing account, bad offset) counts as a failed assertion.
+                    pass: a.eval(&svm).unwrap_or(false),
+                })
+                .collect();
+
+            let pass = outcome_pass && asserts.iter().all(|a| a.pass);
             ScenarioOutcome {
                 name: s.name.clone(),
                 expect: s.expect.describe(),
                 pass,
                 actual,
+                asserts,
             }
         })
         .collect()

@@ -87,10 +87,79 @@ cargo run -- <SIGNATURE>
 
 # decode + replay + a what-if mutation (multiple allowed)
 cargo run -- <SIGNATURE> --mutate <ADDRESS>:<LAMPORTS>
+
+# web UI (decode + replay + scenario tests)
+cargo run --bin server        # → http://127.0.0.1:3000
 ```
 
 Uses the public `https://api.mainnet-beta.solana.com` endpoint, which only retains
 recent transactions. For older transactions, point it at an archival RPC.
+
+## Scenario testing — the hermetic part
+
+The point isn't just "what if?", it's **coverage**: assert what *should* happen in
+each edge case, with no test harness to write. svmscope replays the real programs
+against edited state and checks both the transaction outcome and the resulting
+account state.
+
+The catch with replaying live transactions is **state drift** — current on-chain
+state moves, so a replay that passes today can fail tomorrow for reasons unrelated
+to your code. A test that flakes on mainnet state is worse than no test. So freeze
+a **fixture** first: a self-contained snapshot (transaction + every account + every
+program ELF) that replays identically forever, offline.
+
+```bash
+# 1. Freeze the world the transaction ran in → one portable file
+cargo run -- freeze <SIGNATURE> -o fixture.json
+
+# 2. Write a suite next to it (see below), then run it — deterministic, no RPC
+cargo run -- test suite.json      # exits non-zero if any scenario fails → CI-ready
+```
+
+A `suite.json` references the fixture and lists scenarios. Each scenario mutates
+accounts, asserts a transaction outcome (`success` / `revert` [+ `contains`]), and
+optionally asserts on **resulting state** after replay:
+
+```json
+{
+  "fixture": "fixture.json",
+  "scenarios": [
+    {
+      "name": "baseline swap succeeds and moves the reserve",
+      "expect": "success",
+      "asserts": [
+        { "address": "<POOL_RESERVE>", "kind": "u64", "offset": 64, "op": "!=", "value": 894205215695071 }
+      ]
+    },
+    {
+      "name": "draining the pool reserve reverts",
+      "expect": "revert",
+      "mutations": [
+        { "kind": "data", "address": "<POOL_RESERVE>", "offset": 64, "bytes_hex": "0000000000000000" }
+      ],
+      "asserts": [
+        { "address": "<POOL_RESERVE>", "kind": "u64", "offset": 64, "op": "==", "value": 0 }
+      ]
+    }
+  ]
+}
+```
+
+```
+$ cargo run -- test suite.json
+svmscope test — fixture 4RHX…SoJWt (16 accounts, 5 programs, 2 scenarios) [deterministic, offline]
+
+  PASS  baseline swap succeeds and moves the reserve  (expect: succeeds; got: succeeded)
+          ✓ assert Cb3N…zXYo u64@64 != 894205215695071
+  PASS  draining the pool reserve reverts  (expect: reverts; got: reverted (Custom(6004)))
+          ✓ assert Cb3N…zXYo u64@64 == 0
+
+2/2 passed
+```
+
+The web UI (`--bin server`) starts you with a suite auto-generated from the
+transaction; **❄ Freeze fixture** downloads the fixture and **⤓ Export suite**
+writes the matching `suite.json`.
 
 ## How it works
 
@@ -110,10 +179,12 @@ recent transactions. For older transactions, point it at an archival RPC.
 - [x] State reconstruction (accounts + program binaries)
 - [x] Deterministic local replay
 - [x] What-if mutation engine (lamports + data)
-- [ ] Baseline-vs-mutated **diff** output
-- [ ] `--mutate` support for data / oracle prices from the CLI
-- [ ] Archival state for exact replay of older transactions
-- [ ] Invariant checks + generated regression tests
+- [x] Baseline-vs-mutated **diff** output (web UI)
+- [x] Hermetic **fixtures** — freeze state once, replay deterministically offline
+- [x] Scenario suites + post-state **assertions**; `svmscope test` runner for CI
+- [ ] Archival state so fixtures capture pre-transaction state at the exact slot
+- [ ] IDL-aware account decoding (name fields on arbitrary program accounts)
+- [ ] Richer assertions (token-amount / SOL deltas, cross-account invariants)
 
 See [VISION.md](./VISION.md) for the full architecture.
 

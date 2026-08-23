@@ -6,7 +6,7 @@
 
 use serde::Deserialize;
 
-use crate::replay::{Expect, Mutation, ScenarioSpec};
+use crate::replay::{AccountAssert, CmpOp, Expect, Mutation, ScenarioSpec, StateCheck};
 
 /// One what-if mutation. `kind` selects the variant:
 /// `{"kind":"lamports","address":..,"lamports":..}` or
@@ -43,7 +43,50 @@ impl MutationInput {
     }
 }
 
-/// One test scenario: a name, the mutations to apply, and the outcome to assert.
+/// A post-replay state assertion. `kind` is `"lamports"` or `"u64"` (a
+/// little-endian u64 at `offset`, e.g. an SPL token amount at offset 64).
+/// `op` is one of `== != < <= > >=` (default `==`).
+#[derive(Deserialize)]
+pub struct AssertInput {
+    pub address: String,
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_op")]
+    pub op: String,
+    pub value: u64,
+}
+
+fn default_kind() -> String {
+    "u64".into()
+}
+fn default_op() -> String {
+    "==".into()
+}
+
+impl AssertInput {
+    fn into_assert(self) -> Result<AccountAssert, String> {
+        let op = match self.op.as_str() {
+            "==" | "eq" => CmpOp::Eq,
+            "!=" | "ne" => CmpOp::Ne,
+            "<" | "lt" => CmpOp::Lt,
+            "<=" | "le" => CmpOp::Le,
+            ">" | "gt" => CmpOp::Gt,
+            ">=" | "ge" => CmpOp::Ge,
+            other => return Err(format!("unknown assert op: {other}")),
+        };
+        let check = match self.kind.as_str() {
+            "lamports" => StateCheck::Lamports { op, value: self.value },
+            "u64" => StateCheck::U64At { offset: self.offset, op, value: self.value },
+            other => return Err(format!("unknown assert kind: {other}")),
+        };
+        Ok(AccountAssert { address: self.address, check })
+    }
+}
+
+/// One test scenario: a name, the mutations to apply, the transaction-level
+/// outcome to assert, and optional post-replay state assertions.
 ///
 /// `expect` is `"success"`, `"revert"` (or `"fail"`), or `"any"`. When reverting,
 /// an optional `contains` requires the error/logs to include that text.
@@ -56,6 +99,8 @@ pub struct ScenarioInput {
     pub contains: Option<String>,
     #[serde(default)]
     pub mutations: Vec<MutationInput>,
+    #[serde(default)]
+    pub asserts: Vec<AssertInput>,
 }
 
 fn default_expect() -> String {
@@ -77,13 +122,24 @@ impl ScenarioInput {
             .into_iter()
             .map(MutationInput::into_mutation)
             .collect::<Result<_, _>>()?;
-        Ok(ScenarioSpec { name: self.name, mutations, expect })
+        let asserts = self
+            .asserts
+            .into_iter()
+            .map(AssertInput::into_assert)
+            .collect::<Result<_, _>>()?;
+        Ok(ScenarioSpec { name: self.name, mutations, expect, asserts })
     }
 }
 
 /// POST body for `/simulate_suite`, and the on-disk format for `svmscope test`.
+///
+/// Provide `fixture` (a path to a frozen fixture file) for a deterministic,
+/// offline run — the CI-safe path — or `signature` to fetch live state via RPC.
 #[derive(Deserialize)]
 pub struct SuiteRequest {
-    pub signature: String,
+    #[serde(default)]
+    pub signature: Option<String>,
+    #[serde(default)]
+    pub fixture: Option<String>,
     pub scenarios: Vec<ScenarioInput>,
 }

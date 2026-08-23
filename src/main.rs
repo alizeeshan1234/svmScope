@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let signature = args
         .get(1)
-        .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]\n       svmscope test <scenarios.json>")?;
+        .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]\n       svmscope freeze <transaction-signature> [-o fixture.json]\n       svmscope test <scenarios.json>")?;
 
     let client = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
 
@@ -25,6 +25,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     if signature == "test" {
         let path = args.get(2).ok_or("usage: svmscope test <scenarios.json>")?;
         return run_tests(&client, path);
+    }
+
+    // Freeze mode: `svmscope freeze <sig> [-o fixture.json]` captures a
+    // self-contained fixture for deterministic, offline replay.
+    if signature == "freeze" {
+        let sig = args.get(2).ok_or("usage: svmscope freeze <signature> [-o fixture.json]")?;
+        let out = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1));
+        eprintln!("freezing {sig}…");
+        let fx = svmscope::capture_fixture(&client, sig)?;
+        let json = fx.to_json()?;
+        match out {
+            Some(path) => {
+                std::fs::write(path, &json).map_err(|e| format!("write {path}: {e}"))?;
+                eprintln!("wrote {path} ({}, {} bytes)", fx.summary(), json.len());
+            }
+            None => println!("{json}"),
+        }
+        return Ok(());
     }
 
     let json_mode = args.iter().any(|a| a == "--json");
@@ -103,6 +121,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 /// Run a scenario suite from a JSON file and print a test-runner report.
 /// Exits the process with code 1 if any scenario fails its assertion.
+///
+/// Prefers a frozen `fixture` (deterministic, offline) over a live `signature`.
 fn run_tests(client: &RpcClient, path: &str) -> Result<(), Box<dyn Error>> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let req: api::SuiteRequest = serde_json::from_str(&text).map_err(|e| format!("bad scenario file: {e}"))?;
@@ -112,9 +132,29 @@ fn run_tests(client: &RpcClient, path: &str) -> Result<(), Box<dyn Error>> {
         .into_iter()
         .map(|s| s.into_spec())
         .collect::<Result<Vec<_>, _>>()?;
+    let n = scenarios.len();
 
-    println!("svmscope test — {} ({} scenarios)\n", req.signature, scenarios.len());
-    let outcomes = simulate_suite(client, &req.signature, scenarios)?;
+    // Fixture path is resolved relative to the suite file's directory.
+    let outcomes = if let Some(fx_ref) = &req.fixture {
+        let fx_path = std::path::Path::new(path)
+            .parent()
+            .map(|d| d.join(fx_ref))
+            .unwrap_or_else(|| std::path::PathBuf::from(fx_ref));
+        let fx_text = std::fs::read_to_string(&fx_path)
+            .map_err(|e| format!("cannot read fixture {}: {e}", fx_path.display()))?;
+        let fx = svmscope::fixture::Fixture::from_json(&fx_text)?;
+        println!(
+            "svmscope test — fixture {} ({}, {n} scenarios) [deterministic, offline]\n",
+            fx.signature,
+            fx.summary()
+        );
+        svmscope::run_fixture_suite(&fx, scenarios)?
+    } else if let Some(sig) = &req.signature {
+        println!("svmscope test — {sig} ({n} scenarios) [live RPC — may drift]\n");
+        simulate_suite(client, sig, scenarios)?
+    } else {
+        return Err("suite must specify either \"fixture\" or \"signature\"".into());
+    };
 
     let mut passed = 0;
     for o in &outcomes {
@@ -123,11 +163,11 @@ fn run_tests(client: &RpcClient, path: &str) -> Result<(), Box<dyn Error>> {
         } else {
             format!("reverted ({})", o.actual.error.as_deref().unwrap_or("error"))
         };
-        if o.pass {
-            passed += 1;
-            println!("  PASS  {}  (expected: {}; got: {})", o.name, o.expect, got);
-        } else {
-            println!("  FAIL  {}  (expected: {}; got: {})", o.name, o.expect, got);
+        let mark = if o.pass { passed += 1; "PASS" } else { "FAIL" };
+        println!("  {mark}  {}  (expect: {}; got: {})", o.name, o.expect, got);
+        for a in &o.asserts {
+            let am = if a.pass { "✓" } else { "✗" };
+            println!("          {am} assert {}", a.description);
         }
     }
 

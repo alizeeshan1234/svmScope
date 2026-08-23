@@ -76,7 +76,10 @@ async fn simulate_handler(
 async fn suite_handler(
     Json(req): Json<SuiteRequest>,
 ) -> Result<Json<Vec<ScenarioOutcome>>, (StatusCode, String)> {
-    let signature = req.signature.clone();
+    let signature = req
+        .signature
+        .clone()
+        .ok_or((StatusCode::BAD_REQUEST, "signature is required".to_string()))?;
     let scenarios = req
         .scenarios
         .into_iter()
@@ -97,13 +100,31 @@ async fn suite_handler(
     }
 }
 
+/// GET /freeze/:signature — capture a self-contained fixture for offline replay.
+async fn freeze_handler(
+    Path(signature): Path<String>,
+) -> Result<Json<svmscope::fixture::Fixture>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let client = RpcClient::new(RPC_URL.to_string());
+        svmscope::capture_fixture(&client, &signature)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+
+    match result {
+        Ok(fx) => Ok(Json(fx)),
+        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let app = Router::new()
         .route("/", get(index))
         .route("/analyze/{signature}", get(analyze_handler))
         .route("/simulate", post(simulate_handler))
-        .route("/simulate_suite", post(suite_handler));
+        .route("/simulate_suite", post(suite_handler))
+        .route("/freeze/{signature}", get(freeze_handler));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
