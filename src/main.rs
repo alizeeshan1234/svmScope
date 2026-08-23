@@ -6,6 +6,7 @@
 mod compute;
 mod cpi_tree;
 mod diffs;
+mod state;
 mod utils;
 
 use serde_json::json;
@@ -46,6 +47,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("\n-- compute units per program --");
     compute::print_cu_per_program(&tx);
+
+    // Stage 2: reconstruct the state the transaction ran against.
+    let account_keys = utils::resolve_account_keys(&tx);
+    println!("\n-- account states --");
+    state::fetch_account_states(&client, &account_keys);
 
     Ok(())
 }
