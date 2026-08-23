@@ -210,6 +210,35 @@
   .editor-actions .spacer { flex: 1; }
   .dirty-count { color: var(--amber); font-size: 12px; font-family: var(--mono); }
 
+  /* one-click what-if scenarios */
+  .whatif-lead { color: var(--dim); font-size: 13.5px; margin: 0 0 15px; max-width: 680px; }
+  .scenarios { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 11px; }
+  .scenario { text-align: left; background: var(--panel-2); border: 1px solid var(--line); border-radius: 13px;
+    padding: 15px 16px; cursor: pointer; transition: border-color .15s, transform .05s, background .15s;
+    display: flex; flex-direction: column; gap: 5px; color: var(--text); font-family: var(--sans); }
+  .scenario:hover { border-color: var(--accent); background: rgba(153,69,255,.06); }
+  .scenario:active { transform: translateY(1px); }
+  .scenario.busy { opacity: .55; pointer-events: none; }
+  .scenario .q { font-weight: 650; font-size: 14.5px; }
+  .scenario .d { color: var(--muted); font-size: 11.5px; font-family: var(--mono); }
+  .scenario .run { margin-top: 5px; color: var(--accent-2); font-size: 12px; font-weight: 650; }
+
+  .verdict { display: flex; gap: 13px; align-items: flex-start; padding: 15px 17px; border-radius: 13px; margin-bottom: 13px; }
+  .verdict.ok { background: var(--green-bg); border: 1px solid rgba(53,208,127,.32); }
+  .verdict.bad { background: var(--red-bg); border: 1px solid rgba(255,92,108,.32); }
+  .verdict .ic { font-size: 24px; line-height: 1; flex: 0 0 auto; }
+  .verdict .vt { font-weight: 750; font-size: 16px; }
+  .verdict .vs { color: var(--dim); font-size: 13px; margin-top: 3px; line-height: 1.5; }
+
+  details.advanced { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 8px; }
+  details.advanced > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px;
+    padding: 10px 2px; color: var(--dim); font-size: 12.5px; font-weight: 600; user-select: none; }
+  details.advanced > summary::-webkit-details-marker { display: none; }
+  details.advanced > summary::before { content: '▸'; color: var(--muted); transition: transform .15s; }
+  details.advanced[open] > summary::before { transform: rotate(90deg); }
+  details.advanced > summary:hover { color: var(--text); }
+  details.advanced .adv-body { padding-top: 8px; }
+
   .staged-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin: 6px 0; background: var(--panel-2);
     border: 1px solid var(--line); border-left: 3px solid var(--amber); border-radius: 9px; font-family: var(--mono); font-size: 12px; }
   .staged-item .k { color: var(--amber); font-weight: 650; }
@@ -265,24 +294,33 @@
       <div class="card full" style="margin-top:16px"><h2>Local replay</h2><div id="replay"></div></div>
 
       <div class="card full" style="margin-top:16px">
-        <h2>What-if simulation <span id="acctCount" class="count"></span></h2>
-        <div class="editor-toolbar">
-          <input id="acctFilter" class="filter" placeholder="filter accounts by name, address or type…" spellcheck="false" />
-          <span id="acctSummary" class="summary"></span>
-          <button class="btn ghost sm" id="expandAll">Expand all</button>
-        </div>
-        <div id="acctList"></div>
-        <div class="editor-actions">
-          <button class="btn ghost sm" id="stageBtn">＋ Stage all changes</button>
-          <span class="spacer"></span>
-          <span id="dirtyCount" class="dirty-count"></span>
-          <button class="btn" id="simBtn">Simulate ⟶</button>
-        </div>
-        <div id="stagedWrap" class="hidden">
-          <div style="font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin:18px 0 2px;font-weight:600">Staged mutations</div>
-          <div id="staged"></div>
-        </div>
+        <h2>What-if simulation</h2>
+        <p class="whatif-lead">Pick a question and hit run. svmscope changes that one thing, replays the real
+           programs locally, and tells you in plain English what would happen.</p>
+        <div id="scenarios" class="scenarios"></div>
         <div id="simResult" class="sim-result"></div>
+
+        <details class="advanced">
+          <summary>Advanced — edit any account field yourself <span id="acctCount" class="count"></span></summary>
+          <div class="adv-body">
+            <div class="editor-toolbar">
+              <input id="acctFilter" class="filter" placeholder="filter accounts by name, address or type…" spellcheck="false" />
+              <span id="acctSummary" class="summary"></span>
+              <button class="btn ghost sm" id="expandAll">Expand all</button>
+            </div>
+            <div id="acctList"></div>
+            <div class="editor-actions">
+              <button class="btn ghost sm" id="stageBtn">＋ Stage all changes</button>
+              <span class="spacer"></span>
+              <span id="dirtyCount" class="dirty-count"></span>
+              <button class="btn" id="simBtn">Simulate ⟶</button>
+            </div>
+            <div id="stagedWrap" class="hidden">
+              <div style="font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin:18px 0 2px;font-weight:600">Staged mutations</div>
+              <div id="staged"></div>
+            </div>
+          </div>
+        </details>
       </div>
     </div>
   </main>
@@ -509,6 +547,90 @@ function renderReplay(r) {
   return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${err}${logs}`;
 }
 
+// ---------------- one-click what-if scenarios ----------------
+function u64ToLeHex(bi) { let x = bi & 0xffffffffffffffffn, h = ''; for (let i = 0; i < 8; i++) { h += (x & 0xffn).toString(16).padStart(2, '0'); x >>= 8n; } return h; }
+
+// Auto-generate plain-English what-ifs from the transaction's own accounts.
+function buildScenarios() {
+  const out = [];
+  const toks = mutableAccounts
+    .filter(a => a.decoded && a.decoded.type_name === 'SPL Token Account')
+    .map(a => {
+      const amt = BigInt(a.decoded.fields.find(f => f.name === 'amount').value);
+      const mint = a.decoded.fields.find(f => f.name === 'mint').value;
+      const mi = mintInfo(mint);
+      return { a, amt, mint, sym: mi.sym, dec: mi.dec ?? 0, known: mi.known };
+    })
+    .filter(x => x.amt > 0n)
+    .sort((p, q) => (q.amt > p.amt ? 1 : q.amt < p.amt ? -1 : 0));
+
+  // Drain the two largest token accounts (usually a pool's reserves).
+  const tokName = (t) => t.known ? `the ${t.sym} account ${short(t.a.address)}` : `token account ${short(t.a.address)}`;
+  toks.slice(0, 2).forEach(t => out.push({
+    icon: '🫗', q: `Empty ${tokName(t)}`,
+    d: `balance ${fmtToken(t.amt.toString(), t.dec)} → 0`,
+    muts: [{ kind: 'data', address: t.a.address, offset: 64, bytes_hex: '0000000000000000' }],
+  }));
+  // Double the largest token balance.
+  if (toks.length) {
+    const t = toks[0];
+    out.push({
+      icon: '💰', q: `Double ${tokName(t)}`,
+      d: `balance → 2× (${fmtToken((t.amt * 2n).toString(), t.dec)})`,
+      muts: [{ kind: 'data', address: t.a.address, offset: 64, bytes_hex: u64ToLeHex(t.amt * 2n) }],
+    });
+  }
+  // Make the biggest SOL holder broke.
+  const wallets = mutableAccounts.filter(a => a.owner === SYSTEM_PROGRAM).sort((p, q) => q.lamports - p.lamports);
+  if (wallets.length && wallets[0].lamports > 0) {
+    out.push({
+      icon: '🪙', q: `Zero out the largest SOL wallet`,
+      d: `${short(wallets[0].address)} · ${fmtSol(wallets[0].lamports)} → 0`,
+      muts: [{ kind: 'lamports', address: wallets[0].address, lamports: 0 }],
+    });
+  }
+  return out;
+}
+function renderScenarios() {
+  const scns = buildScenarios();
+  if (!scns.length) { $('scenarios').innerHTML = '<div class="empty">No quick what-ifs for this transaction — use the advanced editor below.</div>'; return; }
+  $('scenarios').innerHTML = scns.map((s, i) =>
+    `<button class="scenario" data-i="${i}" type="button">
+       <span class="q">${s.icon} ${esc(s.q)}</span>
+       <span class="d">${esc(s.d)}</span>
+       <span class="run">▶ Run this what-if</span>
+     </button>`).join('');
+  $('scenarios').querySelectorAll('.scenario').forEach(b =>
+    b.addEventListener('click', () => runScenario(scns[Number(b.dataset.i)], b)));
+}
+async function runScenario(scn, el) {
+  if (!currentSig) return;
+  el.classList.add('busy');
+  $('simResult').innerHTML = `<div class="status" style="text-align:left;margin:8px 0"><span class="spinner"></span>replaying “${esc(scn.q)}”…</div>`;
+  try {
+    const res = await fetch('/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signature: currentSig, mutations: scn.muts }) });
+    if (!res.ok) throw new Error(await res.text());
+    showResult(analysis.replay, await res.json(), { scenarioQ: scn.q });
+  } catch (e) { flashSim('error: ' + e.message, true); }
+  finally { el.classList.remove('busy'); }
+}
+
+// Translate a failure into a plain-English reason (best effort, from the logs).
+function friendlyReason(after) {
+  for (const l of (after.logs || [])) {
+    let m = l.match(/Error Message:\s*(.+?)\.?$/); if (m) return m[1];
+    if (/insufficient funds/i.test(l)) return 'an account had insufficient funds';
+    if (/slippage/i.test(l)) return 'the price moved past the slippage limit';
+  }
+  if (after.error) {
+    if (/AccountNotFound/.test(after.error)) return 'an account no longer exists (0 lamports means it was deleted)';
+    if (/InsufficientFunds/i.test(after.error)) return 'an account had insufficient funds';
+    return after.error;
+  }
+  return 'the transaction was rejected';
+}
+
 // ---------------- what-if editor ----------------
 function accountHint(a) {
   if (a.decoded) {
@@ -711,6 +833,7 @@ async function analyze() {
     $('replay').innerHTML = renderReplay(analysis.replay);
     renderStaged(); flashSim('');
     renderAccountList();
+    renderScenarios();
     $('acctFilter').value = ''; $('expandAll').textContent = 'Expand all';
     wireCopy($('out'));
     st.classList.add('hidden'); $('out').classList.remove('hidden');
@@ -728,28 +851,42 @@ async function simulate() {
     const res = await fetch('/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m) }) });
     if (!res.ok) throw new Error(await res.text());
-    renderComparison(analysis.replay, await res.json(), toSend.length);
+    showResult(analysis.replay, await res.json(), { n: toSend.length });
   } catch (e) { flashSim('error: ' + e.message, true); }
   finally { btn.disabled = false; }
 }
-function renderComparison(before, after, n) {
+// One result renderer for both quick scenarios and the advanced editor.
+// Leads with a plain-English verdict, then the original→mutated comparison.
+function showResult(before, after, opts) {
+  const flipped = before.success !== after.success;
+  let ic, cls, vt, vs;
+  if (after.success) {
+    ic = '✅'; cls = 'ok'; vt = flipped ? 'It would now succeed' : 'It still succeeds';
+    vs = flipped ? 'Your change turned a failing transaction into a passing one.'
+                 : 'The transaction still goes through after your change.';
+  } else {
+    ic = '❌'; cls = 'bad'; vt = flipped ? 'It would now fail' : 'It still fails';
+    vs = 'Reason: ' + friendlyReason(after) + '.';
+  }
   const chip = (r) => r.success ? '<span class="badge ok"><span class="b-dot"></span>success</span>' : '<span class="badge fail"><span class="b-dot"></span>failed</span>';
   const dCU = after.compute_units - before.compute_units;
   const dc = dCU > 0 ? 'up' : dCU < 0 ? 'down' : 'same';
   const dt = dCU === 0 ? 'no change in compute' : `${dCU > 0 ? '+' : ''}${fmt(dCU)} CU vs. original`;
-  const flip = before.success !== after.success
-    ? `<div class="delta ${after.success ? 'up' : 'down'}">outcome flipped: ${before.success ? 'success → failed' : 'failed → success'}</div>` : '';
+  const head = opts.scenarioQ
+    ? `What-if · <span style="color:var(--text)">${esc(opts.scenarioQ)}</span>`
+    : `Mutated replay · ${opts.n} mutation${opts.n > 1 ? 's' : ''} applied`;
   $('simResult').innerHTML = `
-    <div style="font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin:6px 0 10px;font-weight:600">
-      Mutated replay <span style="color:var(--amber)">· ${n} mutation${n > 1 ? 's' : ''} applied</span></div>
+    <div class="verdict ${cls}"><div class="ic">${ic}</div><div><div class="vt">${vt}</div><div class="vs">${esc(vs)}</div></div></div>
+    <div style="font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin:2px 0 10px;font-weight:600">${head}</div>
     <div class="compare">
-      <div class="compare-col"><div class="lbl">Original</div>${chip(before)}<div class="cu-note" style="margin-top:8px"><b>${fmt(before.compute_units)}</b> CU</div></div>
+      <div class="compare-col"><div class="lbl">Original transaction</div>${chip(before)}<div class="cu-note" style="margin-top:8px"><b>${fmt(before.compute_units)}</b> CU</div></div>
       <div class="arrow">→</div>
-      <div class="compare-col"><div class="lbl">Mutated</div>${chip(after)}<div class="cu-note" style="margin-top:8px"><b>${fmt(after.compute_units)}</b> CU</div>
-        <div class="delta ${dc}">${dt}</div>${flip}</div>
+      <div class="compare-col"><div class="lbl">With your change</div>${chip(after)}<div class="cu-note" style="margin-top:8px"><b>${fmt(after.compute_units)}</b> CU</div>
+        <div class="delta ${dc}">${dt}</div></div>
     </div>
     ${after.error ? `<div class="err-box">${esc(after.error)}</div>` : ''}
     ${after.logs && after.logs.length ? `<div class="logs">${after.logs.map(fmtLog).join('')}</div>` : ''}`;
+  $('simResult').scrollIntoView({ block: 'nearest' });
 }
 
 $('go').addEventListener('click', analyze);
