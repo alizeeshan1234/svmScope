@@ -44,8 +44,17 @@ fn fetch_account_data(client: &RpcClient, address: &str) -> Option<Vec<u8>> {
     Some(b64_decode(data_b64))
 }
 
-/// Build a LiteSVM instance with the transaction's accounts and programs loaded.
-pub fn build_svm(client: &RpcClient, account_keys: &[String]) -> LiteSVM {
+/// A ready-to-load account: either raw data, or a program's ELF bytecode.
+enum Loaded {
+    Data(Account),
+    Program(Vec<u8>),
+}
+
+/// Fetch each account's on-chain state and resolve program ELFs into loadables.
+///
+/// This does all the network I/O; building a fresh SVM from the result is then
+/// free, which is what lets a whole scenario suite run without re-fetching.
+fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Vec<(Address, Loaded)> {
     let resp: serde_json::Value = client
         .send(
             RpcRequest::GetMultipleAccounts,
@@ -53,23 +62,13 @@ pub fn build_svm(client: &RpcClient, account_keys: &[String]) -> LiteSVM {
         )
         .expect("getMultipleAccounts failed");
 
-    let accounts = resp["value"]
-        .as_array()
-        .expect("value should be an array");
-
-    // Disable sigverify + blockhash check: we're replaying an already-signed
-    // transaction, so its original blockhash won't be valid in a fresh SVM.
-    let mut svm = LiteSVM::new()
-        .with_sigverify(false)
-        .with_blockhash_check(false);
-    let mut loaded = 0;
-    let mut programs = 0;
+    let accounts = resp["value"].as_array().expect("value should be an array");
+    let mut out: Vec<(Address, Loaded)> = Vec::new();
 
     for (i, acc) in accounts.iter().enumerate() {
         if acc.is_null() {
             continue; // account doesn't exist (created during the tx, etc.)
         }
-
         let address = Address::from_str(&account_keys[i]).expect("bad account address");
         let owner = acc["owner"].as_str().unwrap();
         let executable = acc["executable"].as_bool().unwrap();
@@ -79,12 +78,10 @@ pub fn build_svm(client: &RpcClient, account_keys: &[String]) -> LiteSVM {
             let elf: Option<Vec<u8>> = if owner == NATIVE_LOADER {
                 None // native programs are built into LiteSVM
             } else if owner == BPF_LOADER_2 {
-                // Non-upgradeable: the ELF is the account data itself.
                 Some(b64_decode(acc["data"][0].as_str().unwrap()))
             } else if owner == BPF_LOADER_UPGRADEABLE {
-                // Upgradeable: the program account is a pointer.
-                // bytes 4..36 = the programdata account address; ELF starts at
-                // offset 45 inside that programdata account.
+                // Upgradeable: program account is a pointer; bytes 4..36 = the
+                // programdata address, ELF starts at offset 45 inside it.
                 let prog = b64_decode(acc["data"][0].as_str().unwrap());
                 if prog.len() >= 36 {
                     let pd_bytes: [u8; 32] = prog[4..36].try_into().unwrap();
@@ -96,36 +93,84 @@ pub fn build_svm(client: &RpcClient, account_keys: &[String]) -> LiteSVM {
                     None
                 }
             } else {
-                None // unknown loader
+                None
             };
-
             if let Some(elf) = elf {
-                match svm.add_program(address, &elf) {
-                    Ok(()) => programs += 1,
-                    Err(e) => eprintln!("warn: skipped program {}: {:?}", account_keys[i], e),
-                }
+                out.push((address, Loaded::Program(elf)));
             }
             continue;
         }
 
-        // Data account: load it verbatim.
         let owner_addr = Address::from_str(owner).expect("bad owner address");
-        let lamports = acc["lamports"].as_u64().unwrap();
-        let data = b64_decode(acc["data"][0].as_str().unwrap());
-
-        let account = Account {
-            lamports,
-            data,
-            owner: owner_addr,
-            executable: false,
-            rent_epoch: 0,
-        };
-        svm.set_account(address, account).expect("set_account failed");
-        loaded += 1;
+        out.push((
+            address,
+            Loaded::Data(Account {
+                lamports: acc["lamports"].as_u64().unwrap(),
+                data: b64_decode(acc["data"][0].as_str().unwrap()),
+                owner: owner_addr,
+                executable: false,
+                rent_epoch: 0,
+            }),
+        ));
     }
+    out
+}
 
-    eprintln!("loaded {loaded} data accounts and {programs} programs into the SVM");
+/// Build a fresh LiteSVM from already-fetched loadables (no network).
+fn svm_from_loaded(loaded: &[(Address, Loaded)]) -> LiteSVM {
+    // Disable sigverify + blockhash check: we're replaying an already-signed
+    // transaction, so its original blockhash won't be valid in a fresh SVM.
+    let mut svm = LiteSVM::new()
+        .with_sigverify(false)
+        .with_blockhash_check(false);
+    for (addr, l) in loaded {
+        match l {
+            Loaded::Data(a) => {
+                svm.set_account(*addr, a.clone()).expect("set_account failed");
+            }
+            Loaded::Program(elf) => {
+                if let Err(e) = svm.add_program(*addr, elf) {
+                    eprintln!("warn: skipped program {addr}: {e:?}");
+                }
+            }
+        }
+    }
     svm
+}
+
+/// The reconstructed world a transaction ran in, fetched once. Run any number of
+/// scenarios against it with [`ReplayContext::run`] — each gets a pristine SVM.
+pub struct ReplayContext {
+    tx: VersionedTransaction,
+    loaded: Vec<(Address, Loaded)>,
+}
+
+impl ReplayContext {
+    /// Replay the transaction after applying `mutations` to a fresh copy of the
+    /// state. Repeatable and side-effect-free across calls.
+    pub fn run(&self, mutations: &[Mutation]) -> ReplayResult {
+        let mut svm = svm_from_loaded(&self.loaded);
+        for m in mutations {
+            if let Err(e) = apply_mutation(&mut svm, m) {
+                return ReplayResult { success: false, error: Some(e), logs: vec![], compute_units: 0 };
+            }
+        }
+        to_replay_result(svm.send_transaction(self.tx.clone()))
+    }
+}
+
+/// Fetch everything needed to replay `signature` (transaction + all touched
+/// accounts + program ELFs, including Address Lookup Table accounts) once.
+pub fn build_context(client: &RpcClient, signature: &str, account_keys: &[String]) -> ReplayContext {
+    let tx = fetch_transaction(client, signature);
+    let mut all_keys = account_keys.to_vec();
+    if let Some(lookups) = tx.message.address_table_lookups() {
+        for l in lookups {
+            all_keys.push(l.account_key.to_string());
+        }
+    }
+    let loaded = fetch_loaded(client, &all_keys);
+    ReplayContext { tx, loaded }
 }
 
 /// Fetch the raw transaction (base64 wire bytes) and deserialize it.
@@ -187,26 +232,6 @@ fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<(), String> {
         .map_err(|e| format!("set_account failed for {address}: {e:?}"))
 }
 
-/// Shared setup: fetch the transaction, load the Address Lookup Table accounts it
-/// references (so the SVM can resolve a versioned tx), and build the SVM.
-fn setup(
-    client: &RpcClient,
-    signature: &str,
-    account_keys: &[String],
-) -> (LiteSVM, VersionedTransaction) {
-    let tx = fetch_transaction(client, signature);
-
-    let mut all_keys = account_keys.to_vec();
-    if let Some(lookups) = tx.message.address_table_lookups() {
-        for l in lookups {
-            all_keys.push(l.account_key.to_string());
-        }
-    }
-
-    let svm = build_svm(client, &all_keys);
-    (svm, tx)
-}
-
 /// Convert a raw transaction result into a `ReplayResult`.
 ///
 /// This does NOT print — it just extracts the data. The caller (CLI or a UI)
@@ -230,9 +255,7 @@ fn to_replay_result(result: TransactionResult) -> ReplayResult {
 
 /// Replay the transaction against the reconstructed state.
 pub fn replay_transaction(client: &RpcClient, signature: &str, account_keys: &[String]) -> ReplayResult {
-    let (mut svm, tx) = setup(client, signature, account_keys);
-    let result = svm.send_transaction(tx);
-    to_replay_result(result)
+    build_context(client, signature, account_keys).run(&[])
 }
 
 /// Replay the transaction after applying the given mutations.
@@ -242,19 +265,81 @@ pub fn mutate_and_replay(
     account_keys: &[String],
     mutations: &[Mutation],
 ) -> ReplayResult {
-    let (mut svm, tx) = setup(client, signature, account_keys);
+    build_context(client, signature, account_keys).run(mutations)
+}
 
-    for m in mutations {
-        if let Err(e) = apply_mutation(&mut svm, m) {
-            return ReplayResult {
-                success: false,
-                error: Some(e),
-                logs: vec![],
-                compute_units: 0,
-            };
+// ---------------------------------------------------------------------------
+// Scenario testing: assert expected outcomes across a suite of what-ifs.
+// ---------------------------------------------------------------------------
+
+/// The outcome a scenario asserts.
+pub enum Expect {
+    /// The transaction must succeed.
+    Success,
+    /// The transaction must fail (any error).
+    Revert,
+    /// The transaction must fail *and* the error or a log line contains this text
+    /// (e.g. an error code `Custom(6025)` or a message `DivisionByZero`).
+    RevertContains(String),
+    /// No assertion — just report what happened.
+    Any,
+}
+
+impl Expect {
+    fn matches(&self, r: &ReplayResult) -> bool {
+        match self {
+            Expect::Success => r.success,
+            Expect::Revert => !r.success,
+            Expect::RevertContains(s) => {
+                !r.success
+                    && (r.error.as_deref().is_some_and(|e| e.contains(s))
+                        || r.logs.iter().any(|l| l.contains(s)))
+            }
+            Expect::Any => true,
         }
     }
 
-    let result = svm.send_transaction(tx);
-    to_replay_result(result)
+    fn describe(&self) -> String {
+        match self {
+            Expect::Success => "succeeds".into(),
+            Expect::Revert => "reverts".into(),
+            Expect::RevertContains(s) => format!("reverts with \"{s}\""),
+            Expect::Any => "any outcome".into(),
+        }
+    }
+}
+
+/// One named test case: a set of mutations plus the outcome it asserts.
+pub struct ScenarioSpec {
+    pub name: String,
+    pub mutations: Vec<Mutation>,
+    pub expect: Expect,
+}
+
+/// The result of running one scenario.
+#[derive(serde::Serialize)]
+pub struct ScenarioOutcome {
+    pub name: String,
+    /// Human description of what was asserted, e.g. `reverts with "DivisionByZero"`.
+    pub expect: String,
+    /// Whether the actual replay matched the assertion.
+    pub pass: bool,
+    pub actual: ReplayResult,
+}
+
+/// Run a suite of scenarios against one pre-fetched context and report pass/fail.
+pub fn run_suite(ctx: &ReplayContext, scenarios: &[ScenarioSpec]) -> Vec<ScenarioOutcome> {
+    scenarios
+        .iter()
+        .map(|s| {
+            let actual = ctx.run(&s.mutations);
+            let pass = s.expect.matches(&actual);
+            ScenarioOutcome {
+                name: s.name.clone(),
+                expect: s.expect.describe(),
+                pass,
+                actual,
+            }
+        })
+        .collect()
 }

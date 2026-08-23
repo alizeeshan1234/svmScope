@@ -9,17 +9,25 @@ use solana_client::rpc_request::RpcRequest;
 use std::env;
 use std::error::Error;
 
-use svmscope::{analyze, compute, cpi_tree, diffs, replay, state, utils};
+use svmscope::{analyze, api, compute, cpi_tree, diffs, replay, simulate_suite, state, utils};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
 
     let signature = args
         .get(1)
-        .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]")?;
+        .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]\n       svmscope test <scenarios.json>")?;
+
+    let client = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
+
+    // Test-runner mode: `svmscope test <scenarios.json>` runs a scenario suite
+    // and exits non-zero if any assertion fails — drop it straight into CI.
+    if signature == "test" {
+        let path = args.get(2).ok_or("usage: svmscope test <scenarios.json>")?;
+        return run_tests(&client, path);
+    }
 
     let json_mode = args.iter().any(|a| a == "--json");
-    let client = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
 
     // JSON mode: emit the whole analysis as one JSON blob and stop.
     if json_mode {
@@ -90,6 +98,44 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_replay("MUTATED REPLAY", &mutated);
     }
 
+    Ok(())
+}
+
+/// Run a scenario suite from a JSON file and print a test-runner report.
+/// Exits the process with code 1 if any scenario fails its assertion.
+fn run_tests(client: &RpcClient, path: &str) -> Result<(), Box<dyn Error>> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let req: api::SuiteRequest = serde_json::from_str(&text).map_err(|e| format!("bad scenario file: {e}"))?;
+
+    let scenarios = req
+        .scenarios
+        .into_iter()
+        .map(|s| s.into_spec())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    println!("svmscope test — {} ({} scenarios)\n", req.signature, scenarios.len());
+    let outcomes = simulate_suite(client, &req.signature, scenarios)?;
+
+    let mut passed = 0;
+    for o in &outcomes {
+        let got = if o.actual.success {
+            "succeeded".to_string()
+        } else {
+            format!("reverted ({})", o.actual.error.as_deref().unwrap_or("error"))
+        };
+        if o.pass {
+            passed += 1;
+            println!("  PASS  {}  (expected: {}; got: {})", o.name, o.expect, got);
+        } else {
+            println!("  FAIL  {}  (expected: {}; got: {})", o.name, o.expect, got);
+        }
+    }
+
+    let total = outcomes.len();
+    println!("\n{passed}/{total} passed");
+    if passed != total {
+        std::process::exit(1);
+    }
     Ok(())
 }
 

@@ -2,6 +2,7 @@
 //!
 //! Shared by the CLI (`main.rs`) and the web server (`bin/server.rs`).
 
+pub mod api;
 pub mod compute;
 pub mod cpi_tree;
 pub mod decode;
@@ -105,4 +106,25 @@ pub fn simulate(
 
     let account_keys = utils::resolve_account_keys(&tx);
     Ok(replay::mutate_and_replay(client, signature, &account_keys, mutations))
+}
+
+/// Run a suite of test scenarios against one transaction. State is fetched once
+/// and every scenario replays against a fresh copy — the core of the tester.
+pub fn simulate_suite(
+    client: &RpcClient,
+    signature: &str,
+    scenarios: Vec<replay::ScenarioSpec>,
+) -> Result<Vec<replay::ScenarioOutcome>, String> {
+    let tx: serde_json::Value = client
+        .send(
+            RpcRequest::GetTransaction,
+            json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
+        )
+        .map_err(|e| format!("RPC error: {e}"))?;
+    if tx.is_null() {
+        return Err(format!("transaction not found: {signature}"));
+    }
+    let account_keys = utils::resolve_account_keys(&tx);
+    let ctx = replay::build_context(client, signature, &account_keys);
+    Ok(replay::run_suite(&ctx, &scenarios))
 }

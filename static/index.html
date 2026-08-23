@@ -223,6 +223,40 @@
   .scenario .d { color: var(--muted); font-size: 11.5px; font-family: var(--mono); }
   .scenario .run { margin-top: 5px; color: var(--accent-2); font-size: 12px; font-weight: 650; }
 
+  /* scenario test suite */
+  .suite-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .suite-toolbar .spacer { flex: 1; }
+  .suite-result { font-family: var(--mono); font-size: 13px; font-weight: 650; }
+  .suite-result.pass { color: var(--green); } .suite-result.fail { color: var(--red); }
+
+  .suite { display: flex; flex-direction: column; gap: 8px; }
+  .srow { border: 1px solid var(--line); border-left: 3px solid var(--line-2); border-radius: 11px;
+    background: var(--panel-2); overflow: hidden; transition: border-color .15s; }
+  .srow.pass { border-left-color: var(--green); }
+  .srow.fail { border-left-color: var(--red); }
+  .srow-head { display: flex; align-items: center; gap: 12px; padding: 11px 14px; }
+  .srow .st { width: 20px; flex: 0 0 auto; text-align: center; font-size: 14px; }
+  .srow .st .pend { color: var(--muted); }
+  .srow .info { flex: 1; min-width: 0; }
+  .srow .nm { font-weight: 600; font-size: 13.5px; }
+  .srow .ch { color: var(--muted); font-family: var(--mono); font-size: 11.5px; margin-top: 2px; }
+  .srow .expect-sel { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+  .srow .expect-sel label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); }
+  .srow select.exp { background: var(--panel); border: 1px solid var(--line-2); color: var(--text);
+    padding: 5px 8px; border-radius: 7px; font-size: 12px; font-family: var(--mono); }
+  .srow input.contains { background: var(--panel); border: 1px solid var(--line-2); color: var(--text);
+    padding: 5px 8px; border-radius: 7px; font-size: 11.5px; font-family: var(--mono); width: 130px; }
+  .srow .got { font-family: var(--mono); font-size: 11.5px; color: var(--dim); flex: 0 0 auto; max-width: 260px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .srow .rm { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 15px; padding: 0 2px; flex: 0 0 auto; }
+  .srow .rm:hover { color: var(--red); }
+  .srow-logs { border-top: 1px solid var(--line); padding: 10px 14px; background: var(--bg); }
+
+  .export-box { margin-top: 12px; }
+  .export-box pre { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+    overflow: auto; max-height: 320px; font-family: var(--mono); font-size: 11.5px; color: var(--dim); margin: 0; }
+  .export-box .cmd { color: var(--accent-2); font-family: var(--mono); font-size: 12px; margin: 8px 0 0; }
+
   .verdict { display: flex; gap: 13px; align-items: flex-start; padding: 15px 17px; border-radius: 13px; margin-bottom: 13px; }
   .verdict.ok { background: var(--green-bg); border: 1px solid rgba(53,208,127,.32); }
   .verdict.bad { background: var(--red-bg); border: 1px solid rgba(255,92,108,.32); }
@@ -294,15 +328,25 @@
       <div class="card full" style="margin-top:16px"><h2>Local replay</h2><div id="replay"></div></div>
 
       <div class="card full" style="margin-top:16px">
-        <h2>What-if simulation</h2>
-        <p class="whatif-lead">Pick a question and hit run. svmscope changes that one thing, replays the real
-           programs locally, and tells you in plain English what would happen.</p>
-        <div id="scenarios" class="scenarios"></div>
-        <div id="simResult" class="sim-result"></div>
+        <h2>Scenario tests <span id="suiteSummary" class="count"></span></h2>
+        <p class="whatif-lead">svmscope replays the <em>real</em> programs against edited state, so you can assert what
+           <em>should</em> happen in each edge case — with no test harness to write. It starts you with a
+           suite auto-generated from this transaction; tweak the expectations, run them, and export the
+           suite to run in CI with <code>svmscope test suite.json</code>.</p>
+        <div class="suite-toolbar">
+          <button class="btn" id="runSuite">▶ Run all tests</button>
+          <span class="spacer"></span>
+          <span id="suiteResult" class="suite-result"></span>
+          <button class="btn ghost sm" id="exportSuite">⤓ Export suite</button>
+        </div>
+        <div id="suite" class="suite"></div>
+        <div id="exportBox" class="export-box hidden"></div>
 
         <details class="advanced">
-          <summary>Advanced — edit any account field yourself <span id="acctCount" class="count"></span></summary>
+          <summary>Advanced — edit account fields &amp; add a custom scenario <span id="acctCount" class="count"></span></summary>
           <div class="adv-body">
+            <p class="whatif-lead" style="margin-bottom:12px">Edit any field below, then <b>Stage</b> your changes and
+               <b>Add as test scenario</b> to drop them into the suite above — or just <b>Simulate</b> once to preview.</p>
             <div class="editor-toolbar">
               <input id="acctFilter" class="filter" placeholder="filter accounts by name, address or type…" spellcheck="false" />
               <span id="acctSummary" class="summary"></span>
@@ -313,12 +357,14 @@
               <button class="btn ghost sm" id="stageBtn">＋ Stage all changes</button>
               <span class="spacer"></span>
               <span id="dirtyCount" class="dirty-count"></span>
+              <button class="btn ghost sm" id="addScenario">＋ Add as test scenario</button>
               <button class="btn" id="simBtn">Simulate ⟶</button>
             </div>
             <div id="stagedWrap" class="hidden">
               <div style="font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin:18px 0 2px;font-weight:600">Staged mutations</div>
               <div id="staged"></div>
             </div>
+            <div id="simResult" class="sim-result"></div>
           </div>
         </details>
       </div>
@@ -550,70 +596,127 @@ function renderReplay(r) {
 // ---------------- one-click what-if scenarios ----------------
 function u64ToLeHex(bi) { let x = bi & 0xffffffffffffffffn, h = ''; for (let i = 0; i < 8; i++) { h += (x & 0xffn).toString(16).padStart(2, '0'); x >>= 8n; } return h; }
 
-// Auto-generate plain-English what-ifs from the transaction's own accounts.
-function buildScenarios() {
-  const out = [];
+let suiteRows = [], rowSeq = 0;
+const rowById = (id) => suiteRows.find(r => String(r.id) === String(id));
+const makeRow = (name, muts, expect, changeText, contains = '') =>
+  ({ id: ++rowSeq, name, muts, expect, changeText, contains, status: null, got: '', actual: null, _open: false });
+
+// Seed a starter test suite from the transaction's own accounts — the edge cases
+// a developer of this kind of program would want to have covered.
+function buildSuite() {
+  suiteRows = [];
+  suiteRows.push(makeRow('Baseline — transaction unchanged', [], analysis.replay.success ? 'success' : 'any', 'no changes'));
+
   const toks = mutableAccounts
     .filter(a => a.decoded && a.decoded.type_name === 'SPL Token Account')
     .map(a => {
       const amt = BigInt(a.decoded.fields.find(f => f.name === 'amount').value);
       const mint = a.decoded.fields.find(f => f.name === 'mint').value;
       const mi = mintInfo(mint);
-      return { a, amt, mint, sym: mi.sym, dec: mi.dec ?? 0, known: mi.known };
+      return { a, amt, dec: mi.dec ?? 0, known: mi.known, sym: mi.sym };
     })
     .filter(x => x.amt > 0n)
     .sort((p, q) => (q.amt > p.amt ? 1 : q.amt < p.amt ? -1 : 0));
+  const nm = (t) => t.known ? `${t.sym} account ${short(t.a.address)}` : `token account ${short(t.a.address)}`;
 
-  // Drain the two largest token accounts (usually a pool's reserves).
-  const tokName = (t) => t.known ? `the ${t.sym} account ${short(t.a.address)}` : `token account ${short(t.a.address)}`;
-  toks.slice(0, 2).forEach(t => out.push({
-    icon: '🫗', q: `Empty ${tokName(t)}`,
-    d: `balance ${fmtToken(t.amt.toString(), t.dec)} → 0`,
-    muts: [{ kind: 'data', address: t.a.address, offset: 64, bytes_hex: '0000000000000000' }],
-  }));
-  // Double the largest token balance.
+  toks.slice(0, 2).forEach(t => suiteRows.push(makeRow(
+    `Empty ${nm(t)}`, [{ kind: 'data', address: t.a.address, offset: 64, bytes_hex: '0000000000000000' }],
+    'revert', `token amount ${fmtToken(t.amt.toString(), t.dec)} → 0`)));
   if (toks.length) {
     const t = toks[0];
-    out.push({
-      icon: '💰', q: `Double ${tokName(t)}`,
-      d: `balance → 2× (${fmtToken((t.amt * 2n).toString(), t.dec)})`,
-      muts: [{ kind: 'data', address: t.a.address, offset: 64, bytes_hex: u64ToLeHex(t.amt * 2n) }],
-    });
+    suiteRows.push(makeRow(`Freeze ${nm(t)}`,
+      [{ kind: 'data', address: t.a.address, offset: 108, bytes_hex: '02' }], 'revert', `account state → 2 (frozen)`));
+    suiteRows.push(makeRow(`Double ${nm(t)}`,
+      [{ kind: 'data', address: t.a.address, offset: 64, bytes_hex: u64ToLeHex(t.amt * 2n) }], 'success', `token amount → 2×`));
   }
-  // Make the biggest SOL holder broke.
   const wallets = mutableAccounts.filter(a => a.owner === SYSTEM_PROGRAM).sort((p, q) => q.lamports - p.lamports);
   if (wallets.length && wallets[0].lamports > 0) {
-    out.push({
-      icon: '🪙', q: `Zero out the largest SOL wallet`,
-      d: `${short(wallets[0].address)} · ${fmtSol(wallets[0].lamports)} → 0`,
-      muts: [{ kind: 'lamports', address: wallets[0].address, lamports: 0 }],
-    });
+    suiteRows.push(makeRow('Drain the largest SOL wallet',
+      [{ kind: 'lamports', address: wallets[0].address, lamports: 0 }], 'revert', `${short(wallets[0].address)} → 0 SOL`));
   }
-  return out;
 }
-function renderScenarios() {
-  const scns = buildScenarios();
-  if (!scns.length) { $('scenarios').innerHTML = '<div class="empty">No quick what-ifs for this transaction — use the advanced editor below.</div>'; return; }
-  $('scenarios').innerHTML = scns.map((s, i) =>
-    `<button class="scenario" data-i="${i}" type="button">
-       <span class="q">${s.icon} ${esc(s.q)}</span>
-       <span class="d">${esc(s.d)}</span>
-       <span class="run">▶ Run this what-if</span>
-     </button>`).join('');
-  $('scenarios').querySelectorAll('.scenario').forEach(b =>
-    b.addEventListener('click', () => runScenario(scns[Number(b.dataset.i)], b)));
+function renderSuite() {
+  if (!suiteRows.length) { $('suite').innerHTML = '<div class="empty">No scenarios yet — add one from the advanced editor below.</div>'; $('suiteSummary').textContent = ''; return; }
+  $('suiteSummary').textContent = suiteRows.length + ' scenarios';
+  $('suite').innerHTML = suiteRows.map(r => {
+    const st = r.status === 'pass' ? '✅' : r.status === 'fail' ? '❌' : '<span class="pend">•</span>';
+    const contains = r.expect === 'revert'
+      ? `<input class="contains" data-id="${r.id}" placeholder="error has…" value="${esc(r.contains)}" spellcheck="false" title="optional: require the error/logs to contain this text" />` : '';
+    const logs = (r.actual && r._open) ? `<div class="srow-logs">${renderReplaySmall(r.actual)}</div>` : '';
+    return `<div class="srow ${r.status || ''}" data-id="${r.id}">
+      <div class="srow-head">
+        <div class="st">${st}</div>
+        <div class="info"><div class="nm">${esc(r.name)}</div><div class="ch">${esc(r.changeText)}${r.actual ? ' · click to see logs' : ''}</div></div>
+        <div class="expect-sel"><label>expect</label>
+          <select class="exp" data-id="${r.id}">
+            <option value="success"${r.expect === 'success' ? ' selected' : ''}>succeeds</option>
+            <option value="revert"${r.expect === 'revert' ? ' selected' : ''}>reverts</option>
+            <option value="any"${r.expect === 'any' ? ' selected' : ''}>any</option>
+          </select>${contains}</div>
+        <div class="got">${esc(r.got || '')}</div>
+        <button class="rm" data-id="${r.id}" title="remove">✕</button>
+      </div>${logs}</div>`;
+  }).join('');
+  $('suite').querySelectorAll('select.exp').forEach(s => s.addEventListener('change', () => { const r = rowById(s.dataset.id); r.expect = s.value; r.status = null; r.got = ''; renderSuite(); }));
+  $('suite').querySelectorAll('input.contains').forEach(i => i.addEventListener('input', () => { rowById(i.dataset.id).contains = i.value; }));
+  $('suite').querySelectorAll('.rm').forEach(b => b.addEventListener('click', () => { suiteRows = suiteRows.filter(r => String(r.id) !== b.dataset.id); renderSuite(); }));
+  $('suite').querySelectorAll('.srow .info').forEach(el => el.addEventListener('click', () => { const r = rowById(el.closest('.srow').dataset.id); if (r.actual) { r._open = !r._open; renderSuite(); } }));
 }
-async function runScenario(scn, el) {
-  if (!currentSig) return;
-  el.classList.add('busy');
-  $('simResult').innerHTML = `<div class="status" style="text-align:left;margin:8px 0"><span class="spinner"></span>replaying “${esc(scn.q)}”…</div>`;
+function renderReplaySmall(r) {
+  const err = r.error ? `<div class="err-box" style="margin-top:0">${esc(r.error)}</div>` : '';
+  const logs = r.logs && r.logs.length ? `<div class="logs" style="margin-top:8px;max-height:200px">${r.logs.map(fmtLog).join('')}</div>` : '';
+  return err + logs || '<div class="empty">no logs</div>';
+}
+async function runSuite() {
+  if (!analysis || !suiteRows.length) return;
+  const btn = $('runSuite'); btn.disabled = true;
+  const el = $('suiteResult'); el.className = 'suite-result'; el.innerHTML = '<span class="spinner"></span>running…';
   try {
-    const res = await fetch('/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, mutations: scn.muts }) });
+    const scenarios = suiteRows.map(r => {
+      const s = { name: r.name, expect: r.expect, mutations: r.muts };
+      if (r.expect === 'revert' && r.contains) s.contains = r.contains;
+      return s;
+    });
+    const res = await fetch('/simulate_suite', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signature: currentSig, scenarios }) });
     if (!res.ok) throw new Error(await res.text());
-    showResult(analysis.replay, await res.json(), { scenarioQ: scn.q });
-  } catch (e) { flashSim('error: ' + e.message, true); }
-  finally { el.classList.remove('busy'); }
+    const outcomes = await res.json();
+    outcomes.forEach((o, i) => {
+      const r = suiteRows[i]; r.status = o.pass ? 'pass' : 'fail'; r.actual = o.actual;
+      r.got = o.actual.success ? '✓ succeeded' : `✗ ${friendlyReason(o.actual)}`;
+    });
+    const passed = outcomes.filter(o => o.pass).length;
+    el.className = 'suite-result ' + (passed === outcomes.length ? 'pass' : 'fail');
+    el.textContent = `${passed} / ${outcomes.length} passed`;
+    renderSuite();
+  } catch (e) { el.className = 'suite-result fail'; el.textContent = 'error: ' + e.message; }
+  finally { btn.disabled = false; }
+}
+function exportSuite() {
+  if (!suiteRows.length) return;
+  const spec = { signature: currentSig, scenarios: suiteRows.map(r => {
+    const o = { name: r.name, expect: r.expect };
+    if (r.expect === 'revert' && r.contains) o.contains = r.contains;
+    o.mutations = r.muts; return o;
+  }) };
+  const json = JSON.stringify(spec, null, 2);
+  const box = $('exportBox'); box.classList.remove('hidden');
+  box.innerHTML = `<pre>${esc(json)}</pre>
+    <div class="cmd">▶ save as suite.json, then run in CI: <b>svmscope test suite.json</b> (exits non-zero on any failure)</div>
+    <button class="btn ghost sm" id="copyExport" style="margin-top:10px">Copy JSON</button>`;
+  $('copyExport').addEventListener('click', async () => { try { await navigator.clipboard.writeText(json); } catch {} $('copyExport').textContent = 'Copied ✓'; });
+  box.scrollIntoView({ block: 'nearest' });
+}
+function addScenarioFromEditor() {
+  let muts;
+  try { muts = [...mutations, ...collectAllEdits()]; } catch (e) { flashSim(e.message, true); return; }
+  if (!muts.length) { flashSim('stage or edit a change first, then add it as a scenario', true); return; }
+  const label = muts.map(m => m._label).join(', ');
+  suiteRows.push(makeRow(`Custom — ${label}`, muts.map(({ _label, ...m }) => m), 'any', label));
+  mutations = [];
+  $('acctList').querySelectorAll('input.f-in.dirty').forEach(i => { i.value = i.dataset.cur; i.classList.remove('dirty'); });
+  updateDirtyState(); renderStaged(); renderSuite();
+  flashSim('added to the scenario suite above ✓');
 }
 
 // Translate a failure into a plain-English reason (best effort, from the logs).
@@ -833,7 +936,8 @@ async function analyze() {
     $('replay').innerHTML = renderReplay(analysis.replay);
     renderStaged(); flashSim('');
     renderAccountList();
-    renderScenarios();
+    buildSuite(); renderSuite();
+    $('exportBox').classList.add('hidden'); $('suiteResult').textContent = '';
     $('acctFilter').value = ''; $('expandAll').textContent = 'Expand all';
     wireCopy($('out'));
     st.classList.add('hidden'); $('out').classList.remove('hidden');
@@ -895,6 +999,9 @@ $('acctFilter').addEventListener('input', e => filterAccounts(e.target.value));
 $('expandAll').addEventListener('click', toggleExpandAll);
 $('stageBtn').addEventListener('click', stageAll);
 $('simBtn').addEventListener('click', simulate);
+$('runSuite').addEventListener('click', runSuite);
+$('exportSuite').addEventListener('click', exportSuite);
+$('addScenario').addEventListener('click', addScenarioFromEditor);
 </script>
 </body>
 </html>

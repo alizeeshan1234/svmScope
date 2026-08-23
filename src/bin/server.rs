@@ -11,7 +11,8 @@ use axum::{
 };
 use serde::Deserialize;
 use solana_client::rpc_client::RpcClient;
-use svmscope::replay::{Mutation, ReplayResult};
+use svmscope::api::{MutationInput, SuiteRequest};
+use svmscope::replay::{Mutation, ReplayResult, ScenarioOutcome};
 use svmscope::Analysis;
 
 const RPC_URL: &str = "https://api.mainnet-beta.solana.com";
@@ -21,54 +22,6 @@ const RPC_URL: &str = "https://api.mainnet-beta.solana.com";
 struct SimRequest {
     signature: String,
     mutations: Vec<MutationInput>,
-}
-
-/// One what-if mutation from the UI. `kind` picks the variant:
-/// `{"kind":"lamports","address":..,"lamports":..}` or
-/// `{"kind":"data","address":..,"offset":..,"bytes_hex":".."}` (patch at offset).
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-enum MutationInput {
-    Lamports {
-        address: String,
-        lamports: u64,
-    },
-    Data {
-        address: String,
-        offset: usize,
-        bytes_hex: String,
-    },
-}
-
-fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
-    let s = s.trim().trim_start_matches("0x").replace([' ', '_'], "");
-    if s.is_empty() || s.len() % 2 != 0 {
-        return Err("hex bytes must be a non-empty, even-length hex string".into());
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| format!("invalid hex: {s}")))
-        .collect()
-}
-
-impl MutationInput {
-    fn into_mutation(self) -> Result<Mutation, String> {
-        Ok(match self {
-            MutationInput::Lamports { address, lamports } => Mutation::Lamports {
-                address,
-                value: lamports,
-            },
-            MutationInput::Data {
-                address,
-                offset,
-                bytes_hex,
-            } => Mutation::DataPatch {
-                address,
-                offset,
-                bytes: hex_decode(&bytes_hex)?,
-            },
-        })
-    }
 }
 
 /// Serve the static frontend page.
@@ -119,12 +72,38 @@ async fn simulate_handler(
     }
 }
 
+/// POST /simulate_suite — run a suite of test scenarios, return per-scenario pass/fail.
+async fn suite_handler(
+    Json(req): Json<SuiteRequest>,
+) -> Result<Json<Vec<ScenarioOutcome>>, (StatusCode, String)> {
+    let signature = req.signature.clone();
+    let scenarios = req
+        .scenarios
+        .into_iter()
+        .map(|s| s.into_spec())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let result = tokio::task::spawn_blocking(move || {
+        let client = RpcClient::new(RPC_URL.to_string());
+        svmscope::simulate_suite(&client, &signature, scenarios)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+
+    match result {
+        Ok(outcomes) => Ok(Json(outcomes)),
+        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let app = Router::new()
         .route("/", get(index))
         .route("/analyze/{signature}", get(analyze_handler))
-        .route("/simulate", post(simulate_handler));
+        .route("/simulate", post(simulate_handler))
+        .route("/simulate_suite", post(suite_handler));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
         .await
