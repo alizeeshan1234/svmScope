@@ -188,6 +188,36 @@
   }
   select.acct:focus { outline: none; border-color: var(--accent); }
 
+  .editor-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+  .editor-toolbar .filter {
+    flex: 1; background: var(--panel-2); border: 1px solid var(--border-strong); color: var(--text);
+    padding: 9px 12px; border-radius: 9px; font-family: var(--mono); font-size: 12.5px;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  .editor-toolbar .filter::placeholder { color: var(--muted); }
+  .editor-toolbar .filter:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,140,255,.13); }
+  .editor-toolbar .summary { color: var(--muted); font-size: 12px; white-space: nowrap; }
+
+  .acct-card {
+    border: 1px solid var(--border); border-radius: 11px; background: var(--panel-2);
+    margin: 8px 0; overflow: hidden; transition: border-color .15s;
+  }
+  .acct-card.open { border-color: var(--border-strong); }
+  .acct-card.has-edits { border-color: rgba(251,191,36,.55); }
+  .acct-head {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    background: none; border: 0; color: var(--text); padding: 11px 14px; cursor: pointer;
+    font-family: var(--sans); font-size: 13px;
+  }
+  .acct-head:hover { background: rgba(124,140,255,.05); }
+  .acct-head .chev { color: var(--muted); font-size: 10px; transition: transform .15s; flex: 0 0 auto; width: 10px; }
+  .acct-card.open .acct-head .chev { transform: rotate(90deg); }
+  .acct-head .hint { color: var(--text-dim); font-size: 12px; font-family: var(--mono); margin-left: auto; white-space: nowrap; }
+  .acct-head .edit-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); flex: 0 0 auto;
+    box-shadow: 0 0 0 3px rgba(251,191,36,.18); }
+  .acct-body { padding: 2px 14px 14px; border-top: 1px solid var(--border); }
+  .dirty-count { color: var(--amber); font-size: 12px; font-family: var(--mono); }
+
   .acct-meta {
     display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
     margin: 12px 0 4px; font-size: 12px; color: var(--text-dim);
@@ -302,11 +332,18 @@
       <div class="card full" style="margin-top:16px">
         <h2>What-if simulation <span id="acctCount" class="count"></span></h2>
         <div class="field-form">
-          <label for="acctSel">Choose an account to mutate</label>
-          <div class="selectbox">
-            <select id="acctSel" class="acct"></select>
+          <div class="editor-toolbar">
+            <input id="acctFilter" class="filter" placeholder="filter accounts by address or type…" spellcheck="false" />
+            <span id="acctSummary" class="summary"></span>
+            <button class="btn ghost sm" id="expandAll">Expand all</button>
           </div>
-          <div id="editor"></div>
+          <div id="acctList"></div>
+          <div class="editor-actions">
+            <button class="btn ghost sm" id="stageBtn">＋ Stage all changes</button>
+            <span class="spacer"></span>
+            <span id="dirtyCount" class="dirty-count"></span>
+            <button class="btn" id="simBtn">Simulate ⟶</button>
+          </div>
         </div>
 
         <div id="stagedWrap" class="hidden">
@@ -420,47 +457,21 @@ function renderReplay(r) {
   return `<div class="replay-head">${badge}<span class="cu"><b>${fmt(r.compute_units)}</b> compute units consumed</span></div>${err}${logs}`;
 }
 
-// ---------- what-if editor ----------
-function accountLabel(a) {
-  const kind = a.decoded ? a.decoded.type_name : (a.executable ? 'Program' : 'Account');
-  let extra = '';
+// ---------- what-if editor (all mutable accounts listed) ----------
+let mutableAccounts = [];
+
+function accountHint(a) {
   if (a.decoded) {
     const amt = a.decoded.fields.find(f => f.name === 'amount');
     const sup = a.decoded.fields.find(f => f.name === 'supply');
-    if (amt) extra = ' · amount ' + fmt(amt.value);
-    else if (sup) extra = ' · supply ' + fmt(sup.value);
-  } else {
-    extra = ' · ' + a.data_len + ' bytes';
+    if (amt) return 'amount ' + fmt(amt.value);
+    if (sup) return 'supply ' + fmt(sup.value);
   }
-  return `${short(a.address)}  —  ${kind}${extra}`;
+  return fmt(a.lamports) + ' lamports';
 }
 
-function populateAccountSelect() {
-  const sel = $('acctSel');
-  // Mutable accounts only (programs can't be usefully mutated for what-if).
-  const mut = analysis.accounts.filter(a => !a.executable);
-  sel.innerHTML = mut.map((a, i) => `<option value="${esc(a.address)}">${esc(accountLabel(a))}</option>`).join('');
-  $('acctCount').textContent = mut.length + ' mutable';
-  if (mut.length) { sel.value = mut[0].address; renderEditor(mut[0].address); }
-  else $('editor').innerHTML = '<div class="empty" style="margin-top:12px">no mutable accounts in this transaction</div>';
-}
-
-function renderEditor(address) {
-  const a = analysis.accounts.find(x => x.address === address);
-  if (!a) return;
-  const typeTag = a.decoded
-    ? `<span class="type-tag">${esc(a.decoded.type_name)}</span>`
-    : `<span class="type-tag raw">Unknown layout</span>`;
-
-  let body = `
-    <div class="acct-meta">
-      ${typeTag}
-      <span>${copyPill(a.address)}</span>
-      <span>owner ${copyPill(a.owner)}</span>
-      <span>${fmt(a.lamports)} lamports · ${a.data_len} bytes</span>
-    </div>`;
-
-  // Lamports row — always available.
+// Build the field-editor body for one account (no action buttons — those are global).
+function buildEditorBody(a) {
   let rows = `
     <tr>
       <td><span class="f-name">lamports</span></td>
@@ -472,91 +483,160 @@ function renderEditor(address) {
   if (a.decoded) {
     rows += a.decoded.fields.map((f, i) => {
       const cur = esc(f.value);
-      const type = `<span class="f-type">${esc(f.type)}</span>`;
       const note = f.note ? `<div class="f-off">${esc(f.note)}</div>` : '';
       const cell = f.editable
         ? `<input class="f-in" data-kind="field" data-fi="${i}" data-cur="${cur}" value="${cur}" spellcheck="false" />`
         : `<span class="ro-dash" title="read-only (option/tag field)">${cur} <span style="color:var(--border-strong)">·  read-only</span></span>`;
       return `<tr>
           <td><span class="f-name">${esc(f.name)}</span> <span class="f-off">@${f.offset}</span>${note}</td>
-          <td>${type}</td>
+          <td><span class="f-type">${esc(f.type)}</span></td>
           <td class="f-cur${f.editable ? '' : ' ro'}">${cur}</td>
           <td>${cell}</td>
         </tr>`;
     }).join('');
   }
 
-  body += `<table class="fields">
-    <thead><tr><th>Field</th><th>Type</th><th>Current</th><th>New value</th></tr></thead>
-    <tbody>${rows}</tbody></table>`;
+  let body = `
+    <div class="acct-meta">
+      <span>owner ${copyPill(a.owner)}</span>
+      <span>${fmt(a.lamports)} lamports · ${a.data_len} bytes</span>
+    </div>
+    <table class="fields">
+      <thead><tr><th>Field</th><th>Type</th><th>Current</th><th>New value</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
 
   if (!a.decoded) {
     body += `<div class="raw-note">
       This account's layout isn't recognized, so there are no named fields.
       You can still patch raw bytes at a chosen offset (hex, e.g. <code>00e1f505</code>).
       <div class="raw-inputs">
-        <input id="rawOff" type="number" placeholder="offset" style="max-width:110px" />
-        <input id="rawHex" placeholder="hex bytes" style="flex:1" spellcheck="false" />
+        <input class="raw-off" type="number" placeholder="offset" style="max-width:110px" />
+        <input class="raw-hex" placeholder="hex bytes" style="flex:1" spellcheck="false" />
       </div>
     </div>`;
   }
-
-  body += `<div class="editor-actions">
-      <button class="btn ghost sm" id="stageBtn">＋ Stage change(s)</button>
-      <span class="spacer"></span>
-      <button class="btn" id="simBtn">Simulate ⟶</button>
-    </div>`;
-
-  $('editor').innerHTML = body;
-
-  // dirty highlighting
-  $('editor').querySelectorAll('input.f-in').forEach(inp => {
-    inp.addEventListener('input', () => {
-      inp.classList.toggle('dirty', inp.value.trim() !== inp.dataset.cur);
-    });
-  });
-  wireCopy($('editor'));
-  $('stageBtn').addEventListener('click', () => { stageEdits(address); });
-  $('simBtn').addEventListener('click', simulate);
+  return body;
 }
 
-// collect changed edits in the current editor into wire-format mutations
-function collectEdits(address) {
-  const a = analysis.accounts.find(x => x.address === address);
+function buildCard(a) {
+  const kind = a.decoded ? a.decoded.type_name : 'Unknown layout';
+  const tagCls = a.decoded ? '' : 'raw';
+  const filterKey = (a.address + ' ' + a.owner + ' ' + kind).toLowerCase();
+  return `<div class="acct-card" data-address="${esc(a.address)}" data-key="${esc(filterKey)}">
+     <button class="acct-head" type="button">
+        <span class="chev">▶</span>
+        <span class="edit-dot hidden"></span>
+        <span class="type-tag ${tagCls}">${esc(kind)}</span>
+        ${copyPill(a.address)}
+        <span class="hint">${esc(accountHint(a))}</span>
+     </button>
+     <div class="acct-body hidden">${buildEditorBody(a)}</div>
+  </div>`;
+}
+
+function renderAccountList() {
+  mutableAccounts = analysis.accounts.filter(a => !a.executable);
+  const n = mutableAccounts.length;
+  $('acctCount').textContent = n + ' mutable';
+  $('acctSummary').textContent = n + ' mutable account' + (n !== 1 ? 's' : '');
+  $('acctList').innerHTML = n
+    ? mutableAccounts.map(buildCard).join('')
+    : '<div class="empty" style="margin:12px 0">no mutable accounts in this transaction</div>';
+  wireCards();
+  updateDirtyState();
+}
+
+function wireCards() {
+  $('acctList').querySelectorAll('.acct-card').forEach(card => {
+    const head = card.querySelector('.acct-head');
+    const body = card.querySelector('.acct-body');
+    head.addEventListener('click', (e) => {
+      if (e.target.closest('.addr-pill')) return; // let copy handle its own click
+      card.classList.toggle('open');
+      body.classList.toggle('hidden');
+    });
+    card.querySelectorAll('input.f-in, .raw-off, .raw-hex').forEach(inp => {
+      inp.addEventListener('input', () => {
+        if (inp.classList.contains('f-in')) inp.classList.toggle('dirty', inp.value.trim() !== inp.dataset.cur);
+        updateDirtyState();
+      });
+    });
+  });
+  // copy handlers for card address pills are wired by the analyze() wireCopy($('out')) pass
+}
+
+// Reflect which accounts have pending edits (amber border + dot) and the total count.
+function updateDirtyState() {
+  let total = 0;
+  $('acctList').querySelectorAll('.acct-card').forEach(card => {
+    const dirtyFields = card.querySelectorAll('input.f-in.dirty').length;
+    const rawOff = card.querySelector('.raw-off'), rawHex = card.querySelector('.raw-hex');
+    const rawSet = (rawOff && rawOff.value.trim() !== '') || (rawHex && rawHex.value.trim() !== '');
+    const has = dirtyFields > 0 || rawSet;
+    card.classList.toggle('has-edits', has);
+    card.querySelector('.edit-dot').classList.toggle('hidden', !has);
+    if (has) total += dirtyFields + (rawSet ? 1 : 0);
+  });
+  $('dirtyCount').textContent = total ? `${total} unstaged edit${total > 1 ? 's' : ''}` : '';
+}
+
+// Collect changed edits across every account card into wire-format mutations.
+function collectAllEdits() {
   const out = [];
-  $('editor').querySelectorAll('input.f-in').forEach(inp => {
-    const v = inp.value.trim();
-    if (v === inp.dataset.cur) return; // unchanged
-    if (inp.dataset.kind === 'lamports') {
-      out.push({ kind: 'lamports', address, lamports: Number(v), _label: `lamports → ${fmt(v)}` });
-    } else {
-      const f = a.decoded.fields[Number(inp.dataset.fi)];
-      const hex = encodeField(f, v); // may throw
-      out.push({ kind: 'data', address, offset: f.offset, bytes_hex: hex, _label: `${f.name} → ${v}` });
+  $('acctList').querySelectorAll('.acct-card').forEach(card => {
+    const address = card.dataset.address;
+    const a = mutableAccounts.find(x => x.address === address);
+    card.querySelectorAll('input.f-in').forEach(inp => {
+      const v = inp.value.trim();
+      if (v === inp.dataset.cur) return;
+      if (inp.dataset.kind === 'lamports') {
+        out.push({ kind: 'lamports', address, lamports: Number(v), _label: `lamports → ${fmt(v)}` });
+      } else {
+        const f = a.decoded.fields[Number(inp.dataset.fi)];
+        out.push({ kind: 'data', address, offset: f.offset, bytes_hex: encodeField(f, v), _label: `${f.name} → ${v}` });
+      }
+    });
+    const off = card.querySelector('.raw-off'), hx = card.querySelector('.raw-hex');
+    if (off && hx && (off.value.trim() !== '' || hx.value.trim() !== '')) {
+      const o = Number(off.value), h = hx.value.trim().replace(/^0x/, '').replace(/[\s_]/g, '');
+      if (!Number.isInteger(o) || o < 0) throw new Error(`${short(address)}: raw offset must be a non-negative integer`);
+      if (!/^([0-9a-fA-F]{2})+$/.test(h)) throw new Error(`${short(address)}: raw bytes must be even-length hex`);
+      out.push({ kind: 'data', address, offset: o, bytes_hex: h, _label: `@${o} ← 0x${h}` });
     }
   });
-  // raw patch (unknown layout)
-  const off = $('rawOff'), hx = $('rawHex');
-  if (off && hx && (off.value.trim() !== '' || hx.value.trim() !== '')) {
-    const o = Number(off.value), h = hx.value.trim().replace(/^0x/, '').replace(/[\s_]/g, '');
-    if (!Number.isInteger(o) || o < 0) throw new Error('raw patch: offset must be a non-negative integer');
-    if (!/^([0-9a-fA-F]{2})+$/.test(h)) throw new Error('raw patch: bytes must be even-length hex');
-    out.push({ kind: 'data', address, offset: o, bytes_hex: h, _label: `@${o} ← 0x${h}` });
-  }
   return out;
 }
 
-function stageEdits(address) {
+function stageAll() {
   try {
-    const edits = collectEdits(address);
+    const edits = collectAllEdits();
     if (!edits.length) { flashSim('nothing changed to stage', true); return; }
     mutations.push(...edits);
     renderStaged();
-    // reset editor inputs to reflect nothing pending now that it's staged
-    $('editor').querySelectorAll('input.f-in.dirty').forEach(i => { i.value = i.dataset.cur; i.classList.remove('dirty'); });
-    if ($('rawOff')) { $('rawOff').value = ''; $('rawHex').value = ''; }
+    // reset every dirty input now that its edit is staged
+    $('acctList').querySelectorAll('input.f-in.dirty').forEach(i => { i.value = i.dataset.cur; i.classList.remove('dirty'); });
+    $('acctList').querySelectorAll('.raw-off, .raw-hex').forEach(i => { i.value = ''; });
+    updateDirtyState();
     flashSim('');
   } catch (e) { flashSim(e.message, true); }
+}
+
+function filterAccounts(q) {
+  q = q.trim().toLowerCase();
+  $('acctList').querySelectorAll('.acct-card').forEach(card => {
+    card.classList.toggle('hidden', q !== '' && !card.dataset.key.includes(q));
+  });
+}
+
+function toggleExpandAll() {
+  const cards = [...$('acctList').querySelectorAll('.acct-card:not(.hidden)')];
+  const anyClosed = cards.some(c => !c.classList.contains('open'));
+  cards.forEach(c => {
+    c.classList.toggle('open', anyClosed);
+    c.querySelector('.acct-body').classList.toggle('hidden', !anyClosed);
+  });
+  $('expandAll').textContent = anyClosed ? 'Collapse all' : 'Expand all';
 }
 
 function renderStaged() {
@@ -611,7 +691,9 @@ async function analyze() {
     $('replay').innerHTML = renderReplay(analysis.replay);
     renderStaged();
     flashSim('');
-    populateAccountSelect();
+    renderAccountList();
+    $('acctFilter').value = '';
+    $('expandAll').textContent = 'Expand all';
     wireCopy($('out'));
     st.classList.add('hidden');
     $('out').classList.remove('hidden');
@@ -627,8 +709,7 @@ async function simulate() {
   if (!analysis) { flashSim('analyze a transaction first', true); return; }
   let toSend;
   try {
-    const live = collectEdits($('acctSel').value); // include current unsaved edits
-    toSend = [...mutations, ...live];
+    toSend = [...mutations, ...collectAllEdits()]; // staged + any unsaved edits
   } catch (e) { flashSim(e.message, true); return; }
   if (!toSend.length) { flashSim('change at least one field, or stage a mutation', true); return; }
 
@@ -689,7 +770,10 @@ function renderComparison(before, after, n) {
 // ---------- wiring ----------
 $('go').addEventListener('click', analyze);
 $('sig').addEventListener('keydown', e => { if (e.key === 'Enter') analyze(); });
-$('acctSel').addEventListener('change', e => { flashSim(''); renderEditor(e.target.value); });
+$('acctFilter').addEventListener('input', e => filterAccounts(e.target.value));
+$('expandAll').addEventListener('click', toggleExpandAll);
+$('stageBtn').addEventListener('click', stageAll);
+$('simBtn').addEventListener('click', simulate);
 </script>
 </body>
 </html>
