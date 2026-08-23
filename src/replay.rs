@@ -4,6 +4,7 @@
 //! (LiteSVM) so the transaction can be re-executed locally.
 
 use base64::Engine;
+use litesvm::types::TransactionResult;
 use litesvm::LiteSVM;
 use serde_json::json;
 use solana_account::Account;
@@ -135,75 +136,83 @@ fn fetch_transaction(client: &RpcClient, signature: &str) -> VersionedTransactio
     bincode::deserialize::<VersionedTransaction>(&bytes).expect("failed to deserialize transaction")
 }
 
+/// A change to apply to an account before replaying.
+pub enum Mutation {
+    Lamports { address: String, value: u64 },
+    Data { address: String, bytes: Vec<u8> },
+}
+
+/// Shared setup: fetch the transaction, load the Address Lookup Table accounts it
+/// references (so the SVM can resolve a versioned tx), and build the SVM.
+fn setup(
+    client: &RpcClient,
+    signature: &str,
+    account_keys: &[String],
+) -> (LiteSVM, VersionedTransaction) {
+    let tx = fetch_transaction(client, signature);
+
+    let mut all_keys = account_keys.to_vec();
+    if let Some(lookups) = tx.message.address_table_lookups() {
+        for l in lookups {
+            all_keys.push(l.account_key.to_string());
+        }
+    }
+
+    let svm = build_svm(client, &all_keys);
+    (svm, tx)
+}
+
+/// Print a replay result under the given label.
+fn report(label: &str, result: TransactionResult) {
+    match result {
+        Ok(meta) => {
+            println!("{label}: success ✅  (compute units: {})", meta.compute_units_consumed);
+            for log in &meta.logs {
+                println!("  {log}");
+            }
+        }
+        Err(failed) => {
+            println!("{label}: failed ❌  error: {:?}", failed.err);
+            for log in &failed.meta.logs {
+                println!("  {log}");
+            }
+        }
+    }
+}
+
 /// Replay the transaction against the reconstructed state and report the result.
 pub fn replay_transaction(client: &RpcClient, signature: &str, account_keys: &[String]) {
-    let tx = fetch_transaction(client, signature);
-
-    // Also load the Address Lookup Table accounts the tx references, so the SVM
-    // can resolve the versioned transaction's account list.
-    let mut all_keys = account_keys.to_vec();
-    if let Some(lookups) = tx.message.address_table_lookups() {
-        for l in lookups {
-            all_keys.push(l.account_key.to_string());
-        }
-    }
-
-    let mut svm = build_svm(client, &all_keys);
-
-    match svm.send_transaction(tx) {
-        Ok(meta) => {
-            println!("REPLAY: success ✅  (compute units: {})", meta.compute_units_consumed);
-            for log in &meta.logs {
-                println!("  {log}");
-            }
-        }
-        Err(failed) => {
-            println!("REPLAY: failed ❌  error: {:?}", failed.err);
-            for log in &failed.meta.logs {
-                println!("  {log}");
-            }
-        }
-    }
+    let (mut svm, tx) = setup(client, signature, account_keys);
+    let result = svm.send_transaction(tx);
+    report("REPLAY", result);
 }
 
-pub struct Mutation {
-    pub address: String,
-    pub new_lamports: u64,
-}
-
-pub fn mutate_and_replay(client: &RpcClient, signature: &str, account_keys: &[String], mutations: &[Mutation]) {
-
-    let tx = fetch_transaction(client, signature);
-
-    let mut all_keys = account_keys.to_vec();
-    if let Some(lookups) = tx.message.address_table_lookups() {
-        for l in lookups {
-            all_keys.push(l.account_key.to_string());
-        }
-    }
-
-    let mut svm = build_svm(client, &all_keys);
+/// Replay the transaction after applying the given mutations, and report the result.
+pub fn mutate_and_replay(
+    client: &RpcClient,
+    signature: &str,
+    account_keys: &[String],
+    mutations: &[Mutation],
+) {
+    let (mut svm, tx) = setup(client, signature, account_keys);
 
     for m in mutations {
-        let address = Address::from_str(&m.address).unwrap();
-        let mut account = svm.get_account(&address).unwrap();
-        account.lamports = m.new_lamports;
-        svm.set_account(address, account).unwrap();
-    }
-
-    match svm.send_transaction(tx) {
-        Ok(meta) => {
-            println!("MUTATED REPLAY: success ✅  (compute units: {})", meta.compute_units_consumed);
-            for log in &meta.logs {
-                println!("  {log}");
+        match m {
+            Mutation::Lamports { address, value } => {
+                let addr = Address::from_str(address).unwrap();
+                let mut account = svm.get_account(&addr).unwrap();
+                account.lamports = *value;
+                svm.set_account(addr, account).unwrap();
             }
-        },
-        Err(failed) => {
-            println!("MUTATED REPLAY: failed ❌  error: {:?}", failed.err);
-            for log in &failed.meta.logs {
-                println!("  {log}");
+            Mutation::Data { address, bytes } => {
+                let addr = Address::from_str(address).unwrap();
+                let mut account = svm.get_account(&addr).unwrap();
+                account.data = bytes.clone();
+                svm.set_account(addr, account).unwrap();
             }
         }
     }
 
+    let result = svm.send_transaction(tx);
+    report("MUTATED REPLAY", result);
 }

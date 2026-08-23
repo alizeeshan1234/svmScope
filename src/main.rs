@@ -58,13 +58,35 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("\n-- replay --");
     replay::replay_transaction(&client, signature, &account_keys);
 
-    let mutations = vec![
-        replay::Mutation {
-            address: account_keys[0].clone(),
-            new_lamports: 0
+
+    // Mutations come only from the CLI (`--mutate <address>:<lamports>`).
+    let mut mutations: Vec<replay::Mutation> = Vec::new();
+
+    let mut i = 2;
+    while i < args.len() {
+        if args[i] == "--mutate" {
+            // guard: make sure there's a next arg
+            let spec = args.get(i + 1).expect("--mutate needs <address>:<lamports>");
+            let (addr, lamports_str) = spec
+                .split_once(':')
+                .expect("mutation must look like <address>:<lamports>");
+            let value: u64 = lamports_str
+                .parse()
+                .expect("lamports must be a number");
+            mutations.push(replay::Mutation::Lamports {
+                address: addr.to_string(),
+                value,
+            });
+            i += 2; // skip both --mutate and its value
+        } else {
+            i += 1;
         }
-    ];
-    replay::mutate_and_replay(&client, signature, &account_keys, &mutations);
+    }
+
+    // Only run the mutated replay if the user actually asked for mutations.
+    if !mutations.is_empty() {
+        replay::mutate_and_replay(&client, signature, &account_keys, &mutations);
+    }
 
     Ok(())
 }
