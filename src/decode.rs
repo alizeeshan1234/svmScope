@@ -153,14 +153,24 @@ fn decode_mint(data: &[u8]) -> DecodedAccount {
 
 /// Recognize and decode an account by owner + data. Returns `None` for layouts
 /// we don't know (the UI then offers a raw byte patch).
+///
+/// The base Token and Token-2022 layouts are identical, so we decode both. A
+/// Token-2022 account with extensions is longer than its base size; the type
+/// byte at offset 165 (Token-2022 pads mints past that offset precisely to
+/// disambiguate) tells us whether it's a Mint (1) or an Account (2).
 fn decode(owner: &str, data: &[u8]) -> Option<DecodedAccount> {
-    let is_token = owner == SPL_TOKEN || owner == SPL_TOKEN_2022;
-    // Match on the exact base sizes. Token-2022 accounts with extensions are
-    // longer; their first bytes still follow this layout, but we stay strict
-    // to avoid mis-decoding an extension's bytes.
-    match (is_token, data.len()) {
-        (true, 165) => Some(decode_token_account(data)),
-        (true, 82) => Some(decode_mint(data)),
+    if owner != SPL_TOKEN && owner != SPL_TOKEN_2022 {
+        return None;
+    }
+    match data.len() {
+        82 => Some(decode_mint(data)),   // base mint
+        165 => Some(decode_token_account(data)), // base token account
+        // Token-2022 with extensions: disambiguate by the account-type byte.
+        n if n > 165 => match data[165] {
+            1 => Some(decode_mint(data)),          // Mint (base 82 still valid)
+            2 => Some(decode_token_account(data)), // Account (base 165 still valid)
+            _ => None,
+        },
         _ => None,
     }
 }

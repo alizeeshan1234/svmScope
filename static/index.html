@@ -181,6 +181,7 @@
     padding: 2px 9px; border-radius: 7px; font-size: 11px; font-weight: 650; white-space: nowrap; }
   .type-tag.raw { background: var(--panel-2); color: var(--muted); border-color: var(--line); }
   .type-tag.mint { background: rgba(20,241,149,.14); color: #6ff0bf; border-color: rgba(20,241,149,.3); }
+  .type-tag.sys { background: rgba(25,211,243,.12); color: #7fdcf5; border-color: rgba(25,211,243,.3); }
 
   .acct-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 12px 0 4px; font-size: 12px; color: var(--dim); }
   table.fields { width: 100%; border-collapse: collapse; margin-top: 12px; }
@@ -527,10 +528,38 @@ function accountHint(a) {
   }
   return fmtSol(a.lamports);
 }
+const SYSTEM_PROGRAM = '11111111111111111111111111111111';
+const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+const TOKEN_2022 = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+
+// A human name for an account, derived from its decoded type or owning program.
+function accountName(a) {
+  if (a.decoded) {
+    if (a.decoded.type_name === 'SPL Mint') {
+      const m = mintInfo(a.address);
+      return m.known ? `${m.sym} Mint` : 'SPL Mint';
+    }
+    const mintf = a.decoded.fields.find(f => f.name === 'mint');
+    const m = mintf ? mintInfo(mintf.value) : { known: false };
+    return m.known ? `${m.sym} Token Account` : 'Token Account';
+  }
+  if (a.owner === SYSTEM_PROGRAM) return 'Wallet';
+  if (PROGRAMS[a.owner]) return `${PROGRAMS[a.owner][0]} account`;
+  if (a.owner === TOKEN_PROGRAM || a.owner === TOKEN_2022) return 'Token account';
+  return 'Data account';
+}
 function accountTypeTag(a) {
-  if (!a.decoded) return `<span class="type-tag raw">Account</span>`;
-  if (a.decoded.type_name === 'SPL Mint') return `<span class="type-tag mint">SPL Mint</span>`;
-  return `<span class="type-tag">SPL Token Account</span>`;
+  const name = accountName(a);
+  if (a.decoded) {
+    const cls = a.decoded.type_name === 'SPL Mint' ? 'mint' : '';
+    return `<span class="type-tag ${cls}">${esc(name)}</span>`;
+  }
+  if (a.owner === SYSTEM_PROGRAM) return `<span class="type-tag sys">${esc(name)}</span>`;
+  if (PROGRAMS[a.owner]) {
+    const c = PROGRAMS[a.owner][1];
+    return `<span class="type-tag" style="color:${c};border-color:${c}55;background:${c}1e">${esc(name)}</span>`;
+  }
+  return `<span class="type-tag raw">${esc(name)}</span>`;
 }
 
 function buildEditorBody(a) {
@@ -563,7 +592,7 @@ function buildEditorBody(a) {
   return body;
 }
 function buildCard(a) {
-  const key = (a.address + ' ' + a.owner + ' ' + (a.decoded ? a.decoded.type_name : 'account') + ' ' + accountHint(a)).toLowerCase();
+  const key = (a.address + ' ' + a.owner + ' ' + accountName(a) + ' ' + accountHint(a)).toLowerCase();
   return `<div class="acct-card" data-address="${esc(a.address)}" data-key="${esc(key)}">
      <button class="acct-head" type="button"><span class="chev">▶</span><span class="edit-dot hidden"></span>
         ${accountTypeTag(a)}${copyPill(a.address)}<span class="hint">${accountHint(a)}</span></button>
