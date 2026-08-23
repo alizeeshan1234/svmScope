@@ -6,295 +6,226 @@
 <title>svmscope</title>
 <style>
   :root {
-    --bg: #0a0c10;
-    --bg-elev: #0f131a;
-    --panel: #12161f;
-    --panel-2: #0c0f16;
-    --border: #1e2632;
-    --border-strong: #2a3444;
-    --text: #e8edf4;
-    --text-dim: #9aa7b8;
-    --muted: #667487;
-    --accent: #7c8cff;
-    --accent-dim: #5866d6;
-    --green: #4ade80;
-    --green-bg: rgba(74, 222, 128, .12);
-    --red: #f87171;
-    --red-bg: rgba(248, 113, 113, .12);
-    --amber: #fbbf24;
+    --bg: #0a0b0f;
+    --bg-2: #0e1016;
+    --panel: #13151d;
+    --panel-2: #0c0e14;
+    --line: #1c1f2a;
+    --line-2: #262b39;
+    --text: #eef1f6;
+    --dim: #9aa3b4;
+    --muted: #5f6878;
+    --accent: #9945ff;      /* solana purple */
+    --accent-2: #14f195;    /* solana green  */
+    --cyan: #19d3f3;
+    --green: #35d07f;
+    --green-bg: rgba(53,208,127,.13);
+    --red: #ff5c6c;
+    --red-bg: rgba(255,92,108,.12);
+    --amber: #ffb020;
     --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
-    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.25);
   }
   * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; }
   body {
-    margin: 0; background:
-      radial-gradient(1200px 600px at 50% -200px, rgba(124,140,255,.08), transparent 70%),
+    margin: 0; color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 1.5;
+    background:
+      radial-gradient(900px 500px at 15% -260px, rgba(153,69,255,.10), transparent 70%),
+      radial-gradient(900px 500px at 85% -300px, rgba(20,241,149,.07), transparent 70%),
       var(--bg);
-    color: var(--text); font-family: var(--sans); line-height: 1.5;
-    font-size: 14px; letter-spacing: .1px; min-height: 100vh;
+    min-height: 100vh; -webkit-font-smoothing: antialiased;
   }
-  a { color: var(--accent); }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
 
-  /* ---- top bar ---- */
-  .topbar {
-    position: sticky; top: 0; z-index: 20;
-    backdrop-filter: blur(12px);
-    background: rgba(10, 12, 16, .8);
-    border-bottom: 1px solid var(--border);
-  }
-  .topbar-inner {
-    max-width: 1080px; margin: 0 auto; padding: 14px 24px;
-    display: flex; align-items: center; gap: 14px;
-  }
+  /* top bar */
+  .topbar { position: sticky; top: 0; z-index: 30; backdrop-filter: blur(14px);
+    background: rgba(10,11,15,.82); border-bottom: 1px solid var(--line); }
+  .topbar-inner { max-width: 1120px; margin: 0 auto; padding: 13px 22px; display: flex; align-items: center; gap: 14px; }
   .logo { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
-  .logo .mark {
-    width: 28px; height: 28px; border-radius: 8px;
-    background: linear-gradient(135deg, var(--accent), #4dd0e1);
-    display: grid; place-items: center; font-size: 15px; font-weight: 800;
-    color: #0a0c10; box-shadow: 0 2px 10px rgba(124,140,255,.4);
-  }
-  .logo b { font-size: 16px; letter-spacing: .3px; font-weight: 700; }
-  .logo span { color: var(--muted); font-size: 12.5px; }
-
+  .logo .mark { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+    font-size: 15px; font-weight: 800; color: #06070a;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 3px 14px rgba(153,69,255,.45); }
+  .logo b { font-size: 16px; letter-spacing: .2px; }
+  .logo .tag { color: var(--muted); font-size: 12.5px; }
   .search { display: flex; gap: 8px; flex: 1; min-width: 0; }
-  .search input {
-    flex: 1; min-width: 0; background: var(--panel-2);
-    border: 1px solid var(--border-strong); color: var(--text);
-    padding: 9px 12px; border-radius: 9px; font-family: var(--mono); font-size: 12.5px;
-    transition: border-color .15s, box-shadow .15s;
-  }
+  .search input { flex: 1; min-width: 0; background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text);
+    padding: 9px 13px; border-radius: 10px; font-family: var(--mono); font-size: 12.5px; transition: border-color .15s, box-shadow .15s; }
   .search input::placeholder { color: var(--muted); }
-  .search input:focus {
-    outline: none; border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(124,140,255,.15);
-  }
-  .btn {
-    background: linear-gradient(180deg, var(--accent), var(--accent-dim));
-    color: #0a0c10; border: 0; padding: 9px 18px; border-radius: 9px;
-    font-weight: 650; cursor: pointer; font-size: 13.5px; flex: 0 0 auto;
-    transition: filter .15s, transform .05s; font-family: var(--sans);
-  }
+  .search input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(153,69,255,.16); }
+  .btn { background: linear-gradient(180deg, #a457ff, #8636ef); color: #fff; border: 0; padding: 9px 18px; border-radius: 10px;
+    font-weight: 650; cursor: pointer; font-size: 13.5px; flex: 0 0 auto; transition: filter .15s, transform .04s; }
   .btn:hover { filter: brightness(1.08); }
   .btn:active { transform: translateY(1px); }
   .btn:disabled { opacity: .45; cursor: default; filter: none; }
-  .btn.ghost {
-    background: var(--panel); color: var(--text);
-    border: 1px solid var(--border-strong); font-weight: 550;
-  }
+  .btn.ghost { background: var(--panel); color: var(--text); border: 1px solid var(--line-2); font-weight: 550; }
   .btn.ghost:hover { border-color: var(--accent); filter: none; }
-  .btn.sm { padding: 6px 12px; font-size: 12.5px; border-radius: 7px; }
+  .btn.sm { padding: 6px 12px; font-size: 12.5px; border-radius: 8px; }
 
-  main { max-width: 1080px; margin: 0 auto; padding: 26px 24px 80px; }
+  main { max-width: 1120px; margin: 0 auto; padding: 22px 22px 90px; }
 
-  .hero { text-align: center; padding: 40px 0 8px; }
-  .hero h1 { margin: 0 0 8px; font-size: 26px; font-weight: 700; letter-spacing: .2px; }
-  .hero p { margin: 0 auto; max-width: 540px; color: var(--text-dim); font-size: 14.5px; }
-  .hint-row { display: flex; gap: 8px; justify-content: center; margin-top: 16px; flex-wrap: wrap; }
-  .chip-btn {
-    background: var(--panel); border: 1px solid var(--border); color: var(--text-dim);
-    padding: 6px 12px; border-radius: 999px; font-size: 12px; cursor: pointer;
-    font-family: var(--mono); transition: all .15s;
-  }
-  .chip-btn:hover { border-color: var(--accent); color: var(--text); }
+  .hero { text-align: center; padding: 44px 0 6px; }
+  .hero h1 { margin: 0 0 10px; font-size: 27px; font-weight: 750; letter-spacing: .2px; }
+  .hero h1 .grad { background: linear-gradient(90deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .hero p { margin: 0 auto; max-width: 560px; color: var(--dim); font-size: 14.5px; }
 
-  .status { color: var(--text-dim); font-size: 13.5px; margin: 20px 0; text-align: center; }
+  .status { color: var(--dim); font-size: 13.5px; margin: 22px auto; text-align: center; }
   .status.err { color: var(--red); }
-  .spinner {
-    display: inline-block; width: 13px; height: 13px; margin-right: 8px;
-    border: 2px solid var(--border-strong); border-top-color: var(--accent);
-    border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px;
-  }
+  .spinner { display: inline-block; width: 13px; height: 13px; margin-right: 8px; vertical-align: -2px;
+    border: 2px solid var(--line-2); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
+  /* overview strip */
+  .overview { border: 1px solid var(--line); border-radius: 16px; overflow: hidden; margin-bottom: 16px;
+    background: linear-gradient(180deg, var(--panel), var(--bg-2)); }
+  .ov-top { display: flex; align-items: center; gap: 16px; padding: 18px 20px; flex-wrap: wrap; }
+  .ov-status { display: flex; align-items: center; gap: 11px; }
+  .ov-ring { width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; font-size: 20px; flex: 0 0 auto; }
+  .ov-ring.ok { background: var(--green-bg); color: var(--green); box-shadow: inset 0 0 0 1px rgba(53,208,127,.35); }
+  .ov-ring.fail { background: var(--red-bg); color: var(--red); box-shadow: inset 0 0 0 1px rgba(255,92,108,.35); }
+  .ov-title { font-size: 17px; font-weight: 700; }
+  .ov-sub { color: var(--dim); font-size: 12.5px; margin-top: 1px; }
+  .ov-spacer { flex: 1; }
+  .ov-stats { display: flex; gap: 26px; flex-wrap: wrap; }
+  .ov-stat .l { font-size: 10.5px; text-transform: uppercase; letter-spacing: .7px; color: var(--muted); }
+  .ov-stat .v { font-size: 15px; font-weight: 650; font-family: var(--mono); margin-top: 2px; }
+  .ov-progs { display: flex; gap: 7px; flex-wrap: wrap; padding: 0 20px 16px; }
+
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
 
-  .card {
-    background: linear-gradient(180deg, var(--panel), var(--bg-elev));
-    border: 1px solid var(--border); border-radius: 14px;
-    padding: 18px 20px; box-shadow: var(--shadow);
-  }
+  .card { background: linear-gradient(180deg, var(--panel), var(--bg-2)); border: 1px solid var(--line);
+    border-radius: 15px; padding: 16px 18px; }
   .card.full { grid-column: 1 / -1; }
-  .card h2 {
-    margin: 0 0 14px; font-size: 11px; text-transform: uppercase;
-    letter-spacing: 1.2px; color: var(--muted); font-weight: 650;
-    display: flex; align-items: center; gap: 8px;
-  }
-  .card h2 .count {
-    background: var(--panel-2); border: 1px solid var(--border);
-    color: var(--text-dim); border-radius: 999px; padding: 1px 8px;
-    font-size: 10.5px; letter-spacing: .5px;
-  }
+  .card > h2 { margin: 0 0 13px; font-size: 11px; text-transform: uppercase; letter-spacing: 1.1px; color: var(--muted);
+    font-weight: 650; display: flex; align-items: center; gap: 8px; }
+  .card > h2 .count { background: var(--panel-2); border: 1px solid var(--line); color: var(--dim);
+    border-radius: 999px; padding: 1px 8px; font-size: 10.5px; letter-spacing: .5px; }
 
-  .mono { font-family: var(--mono); font-size: 12.5px; }
-  .tree div { white-space: pre; line-height: 1.7; }
-  .tree .top { color: var(--text); }
-  .tree .idx { color: var(--accent); }
-  .tree .inner { color: var(--text-dim); }
-
-  .kv { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0;
-        border-bottom: 1px solid rgba(30,38,50,.5); font-family: var(--mono); font-size: 12.5px; }
-  .kv:last-child { border-bottom: 0; }
-  .kv .addr { color: var(--text-dim); }
-  .pos { color: var(--green); font-weight: 600; }
-  .neg { color: var(--red); font-weight: 600; }
-
-  .addr-pill {
-    font-family: var(--mono); cursor: pointer; border-radius: 6px;
-    padding: 1px 5px; margin: -1px -5px; transition: background .12s;
-  }
+  /* program / account chips */
+  .prog { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+  .prog .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; box-shadow: 0 0 8px currentColor; }
+  .prog .nm { font-weight: 600; font-size: 13px; white-space: nowrap; }
+  .prog .ad { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  .addr-pill { font-family: var(--mono); cursor: pointer; border-radius: 5px; padding: 1px 5px; margin: -1px -4px; transition: background .12s, color .12s; }
   .addr-pill:hover { background: var(--panel-2); color: var(--text); }
   .addr-pill.copied { color: var(--green); }
+  .pill { display: inline-flex; align-items: center; gap: 7px; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 5px 10px; font-size: 12px; }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 7px currentColor; }
+  .pill .ad { color: var(--muted); font-family: var(--mono); font-size: 10.5px; }
 
-  .badge {
-    display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px;
-    border-radius: 999px; font-size: 12px; font-weight: 650;
-  }
+  /* CPI tree */
+  .tree { display: flex; flex-direction: column; gap: 1px; }
+  .tnode { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; }
+  .tnode:hover { background: var(--panel-2); }
+  .tnode .rail { color: var(--line-2); font-family: var(--mono); font-size: 12px; white-space: pre; flex: 0 0 auto; }
+  .tnode .ix { color: var(--accent); font-family: var(--mono); font-size: 11.5px; font-weight: 600; flex: 0 0 auto; width: 22px; }
+  .tnode .depth { font-size: 10px; color: var(--muted); font-family: var(--mono); margin-left: auto; }
+
+  /* rows (compute, balances) */
+  .rows { display: flex; flex-direction: column; }
+  .row { display: flex; align-items: center; gap: 12px; padding: 8px 8px; border-radius: 8px; }
+  .row:hover { background: var(--panel-2); }
+  .row + .row { border-top: 1px solid rgba(28,31,42,.6); }
+  .row .grow { flex: 1; min-width: 0; }
+  .cu-bar { height: 5px; border-radius: 3px; background: linear-gradient(90deg, var(--accent), var(--cyan)); margin-top: 6px; }
+  .cu-val { font-family: var(--mono); font-size: 12.5px; color: var(--text); white-space: nowrap; }
+  .cu-val small { color: var(--muted); }
+
+  .amt { font-family: var(--mono); font-weight: 650; white-space: nowrap; }
+  .amt.pos { color: var(--green); } .amt.neg { color: var(--red); }
+  .tok-sym { font-weight: 700; font-size: 12.5px; }
+  .tok-meta { color: var(--muted); font-size: 11px; font-family: var(--mono); margin-top: 1px; }
+  .sub-owner { color: var(--dim); font-size: 11.5px; }
+
+  .empty { color: var(--muted); font-size: 12.5px; font-style: italic; padding: 6px 2px; }
+
+  /* replay + badges */
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px; border-radius: 999px; font-size: 12px; font-weight: 650; }
   .badge.ok { background: var(--green-bg); color: var(--green); }
   .badge.fail { background: var(--red-bg); color: var(--red); }
-  .badge.neutral { background: var(--panel-2); color: var(--text-dim); border: 1px solid var(--border); }
-  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-
+  .badge.neutral { background: var(--panel-2); color: var(--dim); border: 1px solid var(--line); }
+  .b-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
   .replay-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  .cu { color: var(--text-dim); font-size: 12.5px; font-family: var(--mono); }
-  .cu b { color: var(--text); }
-  .err-box {
-    margin-top: 12px; background: var(--red-bg); border: 1px solid rgba(248,113,113,.25);
-    color: var(--red); border-radius: 9px; padding: 9px 12px; font-family: var(--mono);
-    font-size: 12px; word-break: break-word;
-  }
-  .logs {
-    margin-top: 12px; background: var(--panel-2); border: 1px solid var(--border);
-    border-radius: 9px; padding: 12px; max-height: 280px; overflow: auto;
-    color: var(--text-dim); font-family: var(--mono); font-size: 11.5px;
-  }
-  .logs div { white-space: pre-wrap; line-height: 1.6; }
-  .logs .invoke { color: var(--accent); }
-  .logs .ok { color: var(--green); }
-  .logs .fail { color: var(--red); }
+  .cu-note { color: var(--dim); font-size: 12.5px; font-family: var(--mono); }
+  .cu-note b { color: var(--text); }
+  .err-box { margin-top: 12px; background: var(--red-bg); border: 1px solid rgba(255,92,108,.25); color: var(--red);
+    border-radius: 10px; padding: 10px 12px; font-family: var(--mono); font-size: 12px; word-break: break-word; }
+  .logs { margin-top: 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+    max-height: 300px; overflow: auto; color: var(--dim); font-family: var(--mono); font-size: 11.5px; }
+  .logs div { white-space: pre-wrap; line-height: 1.65; }
+  .logs .invoke { color: var(--accent-2); } .logs .ok { color: var(--green); } .logs .fail { color: var(--red); }
+  .logs .lg { color: var(--cyan); }
 
-  /* ---- what-if editor ---- */
-  .field-form label { display: block; font-size: 11px; letter-spacing: .5px;
-    text-transform: uppercase; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
-  .selectbox {
-    position: relative; margin-bottom: 4px;
-  }
-  select.acct {
-    width: 100%; background: var(--panel-2); border: 1px solid var(--border-strong);
-    color: var(--text); padding: 11px 12px; border-radius: 10px; font-size: 13px;
-    font-family: var(--mono); appearance: none; cursor: pointer;
-  }
-  select.acct:focus { outline: none; border-color: var(--accent); }
-
+  /* what-if */
   .editor-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
-  .editor-toolbar .filter {
-    flex: 1; background: var(--panel-2); border: 1px solid var(--border-strong); color: var(--text);
-    padding: 9px 12px; border-radius: 9px; font-family: var(--mono); font-size: 12.5px;
-    transition: border-color .15s, box-shadow .15s;
-  }
+  .editor-toolbar .filter { flex: 1; background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text);
+    padding: 9px 12px; border-radius: 10px; font-family: var(--mono); font-size: 12.5px; }
   .editor-toolbar .filter::placeholder { color: var(--muted); }
-  .editor-toolbar .filter:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,140,255,.13); }
+  .editor-toolbar .filter:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(153,69,255,.14); }
   .editor-toolbar .summary { color: var(--muted); font-size: 12px; white-space: nowrap; }
 
-  .acct-card {
-    border: 1px solid var(--border); border-radius: 11px; background: var(--panel-2);
-    margin: 8px 0; overflow: hidden; transition: border-color .15s;
-  }
-  .acct-card.open { border-color: var(--border-strong); }
-  .acct-card.has-edits { border-color: rgba(251,191,36,.55); }
-  .acct-head {
-    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
-    background: none; border: 0; color: var(--text); padding: 11px 14px; cursor: pointer;
-    font-family: var(--sans); font-size: 13px;
-  }
-  .acct-head:hover { background: rgba(124,140,255,.05); }
-  .acct-head .chev { color: var(--muted); font-size: 10px; transition: transform .15s; flex: 0 0 auto; width: 10px; }
+  .acct-card { border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); margin: 8px 0; overflow: hidden; transition: border-color .15s; }
+  .acct-card.open { border-color: var(--line-2); }
+  .acct-card.has-edits { border-color: rgba(255,176,32,.55); }
+  .acct-head { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: none; border: 0;
+    color: var(--text); padding: 11px 14px; cursor: pointer; font-family: var(--sans); font-size: 13px; }
+  .acct-head:hover { background: rgba(153,69,255,.05); }
+  .acct-head .chev { color: var(--muted); font-size: 10px; transition: transform .15s; width: 10px; flex: 0 0 auto; }
   .acct-card.open .acct-head .chev { transform: rotate(90deg); }
-  .acct-head .hint { color: var(--text-dim); font-size: 12px; font-family: var(--mono); margin-left: auto; white-space: nowrap; }
-  .acct-head .edit-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); flex: 0 0 auto;
-    box-shadow: 0 0 0 3px rgba(251,191,36,.18); }
-  .acct-body { padding: 2px 14px 14px; border-top: 1px solid var(--border); }
-  .dirty-count { color: var(--amber); font-size: 12px; font-family: var(--mono); }
+  .acct-head .edit-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); flex: 0 0 auto; box-shadow: 0 0 0 3px rgba(255,176,32,.18); }
+  .acct-head .hint { color: var(--dim); font-size: 12px; font-family: var(--mono); margin-left: auto; white-space: nowrap; }
+  .acct-body { padding: 2px 14px 14px; border-top: 1px solid var(--line); }
+  .type-tag { background: rgba(153,69,255,.16); color: #c79bff; border: 1px solid rgba(153,69,255,.3);
+    padding: 2px 9px; border-radius: 7px; font-size: 11px; font-weight: 650; white-space: nowrap; }
+  .type-tag.raw { background: var(--panel-2); color: var(--muted); border-color: var(--line); }
+  .type-tag.mint { background: rgba(20,241,149,.14); color: #6ff0bf; border-color: rgba(20,241,149,.3); }
 
-  .acct-meta {
-    display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
-    margin: 12px 0 4px; font-size: 12px; color: var(--text-dim);
-  }
-  .type-tag {
-    background: rgba(124,140,255,.14); color: var(--accent); border: 1px solid rgba(124,140,255,.3);
-    padding: 2px 9px; border-radius: 6px; font-size: 11px; font-weight: 650; letter-spacing: .3px;
-  }
-  .type-tag.raw { background: var(--panel-2); color: var(--muted); border-color: var(--border); }
-
+  .acct-meta { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 12px 0 4px; font-size: 12px; color: var(--dim); }
   table.fields { width: 100%; border-collapse: collapse; margin-top: 12px; }
-  table.fields th {
-    text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .6px;
-    color: var(--muted); font-weight: 600; padding: 0 10px 8px; border-bottom: 1px solid var(--border);
-  }
-  table.fields td { padding: 9px 10px; border-bottom: 1px solid rgba(30,38,50,.5); vertical-align: middle; }
+  table.fields th { text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted);
+    font-weight: 600; padding: 0 10px 8px; border-bottom: 1px solid var(--line); }
+  table.fields td { padding: 9px 10px; border-bottom: 1px solid rgba(28,31,42,.6); vertical-align: middle; }
   table.fields tr:last-child td { border-bottom: 0; }
   .f-name { font-family: var(--mono); font-size: 12.5px; color: var(--text); }
   .f-off { color: var(--muted); font-size: 11px; font-family: var(--mono); }
-  .f-type {
-    font-family: var(--mono); font-size: 10.5px; color: var(--text-dim);
-    background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px;
-    padding: 1px 6px; white-space: nowrap;
-  }
-  .f-cur { font-family: var(--mono); font-size: 12px; color: var(--text-dim); word-break: break-all; }
+  .f-type { font-family: var(--mono); font-size: 10.5px; color: var(--dim); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
+  .f-cur { font-family: var(--mono); font-size: 12px; color: var(--dim); word-break: break-all; }
   .f-cur.ro { color: var(--muted); }
-  input.f-in {
-    width: 100%; min-width: 120px; background: var(--panel-2); border: 1px solid var(--border-strong);
-    color: var(--text); padding: 7px 9px; border-radius: 7px; font-family: var(--mono); font-size: 12px;
-    transition: border-color .15s, box-shadow .15s;
-  }
-  input.f-in:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,140,255,.13); }
-  input.f-in.dirty { border-color: var(--amber); box-shadow: 0 0 0 3px rgba(251,191,36,.12); }
+  input.f-in { width: 100%; min-width: 120px; background: var(--panel); border: 1px solid var(--line-2); color: var(--text);
+    padding: 7px 9px; border-radius: 7px; font-family: var(--mono); font-size: 12px; transition: border-color .15s, box-shadow .15s; }
+  input.f-in:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(153,69,255,.13); }
+  input.f-in.dirty { border-color: var(--amber); box-shadow: 0 0 0 3px rgba(255,176,32,.12); }
   .ro-dash { color: var(--muted); font-family: var(--mono); font-size: 12px; }
-
-  .raw-note {
-    background: var(--panel-2); border: 1px dashed var(--border-strong); border-radius: 9px;
-    padding: 12px; margin-top: 12px; color: var(--text-dim); font-size: 12.5px;
-  }
+  .raw-note { background: var(--panel); border: 1px dashed var(--line-2); border-radius: 10px; padding: 12px; margin-top: 12px; color: var(--dim); font-size: 12.5px; }
   .raw-inputs { display: flex; gap: 8px; margin-top: 10px; }
-  .raw-inputs input { background: var(--panel-2); border: 1px solid var(--border-strong);
-    color: var(--text); padding: 8px 10px; border-radius: 7px; font-family: var(--mono); font-size: 12px; }
+  .raw-inputs input { background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text); padding: 8px 10px;
+    border-radius: 7px; font-family: var(--mono); font-size: 12px; }
   .raw-inputs input:focus { outline: none; border-color: var(--accent); }
 
   .editor-actions { display: flex; gap: 8px; margin-top: 16px; align-items: center; flex-wrap: wrap; }
   .editor-actions .spacer { flex: 1; }
+  .dirty-count { color: var(--amber); font-size: 12px; font-family: var(--mono); }
 
-  .staged { margin-top: 4px; }
-  .staged-item {
-    display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin: 6px 0;
-    background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--amber);
-    border-radius: 8px; font-family: var(--mono); font-size: 12px;
-  }
+  .staged-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin: 6px 0; background: var(--panel-2);
+    border: 1px solid var(--line); border-left: 3px solid var(--amber); border-radius: 9px; font-family: var(--mono); font-size: 12px; }
   .staged-item .k { color: var(--amber); font-weight: 650; }
-  .staged-item .body { flex: 1; color: var(--text-dim); word-break: break-all; }
-  .staged-item .rm { background: none; border: 0; color: var(--red); cursor: pointer;
-    font-size: 16px; line-height: 1; padding: 0 4px; opacity: .7; }
+  .staged-item .body { flex: 1; color: var(--dim); word-break: break-all; }
+  .staged-item .rm { background: none; border: 0; color: var(--red); cursor: pointer; font-size: 16px; padding: 0 4px; opacity: .7; }
   .staged-item .rm:hover { opacity: 1; }
 
   .sim-result { margin-top: 16px; }
-  .compare {
-    display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: center;
-    margin-bottom: 12px;
-  }
+  .compare { display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: stretch; margin-bottom: 12px; }
   @media (max-width: 560px) { .compare { grid-template-columns: 1fr; } .compare .arrow { display: none; } }
-  .compare-col {
-    background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px;
-  }
-  .compare-col .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .8px;
-    color: var(--muted); margin-bottom: 8px; }
-  .compare .arrow { color: var(--muted); font-size: 20px; text-align: center; }
+  .compare-col { background: var(--panel-2); border: 1px solid var(--line); border-radius: 11px; padding: 13px 15px; }
+  .compare-col .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin-bottom: 8px; }
+  .compare .arrow { color: var(--muted); font-size: 20px; display: grid; place-items: center; }
   .delta { font-size: 11.5px; margin-top: 6px; font-family: var(--mono); }
-  .delta.up { color: var(--green); } .delta.down { color: var(--red); }
-  .delta.same { color: var(--muted); }
+  .delta.up { color: var(--green); } .delta.down { color: var(--red); } .delta.same { color: var(--muted); }
 
   .hidden { display: none !important; }
-  .empty { color: var(--muted); font-size: 12.5px; font-style: italic; }
 </style>
 </head>
 <body>
@@ -302,7 +233,7 @@
     <div class="topbar-inner">
       <div class="logo">
         <div class="mark">◎</div>
-        <div><b>svmscope</b> &nbsp;<span>transaction simulator</span></div>
+        <div><b>svmscope</b> &nbsp;<span class="tag">transaction simulator</span></div>
       </div>
       <div class="search">
         <input id="sig" placeholder="paste a Solana transaction signature…" spellcheck="false" autocomplete="off" />
@@ -313,44 +244,43 @@
 
   <main>
     <div id="hero" class="hero">
-      <h1>Decode, replay &amp; mutate any transaction</h1>
-      <p>Reconstruct the exact state a Solana transaction ran against, re-execute the
-         real programs locally, then rewrite an account's fields to ask
-         <em>“what if this had been different?”</em></p>
+      <h1>Decode, replay &amp; <span class="grad">mutate</span> any transaction</h1>
+      <p>Reconstruct the exact state a Solana transaction ran against, re-execute the real
+         programs locally, then rewrite an account's fields to ask <em>“what if?”</em></p>
     </div>
 
     <div id="status" class="status hidden"></div>
 
     <div id="out" class="hidden">
+      <div id="overview"></div>
+
       <div class="grid">
-        <div class="card"><h2>CPI call tree</h2><div id="tree" class="mono tree"></div></div>
-        <div class="card"><h2>Compute units <span id="cuCount" class="count"></span></h2><div id="compute" class="mono"></div></div>
-        <div class="card"><h2>Balance changes <span id="diffCount" class="count"></span></h2><div id="diffs" class="mono"></div></div>
-        <div class="card"><h2>Replay result</h2><div id="replay"></div></div>
+        <div class="card"><h2>Instruction call tree <span id="treeCount" class="count"></span></h2><div id="tree" class="tree"></div></div>
+        <div class="card"><h2>Compute units <span id="cuCount" class="count"></span></h2><div id="compute" class="rows"></div></div>
+        <div class="card"><h2>SOL balance changes <span id="diffCount" class="count"></span></h2><div id="diffs" class="rows"></div></div>
+        <div class="card"><h2>Token balance changes <span id="tokCount" class="count"></span></h2><div id="tokens" class="rows"></div></div>
       </div>
+
+      <div class="card full" style="margin-top:16px"><h2>Local replay</h2><div id="replay"></div></div>
 
       <div class="card full" style="margin-top:16px">
         <h2>What-if simulation <span id="acctCount" class="count"></span></h2>
-        <div class="field-form">
-          <div class="editor-toolbar">
-            <input id="acctFilter" class="filter" placeholder="filter accounts by address or type…" spellcheck="false" />
-            <span id="acctSummary" class="summary"></span>
-            <button class="btn ghost sm" id="expandAll">Expand all</button>
-          </div>
-          <div id="acctList"></div>
-          <div class="editor-actions">
-            <button class="btn ghost sm" id="stageBtn">＋ Stage all changes</button>
-            <span class="spacer"></span>
-            <span id="dirtyCount" class="dirty-count"></span>
-            <button class="btn" id="simBtn">Simulate ⟶</button>
-          </div>
+        <div class="editor-toolbar">
+          <input id="acctFilter" class="filter" placeholder="filter accounts by name, address or type…" spellcheck="false" />
+          <span id="acctSummary" class="summary"></span>
+          <button class="btn ghost sm" id="expandAll">Expand all</button>
         </div>
-
+        <div id="acctList"></div>
+        <div class="editor-actions">
+          <button class="btn ghost sm" id="stageBtn">＋ Stage all changes</button>
+          <span class="spacer"></span>
+          <span id="dirtyCount" class="dirty-count"></span>
+          <button class="btn" id="simBtn">Simulate ⟶</button>
+        </div>
         <div id="stagedWrap" class="hidden">
           <div style="font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin:18px 0 2px;font-weight:600">Staged mutations</div>
-          <div id="staged" class="staged"></div>
+          <div id="staged"></div>
         </div>
-
         <div id="simResult" class="sim-result"></div>
       </div>
     </div>
@@ -359,14 +289,57 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const short = (a) => a.length > 12 ? a.slice(0, 4) + '…' + a.slice(-4) : a;
+const short = (a) => a && a.length > 12 ? a.slice(0, 4) + '…' + a.slice(-4) : (a || '');
 const fmt = (n) => Number(n).toLocaleString('en-US');
 
-let analysis = null;   // full /analyze response
-let currentSig = '';
-let mutations = [];    // staged mutations, in server wire format
+let analysis = null, currentSig = '', mutations = [], mutableAccounts = [];
 
-// ---------- base58 (for editing pubkey fields) ----------
+// ---------------- known-program & known-mint registries ----------------
+const PROGRAMS = {
+  '11111111111111111111111111111111': ['System Program', '#8b93a7'],
+  'ComputeBudget111111111111111111111111111111': ['Compute Budget', '#8b93a7'],
+  'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA': ['Token Program', '#35d07f'],
+  'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb': ['Token-2022', '#35d07f'],
+  'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL': ['Associated Token', '#19d3f3'],
+  'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr': ['Memo Program', '#8b93a7'],
+  'Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo': ['Memo Program (v1)', '#8b93a7'],
+  'AddressLookupTab1e1111111111111111111111111': ['Address Lookup Table', '#8b93a7'],
+  'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4': ['Jupiter Aggregator v6', '#ff9c3b'],
+  'JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB': ['Jupiter Aggregator v4', '#ff9c3b'],
+  '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8': ['Raydium AMM v4', '#3b82f6'],
+  'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK': ['Raydium CLMM', '#3b82f6'],
+  'CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C': ['Raydium CPMM', '#3b82f6'],
+  'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc': ['Orca Whirlpools', '#60a5fa'],
+  'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA': ['Pump AMM', '#9945ff'],
+  '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P': ['Pump.fun', '#9945ff'],
+  'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo': ['Meteora DLMM', '#f472b6'],
+  'Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB': ['Meteora Pools', '#f472b6'],
+  'PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY': ['Phoenix', '#a78bfa'],
+  'srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX': ['OpenBook / Serum', '#e879f9'],
+  'opnb2LAfJYbRMAHHvqjCwQxanZn7ReEHp1k81EohpZb': ['OpenBook v2', '#e879f9'],
+  'dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcozatx': ['Drift v2', '#22d3ee'],
+};
+const MINTS = {
+  'So11111111111111111111111111111111111111112': ['SOL', 9],
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': ['USDC', 6],
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': ['USDT', 6],
+  'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So': ['mSOL', 9],
+  '7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj': ['stSOL', 9],
+  'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': ['BONK', 5],
+  'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN': ['JUP', 6],
+};
+// deterministic pastel hue for an unknown program, from its address
+function hashHue(s) { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) & 0xffff; return h % 360; }
+function progInfo(id) {
+  if (PROGRAMS[id]) return { name: PROGRAMS[id][0], color: PROGRAMS[id][1], known: true };
+  return { name: short(id), color: `hsl(${hashHue(id)} 45% 62%)`, known: false };
+}
+function mintInfo(mint) {
+  if (MINTS[mint]) return { sym: MINTS[mint][0], dec: MINTS[mint][1], known: true };
+  return { sym: short(mint), dec: null, known: false };
+}
+
+// ---------------- base58 (pubkey editing) ----------------
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 function bs58decode(str) {
   const map = {}; for (let i = 0; i < B58.length; i++) map[B58[i]] = i;
@@ -382,95 +355,184 @@ function bs58decode(str) {
 }
 const toHex = (arr) => arr.map(b => b.toString(16).padStart(2, '0')).join('');
 
-// encode a field's new value to hex bytes, throwing a clear error on bad input
 function encodeField(field, val) {
   val = val.trim();
   switch (field.type) {
-    case 'u64': {
-      const v = BigInt(val);
-      if (v < 0n || v > 0xffffffffffffffffn) throw new Error(field.name + ': out of u64 range');
-      let hex = ''; let x = v;
-      for (let i = 0; i < 8; i++) { hex += (x & 0xffn).toString(16).padStart(2, '0'); x >>= 8n; }
-      return hex;
-    }
-    case 'u8': {
-      const v = Number(val);
-      if (!Number.isInteger(v) || v < 0 || v > 255) throw new Error(field.name + ': must be 0–255');
-      return v.toString(16).padStart(2, '0');
-    }
-    case 'bool': {
-      const t = /^(1|true|yes)$/i.test(val), f = /^(0|false|no)$/i.test(val);
-      if (!t && !f) throw new Error(field.name + ': must be true/false');
-      return t ? '01' : '00';
-    }
-    case 'pubkey': {
-      const bytes = bs58decode(val);
-      if (bytes.length !== 32) throw new Error(field.name + ': not a 32-byte pubkey');
-      return toHex(bytes);
-    }
+    case 'u64': { const v = BigInt(val); if (v < 0n || v > 0xffffffffffffffffn) throw new Error(field.name + ': out of u64 range');
+      let hex = '', x = v; for (let i = 0; i < 8; i++) { hex += (x & 0xffn).toString(16).padStart(2, '0'); x >>= 8n; } return hex; }
+    case 'u8': { const v = Number(val); if (!Number.isInteger(v) || v < 0 || v > 255) throw new Error(field.name + ': must be 0–255'); return v.toString(16).padStart(2, '0'); }
+    case 'bool': { const t = /^(1|true|yes)$/i.test(val), f = /^(0|false|no)$/i.test(val); if (!t && !f) throw new Error(field.name + ': must be true/false'); return t ? '01' : '00'; }
+    case 'pubkey': { const bytes = bs58decode(val); if (bytes.length !== 32) throw new Error(field.name + ': not a 32-byte pubkey'); return toHex(bytes); }
     default: throw new Error(field.name + ': not editable');
   }
 }
 
-// ---------- rendering ----------
-function copyPill(addr, cls = '') {
-  return `<span class="addr-pill ${cls}" data-copy="${esc(addr)}" title="${esc(addr)} — click to copy">${esc(short(addr))}</span>`;
+// ---------------- formatting helpers ----------------
+function fmtSol(lamports) {
+  const s = (Number(lamports) / 1e9);
+  const str = s.toLocaleString('en-US', { maximumFractionDigits: 9 });
+  return str + ' SOL';
+}
+// raw base units (string) → human amount using decimals
+function fmtToken(rawStr, decimals) {
+  let raw = BigInt(rawStr); const neg = raw < 0n; if (neg) raw = -raw;
+  const base = 10n ** BigInt(decimals);
+  const whole = raw / base, frac = raw % base;
+  let out = whole.toLocaleString('en-US');
+  if (decimals > 0) {
+    let f = frac.toString().padStart(decimals, '0').replace(/0+$/, '');
+    if (f) out += '.' + f;
+  }
+  return (neg ? '-' : '') + out;
+}
+
+function copyPill(addr, text) {
+  return `<span class="addr-pill" data-copy="${esc(addr)}" title="${esc(addr)} — click to copy">${esc(text || short(addr))}</span>`;
+}
+// program chip: colored dot + name (+ faded address when named)
+function progChip(id) {
+  const p = progInfo(id);
+  const dot = `<span class="dot" style="color:${p.color};background:${p.color}"></span>`;
+  if (p.known) return `<span class="prog">${dot}<span class="nm">${esc(p.name)}</span>${copyPill(id, short(id))}</span>`;
+  return `<span class="prog">${dot}<span class="nm">${copyPill(id, short(id))}</span></span>`;
+}
+function progPill(id) {
+  const p = progInfo(id);
+  return `<span class="pill"><span class="dot" style="color:${p.color};background:${p.color}"></span>` +
+         `<span>${esc(p.name)}</span>${p.known ? `<span class="ad">${esc(short(id))}</span>` : ''}</span>`;
+}
+
+// ---------------- section renderers ----------------
+// The "headline" program: the top-level instruction program that burned the most
+// compute (the real work), ignoring infra programs. Falls back to the last one.
+function primaryProgram(top, compute) {
+  const cu = {}; (compute || []).forEach(r => { cu[r.program] = r.cu; });
+  const infra = new Set(Object.keys(PROGRAMS).filter(k => /System|Compute|Associated|Memo|Lookup|Token Program|Token-2022/.test(PROGRAMS[k][0])));
+  const app = top.filter(id => !infra.has(id));
+  const pool = app.length ? app : top;
+  return pool.slice().sort((a, b) => (cu[b] || 0) - (cu[a] || 0))[0] || null;
+}
+function renderOverview(o, replay, compute) {
+  const ok = o.success;
+  const prim = primaryProgram(o.top_programs, compute);
+  const title = prim ? progInfo(prim).name : 'Transaction';
+  const stats = [
+    ['Fee', fmtSol(o.fee)],
+    ['Compute', (o.compute_units != null ? fmt(o.compute_units) : fmt(replay.compute_units)) + ' CU'],
+    ['Instructions', o.top_programs.length],
+  ];
+  if (o.slot != null) stats.push(['Slot', fmt(o.slot)]);
+  const progs = o.top_programs.map(progPill).join('');
+  $('overview').innerHTML = `
+    <div class="overview">
+      <div class="ov-top">
+        <div class="ov-status">
+          <div class="ov-ring ${ok ? 'ok' : 'fail'}">${ok ? '✓' : '✕'}</div>
+          <div>
+            <div class="ov-title">${esc(title)}</div>
+            <div class="ov-sub">${ok ? 'Succeeded on-chain' : 'Failed on-chain'} · replayed ${replay.success ? 'successfully' : 'with failure'} locally</div>
+          </div>
+        </div>
+        <div class="ov-spacer"></div>
+        <div class="ov-stats">
+          ${stats.map(([l, v]) => `<div class="ov-stat"><div class="l">${l}</div><div class="v">${esc(v)}</div></div>`).join('')}
+        </div>
+      </div>
+      <div class="ov-progs">${progs}</div>
+    </div>`;
 }
 
 function renderTree(entries) {
-  return entries.map(e => {
-    if (e.stack_height === 1)
-      return `<div class="top"><span class="idx">#${e.index}</span>  ${esc(e.program)}</div>`;
-    const indent = '    '.repeat(Math.max(0, e.stack_height - 2));
-    return `<div class="inner">${indent}└─ [${e.stack_height}] ${esc(e.program)}</div>`;
-  }).join('');
-}
-
-function renderDiffs(changes) {
-  if (!changes.length) return '<div class="empty">no balance changes</div>';
-  return changes.map(c => {
-    const cls = c.delta >= 0 ? 'pos' : 'neg';
-    const sign = c.delta >= 0 ? '+' : '';
-    return `<div class="kv">${copyPill(c.address)}<span class="${cls}">${sign}${fmt(c.delta)} lamports</span></div>`;
+  $('treeCount').textContent = entries.length;
+  $('tree').innerHTML = entries.map(e => {
+    const depth = Math.max(1, e.stack_height);
+    const rail = depth > 1 ? '│   '.repeat(depth - 2) + '└── ' : '';
+    const ix = depth === 1 ? `<span class="ix">#${e.index}</span>` : `<span class="ix"></span>`;
+    return `<div class="tnode">${ix}<span class="rail">${rail}</span>${progChip(e.program)}` +
+           (depth > 1 ? `<span class="depth">depth ${depth}</span>` : '') + `</div>`;
   }).join('');
 }
 
 function renderCompute(rows) {
-  if (!rows.length) return '<div class="empty">no compute recorded</div>';
-  return rows.map(r =>
-    `<div class="kv">${copyPill(r.program)}<span>${fmt(r.cu)} <span style="color:var(--muted)">CU</span></span></div>`
-  ).join('');
+  $('cuCount').textContent = rows.length;
+  if (!rows.length) { $('compute').innerHTML = '<div class="empty">no compute recorded</div>'; return; }
+  const max = Math.max(...rows.map(r => r.cu), 1);
+  $('compute').innerHTML = rows.map(r => `
+    <div class="row">
+      <div class="grow">${progChip(r.program)}<div class="cu-bar" style="width:${Math.max(3, r.cu / max * 100)}%"></div></div>
+      <div class="cu-val">${fmt(r.cu)} <small>CU</small></div>
+    </div>`).join('');
+}
+
+function renderDiffs(changes) {
+  $('diffCount').textContent = changes.length;
+  if (!changes.length) { $('diffs').innerHTML = '<div class="empty">no SOL balance changes</div>'; return; }
+  $('diffs').innerHTML = changes.map(c => {
+    const cls = c.delta >= 0 ? 'pos' : 'neg', sign = c.delta >= 0 ? '+' : '−';
+    return `<div class="row"><div class="grow">${copyPill(c.address)}</div>` +
+           `<div class="amt ${cls}">${sign}${fmtSol(Math.abs(c.delta))}</div></div>`;
+  }).join('');
+}
+
+function renderTokens(changes) {
+  $('tokCount').textContent = changes.length;
+  if (!changes.length) { $('tokens').innerHTML = '<div class="empty">no token balance changes</div>'; return; }
+  $('tokens').innerHTML = changes.map(c => {
+    const m = mintInfo(c.mint);
+    const dec = m.dec != null ? m.dec : c.decimals;
+    const neg = c.delta_raw.startsWith('-');
+    const cls = neg ? 'neg' : 'pos', sign = neg ? '' : '+';
+    return `<div class="row">
+        <div class="grow">
+          <div><span class="tok-sym">${esc(m.sym)}</span> &nbsp;<span class="sub-owner">owner ${copyPill(c.owner)}</span></div>
+          <div class="tok-meta">${copyPill(c.address)} · ${m.known ? esc(m.sym) + ' mint' : 'mint ' + esc(short(c.mint))}</div>
+        </div>
+        <div class="amt ${cls}">${sign}${esc(fmtToken(c.delta_raw, dec))}</div>
+      </div>`;
+  }).join('');
 }
 
 function fmtLog(l) {
-  const cls = /invoke \[\d+\]/.test(l) ? 'invoke' : /success$/.test(l) ? 'ok' : /failed|error/i.test(l) ? 'fail' : '';
+  let cls = '';
+  if (/invoke \[\d+\]/.test(l)) cls = 'invoke';
+  else if (/success$/.test(l)) cls = 'ok';
+  else if (/failed|error/i.test(l)) cls = 'fail';
+  else if (/^Program log:|^Program return:/.test(l)) cls = 'lg';
   return `<div class="${cls}">${esc(l)}</div>`;
 }
-
 function renderReplay(r) {
-  const badge = r.success
-    ? `<span class="badge ok"><span class="dot"></span>success</span>`
-    : `<span class="badge fail"><span class="dot"></span>failed</span>`;
+  const badge = r.success ? `<span class="badge ok"><span class="b-dot"></span>replay success</span>`
+                          : `<span class="badge fail"><span class="b-dot"></span>replay failed</span>`;
   const err = r.error ? `<div class="err-box">${esc(r.error)}</div>` : '';
-  const logs = r.logs && r.logs.length
-    ? `<div class="logs">${r.logs.map(fmtLog).join('')}</div>` : '';
-  return `<div class="replay-head">${badge}<span class="cu"><b>${fmt(r.compute_units)}</b> compute units consumed</span></div>${err}${logs}`;
+  const logs = r.logs && r.logs.length ? `<div class="logs">${r.logs.map(fmtLog).join('')}</div>` : '';
+  return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${err}${logs}`;
 }
 
-// ---------- what-if editor (all mutable accounts listed) ----------
-let mutableAccounts = [];
-
+// ---------------- what-if editor ----------------
 function accountHint(a) {
   if (a.decoded) {
-    const amt = a.decoded.fields.find(f => f.name === 'amount');
-    const sup = a.decoded.fields.find(f => f.name === 'supply');
-    if (amt) return 'amount ' + fmt(amt.value);
-    if (sup) return 'supply ' + fmt(sup.value);
+    if (a.decoded.type_name === 'SPL Token Account') {
+      const mintf = a.decoded.fields.find(f => f.name === 'mint');
+      const amtf = a.decoded.fields.find(f => f.name === 'amount');
+      const m = mintf ? mintInfo(mintf.value) : { sym: '', dec: 0 };
+      const dec = m.dec != null ? m.dec : 0;
+      return `${esc(m.sym)} · ${fmtToken(amtf.value, dec)}`;
+    }
+    if (a.decoded.type_name === 'SPL Mint') {
+      const sup = a.decoded.fields.find(f => f.name === 'supply');
+      const dc = a.decoded.fields.find(f => f.name === 'decimals');
+      const m = mintInfo(a.address);
+      return `${m.known ? esc(m.sym) + ' · ' : ''}supply ${fmtToken(sup.value, Number(dc.value))}`;
+    }
   }
-  return fmt(a.lamports) + ' lamports';
+  return fmtSol(a.lamports);
+}
+function accountTypeTag(a) {
+  if (!a.decoded) return `<span class="type-tag raw">Account</span>`;
+  if (a.decoded.type_name === 'SPL Mint') return `<span class="type-tag mint">SPL Mint</span>`;
+  return `<span class="type-tag">SPL Token Account</span>`;
 }
 
-// Build the field-editor body for one account (no action buttons — those are global).
 function buildEditorBody(a) {
   let rows = `
     <tr>
@@ -479,123 +541,73 @@ function buildEditorBody(a) {
       <td class="f-cur">${fmt(a.lamports)}</td>
       <td><input class="f-in" data-kind="lamports" data-cur="${a.lamports}" value="${a.lamports}" spellcheck="false" /></td>
     </tr>`;
-
   if (a.decoded) {
     rows += a.decoded.fields.map((f, i) => {
       const cur = esc(f.value);
       const note = f.note ? `<div class="f-off">${esc(f.note)}</div>` : '';
       const cell = f.editable
         ? `<input class="f-in" data-kind="field" data-fi="${i}" data-cur="${cur}" value="${cur}" spellcheck="false" />`
-        : `<span class="ro-dash" title="read-only (option/tag field)">${cur} <span style="color:var(--border-strong)">·  read-only</span></span>`;
-      return `<tr>
-          <td><span class="f-name">${esc(f.name)}</span> <span class="f-off">@${f.offset}</span>${note}</td>
-          <td><span class="f-type">${esc(f.type)}</span></td>
-          <td class="f-cur${f.editable ? '' : ' ro'}">${cur}</td>
-          <td>${cell}</td>
-        </tr>`;
+        : `<span class="ro-dash" title="read-only (option/tag field)">${cur} <span style="color:var(--line-2)">·  read-only</span></span>`;
+      return `<tr><td><span class="f-name">${esc(f.name)}</span> <span class="f-off">@${f.offset}</span>${note}</td>
+        <td><span class="f-type">${esc(f.type)}</span></td>
+        <td class="f-cur${f.editable ? '' : ' ro'}">${cur}</td><td>${cell}</td></tr>`;
     }).join('');
   }
-
-  let body = `
-    <div class="acct-meta">
-      <span>owner ${copyPill(a.owner)}</span>
-      <span>${fmt(a.lamports)} lamports · ${a.data_len} bytes</span>
-    </div>
-    <table class="fields">
-      <thead><tr><th>Field</th><th>Type</th><th>Current</th><th>New value</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
-
+  let body = `<div class="acct-meta"><span>owner ${copyPill(a.owner)}</span><span>${fmt(a.lamports)} lamports · ${a.data_len} bytes</span></div>
+    <table class="fields"><thead><tr><th>Field</th><th>Type</th><th>Current</th><th>New value</th></tr></thead><tbody>${rows}</tbody></table>`;
   if (!a.decoded) {
-    body += `<div class="raw-note">
-      This account's layout isn't recognized, so there are no named fields.
-      You can still patch raw bytes at a chosen offset (hex, e.g. <code>00e1f505</code>).
-      <div class="raw-inputs">
-        <input class="raw-off" type="number" placeholder="offset" style="max-width:110px" />
-        <input class="raw-hex" placeholder="hex bytes" style="flex:1" spellcheck="false" />
-      </div>
-    </div>`;
+    body += `<div class="raw-note">Unrecognized layout — no named fields. Patch raw bytes at an offset (hex, e.g. <code>00e1f505</code>).
+      <div class="raw-inputs"><input class="raw-off" type="number" placeholder="offset" style="max-width:110px" />
+      <input class="raw-hex" placeholder="hex bytes" style="flex:1" spellcheck="false" /></div></div>`;
   }
   return body;
 }
-
 function buildCard(a) {
-  const kind = a.decoded ? a.decoded.type_name : 'Unknown layout';
-  const tagCls = a.decoded ? '' : 'raw';
-  const filterKey = (a.address + ' ' + a.owner + ' ' + kind).toLowerCase();
-  return `<div class="acct-card" data-address="${esc(a.address)}" data-key="${esc(filterKey)}">
-     <button class="acct-head" type="button">
-        <span class="chev">▶</span>
-        <span class="edit-dot hidden"></span>
-        <span class="type-tag ${tagCls}">${esc(kind)}</span>
-        ${copyPill(a.address)}
-        <span class="hint">${esc(accountHint(a))}</span>
-     </button>
-     <div class="acct-body hidden">${buildEditorBody(a)}</div>
-  </div>`;
+  const key = (a.address + ' ' + a.owner + ' ' + (a.decoded ? a.decoded.type_name : 'account') + ' ' + accountHint(a)).toLowerCase();
+  return `<div class="acct-card" data-address="${esc(a.address)}" data-key="${esc(key)}">
+     <button class="acct-head" type="button"><span class="chev">▶</span><span class="edit-dot hidden"></span>
+        ${accountTypeTag(a)}${copyPill(a.address)}<span class="hint">${accountHint(a)}</span></button>
+     <div class="acct-body hidden">${buildEditorBody(a)}</div></div>`;
 }
-
 function renderAccountList() {
   mutableAccounts = analysis.accounts.filter(a => !a.executable);
   const n = mutableAccounts.length;
   $('acctCount').textContent = n + ' mutable';
   $('acctSummary').textContent = n + ' mutable account' + (n !== 1 ? 's' : '');
-  $('acctList').innerHTML = n
-    ? mutableAccounts.map(buildCard).join('')
-    : '<div class="empty" style="margin:12px 0">no mutable accounts in this transaction</div>';
-  wireCards();
-  updateDirtyState();
+  $('acctList').innerHTML = n ? mutableAccounts.map(buildCard).join('') : '<div class="empty" style="margin:12px 0">no mutable accounts</div>';
+  wireCards(); updateDirtyState();
 }
-
 function wireCards() {
   $('acctList').querySelectorAll('.acct-card').forEach(card => {
-    const head = card.querySelector('.acct-head');
-    const body = card.querySelector('.acct-body');
-    head.addEventListener('click', (e) => {
-      if (e.target.closest('.addr-pill')) return; // let copy handle its own click
-      card.classList.toggle('open');
-      body.classList.toggle('hidden');
-    });
-    card.querySelectorAll('input.f-in, .raw-off, .raw-hex').forEach(inp => {
-      inp.addEventListener('input', () => {
-        if (inp.classList.contains('f-in')) inp.classList.toggle('dirty', inp.value.trim() !== inp.dataset.cur);
-        updateDirtyState();
-      });
-    });
+    const head = card.querySelector('.acct-head'), body = card.querySelector('.acct-body');
+    head.addEventListener('click', (e) => { if (e.target.closest('.addr-pill')) return; card.classList.toggle('open'); body.classList.toggle('hidden'); });
+    card.querySelectorAll('input.f-in, .raw-off, .raw-hex').forEach(inp => inp.addEventListener('input', () => {
+      if (inp.classList.contains('f-in')) inp.classList.toggle('dirty', inp.value.trim() !== inp.dataset.cur);
+      updateDirtyState();
+    }));
   });
-  // copy handlers for card address pills are wired by the analyze() wireCopy($('out')) pass
 }
-
-// Reflect which accounts have pending edits (amber border + dot) and the total count.
 function updateDirtyState() {
   let total = 0;
   $('acctList').querySelectorAll('.acct-card').forEach(card => {
-    const dirtyFields = card.querySelectorAll('input.f-in.dirty').length;
-    const rawOff = card.querySelector('.raw-off'), rawHex = card.querySelector('.raw-hex');
-    const rawSet = (rawOff && rawOff.value.trim() !== '') || (rawHex && rawHex.value.trim() !== '');
-    const has = dirtyFields > 0 || rawSet;
+    const df = card.querySelectorAll('input.f-in.dirty').length;
+    const ro = card.querySelector('.raw-off'), rh = card.querySelector('.raw-hex');
+    const rawSet = (ro && ro.value.trim() !== '') || (rh && rh.value.trim() !== '');
+    const has = df > 0 || rawSet;
     card.classList.toggle('has-edits', has);
     card.querySelector('.edit-dot').classList.toggle('hidden', !has);
-    if (has) total += dirtyFields + (rawSet ? 1 : 0);
+    if (has) total += df + (rawSet ? 1 : 0);
   });
   $('dirtyCount').textContent = total ? `${total} unstaged edit${total > 1 ? 's' : ''}` : '';
 }
-
-// Collect changed edits across every account card into wire-format mutations.
 function collectAllEdits() {
   const out = [];
   $('acctList').querySelectorAll('.acct-card').forEach(card => {
-    const address = card.dataset.address;
-    const a = mutableAccounts.find(x => x.address === address);
+    const address = card.dataset.address, a = mutableAccounts.find(x => x.address === address);
     card.querySelectorAll('input.f-in').forEach(inp => {
-      const v = inp.value.trim();
-      if (v === inp.dataset.cur) return;
-      if (inp.dataset.kind === 'lamports') {
-        out.push({ kind: 'lamports', address, lamports: Number(v), _label: `lamports → ${fmt(v)}` });
-      } else {
-        const f = a.decoded.fields[Number(inp.dataset.fi)];
-        out.push({ kind: 'data', address, offset: f.offset, bytes_hex: encodeField(f, v), _label: `${f.name} → ${v}` });
-      }
+      const v = inp.value.trim(); if (v === inp.dataset.cur) return;
+      if (inp.dataset.kind === 'lamports') out.push({ kind: 'lamports', address, lamports: Number(v), _label: `lamports → ${fmt(v)}` });
+      else { const f = a.decoded.fields[Number(inp.dataset.fi)]; out.push({ kind: 'data', address, offset: f.offset, bytes_hex: encodeField(f, v), _label: `${f.name} → ${v}` }); }
     });
     const off = card.querySelector('.raw-off'), hx = card.querySelector('.raw-hex');
     if (off && hx && (off.value.trim() !== '' || hx.value.trim() !== '')) {
@@ -607,167 +619,110 @@ function collectAllEdits() {
   });
   return out;
 }
-
 function stageAll() {
   try {
     const edits = collectAllEdits();
     if (!edits.length) { flashSim('nothing changed to stage', true); return; }
-    mutations.push(...edits);
-    renderStaged();
-    // reset every dirty input now that its edit is staged
+    mutations.push(...edits); renderStaged();
     $('acctList').querySelectorAll('input.f-in.dirty').forEach(i => { i.value = i.dataset.cur; i.classList.remove('dirty'); });
     $('acctList').querySelectorAll('.raw-off, .raw-hex').forEach(i => { i.value = ''; });
-    updateDirtyState();
-    flashSim('');
+    updateDirtyState(); flashSim('');
   } catch (e) { flashSim(e.message, true); }
 }
-
-function filterAccounts(q) {
-  q = q.trim().toLowerCase();
-  $('acctList').querySelectorAll('.acct-card').forEach(card => {
-    card.classList.toggle('hidden', q !== '' && !card.dataset.key.includes(q));
-  });
-}
-
-function toggleExpandAll() {
-  const cards = [...$('acctList').querySelectorAll('.acct-card:not(.hidden)')];
-  const anyClosed = cards.some(c => !c.classList.contains('open'));
-  cards.forEach(c => {
-    c.classList.toggle('open', anyClosed);
-    c.querySelector('.acct-body').classList.toggle('hidden', !anyClosed);
-  });
-  $('expandAll').textContent = anyClosed ? 'Collapse all' : 'Expand all';
-}
-
 function renderStaged() {
   const wrap = $('stagedWrap');
   if (!mutations.length) { wrap.classList.add('hidden'); $('staged').innerHTML = ''; return; }
   wrap.classList.remove('hidden');
   $('staged').innerHTML = mutations.map((m, i) =>
-    `<div class="staged-item">
-        <span class="k">${m.kind === 'lamports' ? 'LAMPORTS' : 'DATA'}</span>
-        <span class="body">${copyPill(m.address)} &nbsp;${esc(m._label || '')}</span>
-        <button class="rm" data-i="${i}" title="remove">✕</button>
-     </div>`).join('');
-  $('staged').querySelectorAll('.rm').forEach(b =>
-    b.addEventListener('click', () => { mutations.splice(Number(b.dataset.i), 1); renderStaged(); }));
+    `<div class="staged-item"><span class="k">${m.kind === 'lamports' ? 'LAMPORTS' : 'DATA'}</span>
+       <span class="body">${copyPill(m.address)} &nbsp;${esc(m._label || '')}</span>
+       <button class="rm" data-i="${i}" title="remove">✕</button></div>`).join('');
+  $('staged').querySelectorAll('.rm').forEach(b => b.addEventListener('click', () => { mutations.splice(Number(b.dataset.i), 1); renderStaged(); }));
   wireCopy($('staged'));
 }
-
-function flashSim(msg, isErr) {
-  $('simResult').innerHTML = msg ? `<div class="status ${isErr ? 'err' : ''}">${esc(msg)}</div>` : '';
+function filterAccounts(q) {
+  q = q.trim().toLowerCase();
+  $('acctList').querySelectorAll('.acct-card').forEach(card => card.classList.toggle('hidden', q !== '' && !card.dataset.key.includes(q)));
 }
+function toggleExpandAll() {
+  const cards = [...$('acctList').querySelectorAll('.acct-card:not(.hidden)')];
+  const anyClosed = cards.some(c => !c.classList.contains('open'));
+  cards.forEach(c => { c.classList.toggle('open', anyClosed); c.querySelector('.acct-body').classList.toggle('hidden', !anyClosed); });
+  $('expandAll').textContent = anyClosed ? 'Collapse all' : 'Expand all';
+}
+function flashSim(msg, isErr) { $('simResult').innerHTML = msg ? `<div class="status ${isErr ? 'err' : ''}" style="text-align:left;margin:10px 0">${esc(msg)}</div>` : ''; }
 
-// ---------- actions ----------
+// ---------------- actions ----------------
 function wireCopy(root) {
   root.querySelectorAll('.addr-pill').forEach(el => {
-    el.addEventListener('click', async () => {
+    if (el._wired) return; el._wired = true;
+    el.addEventListener('click', async (e) => {
+      e.stopPropagation();
       try { await navigator.clipboard.writeText(el.dataset.copy); } catch {}
-      el.classList.add('copied'); const t = el.textContent;
-      el.textContent = 'copied'; setTimeout(() => { el.textContent = t; el.classList.remove('copied'); }, 900);
+      const t = el.textContent; el.classList.add('copied'); el.textContent = 'copied';
+      setTimeout(() => { el.textContent = t; el.classList.remove('copied'); }, 900);
     });
   });
 }
-
 async function analyze() {
-  const sig = $('sig').value.trim();
-  if (!sig) return;
+  const sig = $('sig').value.trim(); if (!sig) return;
   currentSig = sig; mutations = [];
-  $('go').disabled = true;
-  $('out').classList.add('hidden');
-  $('hero').classList.add('hidden');
-  const st = $('status');
-  st.className = 'status'; st.classList.remove('hidden');
+  $('go').disabled = true; $('out').classList.add('hidden'); $('hero').classList.add('hidden');
+  const st = $('status'); st.className = 'status'; st.classList.remove('hidden');
   st.innerHTML = '<span class="spinner"></span>fetching state · loading programs · replaying…';
   try {
     const res = await fetch(`/analyze/${encodeURIComponent(sig)}`);
     if (!res.ok) throw new Error(await res.text());
     analysis = await res.json();
-    $('tree').innerHTML = renderTree(analysis.cpi_tree);
-    $('diffs').innerHTML = renderDiffs(analysis.balance_change);
-    $('diffCount').textContent = analysis.balance_change.length;
-    $('compute').innerHTML = renderCompute(analysis.compute);
-    $('cuCount').textContent = analysis.compute.length;
+    renderOverview(analysis.overview, analysis.replay, analysis.compute);
+    renderTree(analysis.cpi_tree);
+    renderCompute(analysis.compute);
+    renderDiffs(analysis.balance_change);
+    renderTokens(analysis.token_change);
     $('replay').innerHTML = renderReplay(analysis.replay);
-    renderStaged();
-    flashSim('');
+    renderStaged(); flashSim('');
     renderAccountList();
-    $('acctFilter').value = '';
-    $('expandAll').textContent = 'Expand all';
+    $('acctFilter').value = ''; $('expandAll').textContent = 'Expand all';
     wireCopy($('out'));
-    st.classList.add('hidden');
-    $('out').classList.remove('hidden');
-  } catch (e) {
-    st.className = 'status err';
-    st.textContent = 'error: ' + e.message;
-  } finally {
-    $('go').disabled = false;
-  }
+    st.classList.add('hidden'); $('out').classList.remove('hidden');
+  } catch (e) { st.className = 'status err'; st.textContent = 'error: ' + e.message; }
+  finally { $('go').disabled = false; }
 }
-
 async function simulate() {
   if (!analysis) { flashSim('analyze a transaction first', true); return; }
   let toSend;
-  try {
-    toSend = [...mutations, ...collectAllEdits()]; // staged + any unsaved edits
-  } catch (e) { flashSim(e.message, true); return; }
+  try { toSend = [...mutations, ...collectAllEdits()]; } catch (e) { flashSim(e.message, true); return; }
   if (!toSend.length) { flashSim('change at least one field, or stage a mutation', true); return; }
-
   const btn = $('simBtn'); btn.disabled = true;
-  $('simResult').innerHTML = '<div class="status"><span class="spinner"></span>replaying with mutations…</div>';
+  $('simResult').innerHTML = '<div class="status" style="text-align:left;margin:12px 0"><span class="spinner"></span>replaying with mutations…</div>';
   try {
-    const res = await fetch('/simulate', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        signature: currentSig,
-        mutations: toSend.map(({ _label, ...m }) => m),
-      }),
-    });
+    const res = await fetch('/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m) }) });
     if (!res.ok) throw new Error(await res.text());
-    const r = await res.json();
-    renderComparison(analysis.replay, r, toSend.length);
-  } catch (e) {
-    flashSim('error: ' + e.message, true);
-  } finally {
-    btn.disabled = false;
-  }
+    renderComparison(analysis.replay, await res.json(), toSend.length);
+  } catch (e) { flashSim('error: ' + e.message, true); }
+  finally { btn.disabled = false; }
 }
-
 function renderComparison(before, after, n) {
-  const chip = (r) => r.success
-    ? '<span class="badge ok"><span class="dot"></span>success</span>'
-    : '<span class="badge fail"><span class="dot"></span>failed</span>';
+  const chip = (r) => r.success ? '<span class="badge ok"><span class="b-dot"></span>success</span>' : '<span class="badge fail"><span class="b-dot"></span>failed</span>';
   const dCU = after.compute_units - before.compute_units;
-  const deltaCls = dCU > 0 ? 'up' : dCU < 0 ? 'down' : 'same';
-  const deltaTxt = dCU === 0 ? 'no change in compute'
-    : `${dCU > 0 ? '+' : ''}${fmt(dCU)} CU vs. original`;
+  const dc = dCU > 0 ? 'up' : dCU < 0 ? 'down' : 'same';
+  const dt = dCU === 0 ? 'no change in compute' : `${dCU > 0 ? '+' : ''}${fmt(dCU)} CU vs. original`;
   const flip = before.success !== after.success
     ? `<div class="delta ${after.success ? 'up' : 'down'}">outcome flipped: ${before.success ? 'success → failed' : 'failed → success'}</div>` : '';
-
   $('simResult').innerHTML = `
     <div style="font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin:6px 0 10px;font-weight:600">
-      Mutated replay <span style="color:var(--amber)">· ${n} mutation${n > 1 ? 's' : ''} applied</span>
-    </div>
+      Mutated replay <span style="color:var(--amber)">· ${n} mutation${n > 1 ? 's' : ''} applied</span></div>
     <div class="compare">
-      <div class="compare-col">
-        <div class="lbl">Original</div>
-        ${chip(before)}
-        <div class="cu" style="margin-top:8px"><b>${fmt(before.compute_units)}</b> CU</div>
-      </div>
+      <div class="compare-col"><div class="lbl">Original</div>${chip(before)}<div class="cu-note" style="margin-top:8px"><b>${fmt(before.compute_units)}</b> CU</div></div>
       <div class="arrow">→</div>
-      <div class="compare-col">
-        <div class="lbl">Mutated</div>
-        ${chip(after)}
-        <div class="cu" style="margin-top:8px"><b>${fmt(after.compute_units)}</b> CU</div>
-        <div class="delta ${deltaCls}">${deltaTxt}</div>
-        ${flip}
-      </div>
+      <div class="compare-col"><div class="lbl">Mutated</div>${chip(after)}<div class="cu-note" style="margin-top:8px"><b>${fmt(after.compute_units)}</b> CU</div>
+        <div class="delta ${dc}">${dt}</div>${flip}</div>
     </div>
     ${after.error ? `<div class="err-box">${esc(after.error)}</div>` : ''}
     ${after.logs && after.logs.length ? `<div class="logs">${after.logs.map(fmtLog).join('')}</div>` : ''}`;
 }
 
-// ---------- wiring ----------
 $('go').addEventListener('click', analyze);
 $('sig').addEventListener('keydown', e => { if (e.key === 'Enter') analyze(); });
 $('acctFilter').addEventListener('input', e => filterAccounts(e.target.value));

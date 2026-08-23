@@ -18,13 +18,45 @@ use solana_client::rpc_request::RpcRequest;
 /// The full analysis of a transaction — the payload the CLI prints and the API serves.
 #[derive(Serialize)]
 pub struct Analysis {
+    pub overview: Overview,
     pub cpi_tree: Vec<cpi_tree::CpiEntry>,
     pub balance_change: Vec<diffs::BalanceChange>,
+    pub token_change: Vec<diffs::TokenChange>,
     pub compute: Vec<compute::CuUsage>,
     pub replay: replay::ReplayResult,
     /// The transaction's accounts, with decoded fields where the layout is known.
     /// Drives the what-if editor: pick an account, edit named fields.
     pub accounts: Vec<decode::AccountInfo>,
+}
+
+/// Headline facts about the transaction as it actually ran on-chain.
+#[derive(Serialize)]
+pub struct Overview {
+    /// The transaction succeeded on-chain (meta.err is null).
+    pub success: bool,
+    /// Fee paid, in lamports.
+    pub fee: u64,
+    /// Slot the transaction landed in, if reported.
+    pub slot: Option<u64>,
+    /// On-chain compute units consumed, if reported.
+    pub compute_units: Option<u64>,
+    /// Top-level programs invoked, in order (the instruction programs).
+    pub top_programs: Vec<String>,
+}
+
+fn build_overview(tx: &serde_json::Value, cpi_tree: &[cpi_tree::CpiEntry]) -> Overview {
+    let top_programs = cpi_tree
+        .iter()
+        .filter(|e| e.stack_height == 1)
+        .map(|e| e.program.clone())
+        .collect();
+    Overview {
+        success: tx["meta"]["err"].is_null(),
+        fee: tx["meta"]["fee"].as_u64().unwrap_or(0),
+        slot: tx["slot"].as_u64(),
+        compute_units: tx["meta"]["computeUnitsConsumed"].as_u64(),
+        top_programs,
+    }
 }
 
 /// Fetch a transaction, decode it, and replay it — bundled into one `Analysis`.
@@ -42,9 +74,12 @@ pub fn analyze(client: &RpcClient, signature: &str) -> Result<Analysis, String> 
 
     let account_keys = utils::resolve_account_keys(&tx);
 
+    let cpi_tree = cpi_tree::build_cpi_tree(&tx);
     Ok(Analysis {
-        cpi_tree: cpi_tree::build_cpi_tree(&tx),
+        overview: build_overview(&tx, &cpi_tree),
+        cpi_tree,
         balance_change: diffs::account_diffs(&tx),
+        token_change: diffs::token_diffs(&tx),
         compute: compute::cu_per_program(&tx),
         replay: replay::replay_transaction(client, signature, &account_keys),
         accounts: decode::describe_accounts(client, &account_keys),
