@@ -6,193 +6,613 @@
 <title>svmscope</title>
 <style>
   :root {
-    --bg: #0d1117; --panel: #161b22; --border: #21262d; --text: #e6edf3;
-    --muted: #8b949e; --accent: #58a6ff; --green: #3fb950; --red: #f85149;
-    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    --bg: #0a0c10;
+    --bg-elev: #0f131a;
+    --panel: #12161f;
+    --panel-2: #0c0f16;
+    --border: #1e2632;
+    --border-strong: #2a3444;
+    --text: #e8edf4;
+    --text-dim: #9aa7b8;
+    --muted: #667487;
+    --accent: #7c8cff;
+    --accent-dim: #5866d6;
+    --green: #4ade80;
+    --green-bg: rgba(74, 222, 128, .12);
+    --red: #f87171;
+    --red-bg: rgba(248, 113, 113, .12);
+    --amber: #fbbf24;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.25);
   }
   * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
   body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    line-height: 1.5;
+    margin: 0; background:
+      radial-gradient(1200px 600px at 50% -200px, rgba(124,140,255,.08), transparent 70%),
+      var(--bg);
+    color: var(--text); font-family: var(--sans); line-height: 1.5;
+    font-size: 14px; letter-spacing: .1px; min-height: 100vh;
   }
-  header { padding: 24px 20px 8px; max-width: 960px; margin: 0 auto; }
-  h1 { margin: 0; font-size: 22px; letter-spacing: .3px; }
-  h1 .dim { color: var(--muted); font-weight: 400; }
-  .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
-  main { max-width: 960px; margin: 0 auto; padding: 12px 20px 60px; }
-  .bar { display: flex; gap: 8px; margin: 16px 0 8px; }
-  input {
-    flex: 1; background: var(--panel); border: 1px solid var(--border);
-    color: var(--text); padding: 10px 12px; border-radius: 8px;
-    font-family: var(--mono); font-size: 13px;
+  a { color: var(--accent); }
+
+  /* ---- top bar ---- */
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    backdrop-filter: blur(12px);
+    background: rgba(10, 12, 16, .8);
+    border-bottom: 1px solid var(--border);
   }
-  input:focus { outline: none; border-color: var(--accent); }
-  button {
-    background: var(--accent); color: #0d1117; border: 0; padding: 10px 18px;
-    border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px;
+  .topbar-inner {
+    max-width: 1080px; margin: 0 auto; padding: 14px 24px;
+    display: flex; align-items: center; gap: 14px;
   }
-  button:disabled { opacity: .5; cursor: default; }
-  select {
-    background: var(--panel); border: 1px solid var(--border); color: var(--text);
-    padding: 10px 12px; border-radius: 8px; font-size: 13px; flex: 0 0 auto;
+  .logo { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+  .logo .mark {
+    width: 28px; height: 28px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent), #4dd0e1);
+    display: grid; place-items: center; font-size: 15px; font-weight: 800;
+    color: #0a0c10; box-shadow: 0 2px 10px rgba(124,140,255,.4);
   }
-  select:focus { outline: none; border-color: var(--accent); }
-  #add { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
-  .mut-row {
-    display: flex; justify-content: space-between; align-items: center; gap: 8px;
-    padding: 5px 10px; margin: 4px 0; background: #0d1117;
-    border: 1px solid var(--border); border-radius: 6px; font-size: 12px;
+  .logo b { font-size: 16px; letter-spacing: .3px; font-weight: 700; }
+  .logo span { color: var(--muted); font-size: 12.5px; }
+
+  .search { display: flex; gap: 8px; flex: 1; min-width: 0; }
+  .search input {
+    flex: 1; min-width: 0; background: var(--panel-2);
+    border: 1px solid var(--border-strong); color: var(--text);
+    padding: 9px 12px; border-radius: 9px; font-family: var(--mono); font-size: 12.5px;
+    transition: border-color .15s, box-shadow .15s;
   }
-  .mut-row .kind { color: var(--accent); font-weight: 600; margin-right: 6px; }
-  .mut-row .rm {
-    background: none; border: 0; color: var(--red); cursor: pointer;
-    padding: 0 4px; font-size: 15px; line-height: 1;
+  .search input::placeholder { color: var(--muted); }
+  .search input:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(124,140,255,.15);
   }
-  .panel {
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: 10px; padding: 14px 16px; margin: 14px 0;
+  .btn {
+    background: linear-gradient(180deg, var(--accent), var(--accent-dim));
+    color: #0a0c10; border: 0; padding: 9px 18px; border-radius: 9px;
+    font-weight: 650; cursor: pointer; font-size: 13.5px; flex: 0 0 auto;
+    transition: filter .15s, transform .05s; font-family: var(--sans);
   }
-  .panel h2 {
-    margin: 0 0 10px; font-size: 12px; text-transform: uppercase;
-    letter-spacing: .8px; color: var(--muted);
+  .btn:hover { filter: brightness(1.08); }
+  .btn:active { transform: translateY(1px); }
+  .btn:disabled { opacity: .45; cursor: default; filter: none; }
+  .btn.ghost {
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--border-strong); font-weight: 550;
   }
-  .mono { font-family: var(--mono); font-size: 12.5px; }
-  .tree div { white-space: pre; }
-  .tree .top { color: var(--text); }
-  .tree .inner { color: var(--muted); }
-  .row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
-  .row .addr { color: var(--text); }
-  .pos { color: var(--green); } .neg { color: var(--red); }
-  .badge {
-    display: inline-block; padding: 3px 10px; border-radius: 999px;
-    font-size: 12px; font-weight: 600;
+  .btn.ghost:hover { border-color: var(--accent); filter: none; }
+  .btn.sm { padding: 6px 12px; font-size: 12.5px; border-radius: 7px; }
+
+  main { max-width: 1080px; margin: 0 auto; padding: 26px 24px 80px; }
+
+  .hero { text-align: center; padding: 40px 0 8px; }
+  .hero h1 { margin: 0 0 8px; font-size: 26px; font-weight: 700; letter-spacing: .2px; }
+  .hero p { margin: 0 auto; max-width: 540px; color: var(--text-dim); font-size: 14.5px; }
+  .hint-row { display: flex; gap: 8px; justify-content: center; margin-top: 16px; flex-wrap: wrap; }
+  .chip-btn {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text-dim);
+    padding: 6px 12px; border-radius: 999px; font-size: 12px; cursor: pointer;
+    font-family: var(--mono); transition: all .15s;
   }
-  .badge.ok { background: rgba(63,185,80,.15); color: var(--green); }
-  .badge.fail { background: rgba(248,81,73,.15); color: var(--red); }
-  .logs {
-    margin-top: 10px; background: #0d1117; border: 1px solid var(--border);
-    border-radius: 8px; padding: 10px; max-height: 260px; overflow: auto;
-    color: var(--muted); font-family: var(--mono); font-size: 11.5px;
-  }
-  .logs div { white-space: pre-wrap; }
-  .status { color: var(--muted); font-size: 13px; margin: 10px 0; }
+  .chip-btn:hover { border-color: var(--accent); color: var(--text); }
+
+  .status { color: var(--text-dim); font-size: 13.5px; margin: 20px 0; text-align: center; }
   .status.err { color: var(--red); }
-  .hidden { display: none; }
+  .spinner {
+    display: inline-block; width: 13px; height: 13px; margin-right: 8px;
+    border: 2px solid var(--border-strong); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+
+  .card {
+    background: linear-gradient(180deg, var(--panel), var(--bg-elev));
+    border: 1px solid var(--border); border-radius: 14px;
+    padding: 18px 20px; box-shadow: var(--shadow);
+  }
+  .card.full { grid-column: 1 / -1; }
+  .card h2 {
+    margin: 0 0 14px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 1.2px; color: var(--muted); font-weight: 650;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .card h2 .count {
+    background: var(--panel-2); border: 1px solid var(--border);
+    color: var(--text-dim); border-radius: 999px; padding: 1px 8px;
+    font-size: 10.5px; letter-spacing: .5px;
+  }
+
+  .mono { font-family: var(--mono); font-size: 12.5px; }
+  .tree div { white-space: pre; line-height: 1.7; }
+  .tree .top { color: var(--text); }
+  .tree .idx { color: var(--accent); }
+  .tree .inner { color: var(--text-dim); }
+
+  .kv { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0;
+        border-bottom: 1px solid rgba(30,38,50,.5); font-family: var(--mono); font-size: 12.5px; }
+  .kv:last-child { border-bottom: 0; }
+  .kv .addr { color: var(--text-dim); }
+  .pos { color: var(--green); font-weight: 600; }
+  .neg { color: var(--red); font-weight: 600; }
+
+  .addr-pill {
+    font-family: var(--mono); cursor: pointer; border-radius: 6px;
+    padding: 1px 5px; margin: -1px -5px; transition: background .12s;
+  }
+  .addr-pill:hover { background: var(--panel-2); color: var(--text); }
+  .addr-pill.copied { color: var(--green); }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px;
+    border-radius: 999px; font-size: 12px; font-weight: 650;
+  }
+  .badge.ok { background: var(--green-bg); color: var(--green); }
+  .badge.fail { background: var(--red-bg); color: var(--red); }
+  .badge.neutral { background: var(--panel-2); color: var(--text-dim); border: 1px solid var(--border); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+  .replay-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .cu { color: var(--text-dim); font-size: 12.5px; font-family: var(--mono); }
+  .cu b { color: var(--text); }
+  .err-box {
+    margin-top: 12px; background: var(--red-bg); border: 1px solid rgba(248,113,113,.25);
+    color: var(--red); border-radius: 9px; padding: 9px 12px; font-family: var(--mono);
+    font-size: 12px; word-break: break-word;
+  }
+  .logs {
+    margin-top: 12px; background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 9px; padding: 12px; max-height: 280px; overflow: auto;
+    color: var(--text-dim); font-family: var(--mono); font-size: 11.5px;
+  }
+  .logs div { white-space: pre-wrap; line-height: 1.6; }
+  .logs .invoke { color: var(--accent); }
+  .logs .ok { color: var(--green); }
+  .logs .fail { color: var(--red); }
+
+  /* ---- what-if editor ---- */
+  .field-form label { display: block; font-size: 11px; letter-spacing: .5px;
+    text-transform: uppercase; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+  .selectbox {
+    position: relative; margin-bottom: 4px;
+  }
+  select.acct {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--border-strong);
+    color: var(--text); padding: 11px 12px; border-radius: 10px; font-size: 13px;
+    font-family: var(--mono); appearance: none; cursor: pointer;
+  }
+  select.acct:focus { outline: none; border-color: var(--accent); }
+
+  .acct-meta {
+    display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+    margin: 12px 0 4px; font-size: 12px; color: var(--text-dim);
+  }
+  .type-tag {
+    background: rgba(124,140,255,.14); color: var(--accent); border: 1px solid rgba(124,140,255,.3);
+    padding: 2px 9px; border-radius: 6px; font-size: 11px; font-weight: 650; letter-spacing: .3px;
+  }
+  .type-tag.raw { background: var(--panel-2); color: var(--muted); border-color: var(--border); }
+
+  table.fields { width: 100%; border-collapse: collapse; margin-top: 12px; }
+  table.fields th {
+    text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .6px;
+    color: var(--muted); font-weight: 600; padding: 0 10px 8px; border-bottom: 1px solid var(--border);
+  }
+  table.fields td { padding: 9px 10px; border-bottom: 1px solid rgba(30,38,50,.5); vertical-align: middle; }
+  table.fields tr:last-child td { border-bottom: 0; }
+  .f-name { font-family: var(--mono); font-size: 12.5px; color: var(--text); }
+  .f-off { color: var(--muted); font-size: 11px; font-family: var(--mono); }
+  .f-type {
+    font-family: var(--mono); font-size: 10.5px; color: var(--text-dim);
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px;
+    padding: 1px 6px; white-space: nowrap;
+  }
+  .f-cur { font-family: var(--mono); font-size: 12px; color: var(--text-dim); word-break: break-all; }
+  .f-cur.ro { color: var(--muted); }
+  input.f-in {
+    width: 100%; min-width: 120px; background: var(--panel-2); border: 1px solid var(--border-strong);
+    color: var(--text); padding: 7px 9px; border-radius: 7px; font-family: var(--mono); font-size: 12px;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  input.f-in:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,140,255,.13); }
+  input.f-in.dirty { border-color: var(--amber); box-shadow: 0 0 0 3px rgba(251,191,36,.12); }
+  .ro-dash { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+
+  .raw-note {
+    background: var(--panel-2); border: 1px dashed var(--border-strong); border-radius: 9px;
+    padding: 12px; margin-top: 12px; color: var(--text-dim); font-size: 12.5px;
+  }
+  .raw-inputs { display: flex; gap: 8px; margin-top: 10px; }
+  .raw-inputs input { background: var(--panel-2); border: 1px solid var(--border-strong);
+    color: var(--text); padding: 8px 10px; border-radius: 7px; font-family: var(--mono); font-size: 12px; }
+  .raw-inputs input:focus { outline: none; border-color: var(--accent); }
+
+  .editor-actions { display: flex; gap: 8px; margin-top: 16px; align-items: center; flex-wrap: wrap; }
+  .editor-actions .spacer { flex: 1; }
+
+  .staged { margin-top: 4px; }
+  .staged-item {
+    display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin: 6px 0;
+    background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--amber);
+    border-radius: 8px; font-family: var(--mono); font-size: 12px;
+  }
+  .staged-item .k { color: var(--amber); font-weight: 650; }
+  .staged-item .body { flex: 1; color: var(--text-dim); word-break: break-all; }
+  .staged-item .rm { background: none; border: 0; color: var(--red); cursor: pointer;
+    font-size: 16px; line-height: 1; padding: 0 4px; opacity: .7; }
+  .staged-item .rm:hover { opacity: 1; }
+
+  .sim-result { margin-top: 16px; }
+  .compare {
+    display: grid; grid-template-columns: 1fr auto 1fr; gap: 14px; align-items: center;
+    margin-bottom: 12px;
+  }
+  @media (max-width: 560px) { .compare { grid-template-columns: 1fr; } .compare .arrow { display: none; } }
+  .compare-col {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px;
+  }
+  .compare-col .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .8px;
+    color: var(--muted); margin-bottom: 8px; }
+  .compare .arrow { color: var(--muted); font-size: 20px; text-align: center; }
+  .delta { font-size: 11.5px; margin-top: 6px; font-family: var(--mono); }
+  .delta.up { color: var(--green); } .delta.down { color: var(--red); }
+  .delta.same { color: var(--muted); }
+
+  .hidden { display: none !important; }
+  .empty { color: var(--muted); font-size: 12.5px; font-style: italic; }
 </style>
 </head>
 <body>
-  <header>
-    <h1>svmscope <span class="dim">— transaction simulator</span></h1>
-    <div class="sub">Paste a Solana transaction signature to decode &amp; replay it.</div>
-  </header>
-  <main>
-    <div class="bar">
-      <input id="sig" placeholder="transaction signature…" spellcheck="false" />
-      <button id="go">Analyze</button>
+  <div class="topbar">
+    <div class="topbar-inner">
+      <div class="logo">
+        <div class="mark">◎</div>
+        <div><b>svmscope</b> &nbsp;<span>transaction simulator</span></div>
+      </div>
+      <div class="search">
+        <input id="sig" placeholder="paste a Solana transaction signature…" spellcheck="false" autocomplete="off" />
+        <button class="btn" id="go">Analyze</button>
+      </div>
     </div>
+  </div>
+
+  <main>
+    <div id="hero" class="hero">
+      <h1>Decode, replay &amp; mutate any transaction</h1>
+      <p>Reconstruct the exact state a Solana transaction ran against, re-execute the
+         real programs locally, then rewrite an account's fields to ask
+         <em>“what if this had been different?”</em></p>
+    </div>
+
     <div id="status" class="status hidden"></div>
+
     <div id="out" class="hidden">
-      <div class="panel"><h2>CPI call tree</h2><div id="tree" class="mono tree"></div></div>
-      <div class="panel"><h2>Account balance changes</h2><div id="diffs" class="mono"></div></div>
-      <div class="panel"><h2>Compute units per program</h2><div id="compute" class="mono"></div></div>
-      <div class="panel"><h2>Replay</h2><div id="replay"></div></div>
-      <div class="panel">
-        <h2>What-if simulation</h2>
-        <div class="sub" style="margin-bottom:10px">
-          Mutate accounts, then re-replay to see what changes. <b>Lamports</b> sets a
-          balance; <b>Data</b> overwrites bytes at an offset (e.g. a token amount at
-          offset 64, as hex or a u64). Copy addresses from the sections above.
+      <div class="grid">
+        <div class="card"><h2>CPI call tree</h2><div id="tree" class="mono tree"></div></div>
+        <div class="card"><h2>Compute units <span id="cuCount" class="count"></span></h2><div id="compute" class="mono"></div></div>
+        <div class="card"><h2>Balance changes <span id="diffCount" class="count"></span></h2><div id="diffs" class="mono"></div></div>
+        <div class="card"><h2>Replay result</h2><div id="replay"></div></div>
+      </div>
+
+      <div class="card full" style="margin-top:16px">
+        <h2>What-if simulation <span id="acctCount" class="count"></span></h2>
+        <div class="field-form">
+          <label for="acctSel">Choose an account to mutate</label>
+          <div class="selectbox">
+            <select id="acctSel" class="acct"></select>
+          </div>
+          <div id="editor"></div>
         </div>
-        <div class="bar">
-          <select id="mutKind">
-            <option value="lamports">Lamports</option>
-            <option value="data">Data</option>
-          </select>
-          <input id="mutAddr" placeholder="account address…" spellcheck="false" />
-          <input id="mutLamports" type="number" placeholder="new lamports"
-                 style="max-width:150px; flex:0 0 auto" />
-          <input id="mutOffset" type="number" placeholder="offset" class="hidden"
-                 style="max-width:90px; flex:0 0 auto" />
-          <input id="mutValue" placeholder="bytes…" class="hidden" spellcheck="false"
-                 style="max-width:170px; flex:0 0 auto" />
-          <select id="mutEnc" class="hidden">
-            <option value="hex">hex</option>
-            <option value="u64le">u64 LE</option>
-          </select>
-          <button id="add" title="add to the mutation list">Add</button>
-          <button id="sim">Simulate</button>
+
+        <div id="stagedWrap" class="hidden">
+          <div style="font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin:18px 0 2px;font-weight:600">Staged mutations</div>
+          <div id="staged" class="staged"></div>
         </div>
-        <div id="mutList" class="mono"></div>
-        <div id="simResult"></div>
+
+        <div id="simResult" class="sim-result"></div>
       </div>
     </div>
   </main>
 
 <script>
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const short = (a) => a.length > 12 ? a.slice(0, 4) + '…' + a.slice(-4) : a;
+const fmt = (n) => Number(n).toLocaleString('en-US');
+
+let analysis = null;   // full /analyze response
 let currentSig = '';
+let mutations = [];    // staged mutations, in server wire format
+
+// ---------- base58 (for editing pubkey fields) ----------
+const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function bs58decode(str) {
+  const map = {}; for (let i = 0; i < B58.length; i++) map[B58[i]] = i;
+  const bytes = [0];
+  for (const ch of str.trim()) {
+    if (!(ch in map)) throw new Error('invalid base58 character: ' + ch);
+    let carry = map[ch];
+    for (let j = 0; j < bytes.length; j++) { carry += bytes[j] * 58; bytes[j] = carry & 0xff; carry >>= 8; }
+    while (carry) { bytes.push(carry & 0xff); carry >>= 8; }
+  }
+  for (const ch of str.trim()) { if (ch === '1') bytes.push(0); else break; }
+  return bytes.reverse();
+}
+const toHex = (arr) => arr.map(b => b.toString(16).padStart(2, '0')).join('');
+
+// encode a field's new value to hex bytes, throwing a clear error on bad input
+function encodeField(field, val) {
+  val = val.trim();
+  switch (field.type) {
+    case 'u64': {
+      const v = BigInt(val);
+      if (v < 0n || v > 0xffffffffffffffffn) throw new Error(field.name + ': out of u64 range');
+      let hex = ''; let x = v;
+      for (let i = 0; i < 8; i++) { hex += (x & 0xffn).toString(16).padStart(2, '0'); x >>= 8n; }
+      return hex;
+    }
+    case 'u8': {
+      const v = Number(val);
+      if (!Number.isInteger(v) || v < 0 || v > 255) throw new Error(field.name + ': must be 0–255');
+      return v.toString(16).padStart(2, '0');
+    }
+    case 'bool': {
+      const t = /^(1|true|yes)$/i.test(val), f = /^(0|false|no)$/i.test(val);
+      if (!t && !f) throw new Error(field.name + ': must be true/false');
+      return t ? '01' : '00';
+    }
+    case 'pubkey': {
+      const bytes = bs58decode(val);
+      if (bytes.length !== 32) throw new Error(field.name + ': not a 32-byte pubkey');
+      return toHex(bytes);
+    }
+    default: throw new Error(field.name + ': not editable');
+  }
+}
+
+// ---------- rendering ----------
+function copyPill(addr, cls = '') {
+  return `<span class="addr-pill ${cls}" data-copy="${esc(addr)}" title="${esc(addr)} — click to copy">${esc(short(addr))}</span>`;
+}
 
 function renderTree(entries) {
   return entries.map(e => {
-    if (e.stack_height === 1) {
-      return `<div class="top">#${e.index}  ${esc(e.program)}</div>`;
-    }
+    if (e.stack_height === 1)
+      return `<div class="top"><span class="idx">#${e.index}</span>  ${esc(e.program)}</div>`;
     const indent = '    '.repeat(Math.max(0, e.stack_height - 2));
     return `<div class="inner">${indent}└─ [${e.stack_height}] ${esc(e.program)}</div>`;
   }).join('');
 }
 
 function renderDiffs(changes) {
-  if (!changes.length) return '<div class="status">no balance changes</div>';
+  if (!changes.length) return '<div class="empty">no balance changes</div>';
   return changes.map(c => {
     const cls = c.delta >= 0 ? 'pos' : 'neg';
     const sign = c.delta >= 0 ? '+' : '';
-    return `<div class="row"><span class="addr">${esc(c.address)}</span>` +
-           `<span class="${cls}">${sign}${c.delta.toLocaleString()} lamports</span></div>`;
+    return `<div class="kv">${copyPill(c.address)}<span class="${cls}">${sign}${fmt(c.delta)} lamports</span></div>`;
   }).join('');
 }
 
 function renderCompute(rows) {
-  if (!rows.length) return '<div class="status">no compute recorded</div>';
+  if (!rows.length) return '<div class="empty">no compute recorded</div>';
   return rows.map(r =>
-    `<div class="row"><span class="addr">${esc(r.program)}</span>` +
-    `<span>${r.cu.toLocaleString()} CU</span></div>`
+    `<div class="kv">${copyPill(r.program)}<span>${fmt(r.cu)} <span style="color:var(--muted)">CU</span></span></div>`
   ).join('');
+}
+
+function fmtLog(l) {
+  const cls = /invoke \[\d+\]/.test(l) ? 'invoke' : /success$/.test(l) ? 'ok' : /failed|error/i.test(l) ? 'fail' : '';
+  return `<div class="${cls}">${esc(l)}</div>`;
 }
 
 function renderReplay(r) {
   const badge = r.success
-    ? `<span class="badge ok">success ✅</span>`
-    : `<span class="badge fail">failed ❌</span>`;
-  const err = r.error ? `<div class="status err">${esc(r.error)}</div>` : '';
+    ? `<span class="badge ok"><span class="dot"></span>success</span>`
+    : `<span class="badge fail"><span class="dot"></span>failed</span>`;
+  const err = r.error ? `<div class="err-box">${esc(r.error)}</div>` : '';
   const logs = r.logs && r.logs.length
-    ? `<div class="logs">${r.logs.map(l => `<div>${esc(l)}</div>`).join('')}</div>` : '';
-  return `<div>${badge} <span class="status" style="margin-left:8px">` +
-         `${r.compute_units.toLocaleString()} compute units</span></div>${err}${logs}`;
+    ? `<div class="logs">${r.logs.map(fmtLog).join('')}</div>` : '';
+  return `<div class="replay-head">${badge}<span class="cu"><b>${fmt(r.compute_units)}</b> compute units consumed</span></div>${err}${logs}`;
+}
+
+// ---------- what-if editor ----------
+function accountLabel(a) {
+  const kind = a.decoded ? a.decoded.type_name : (a.executable ? 'Program' : 'Account');
+  let extra = '';
+  if (a.decoded) {
+    const amt = a.decoded.fields.find(f => f.name === 'amount');
+    const sup = a.decoded.fields.find(f => f.name === 'supply');
+    if (amt) extra = ' · amount ' + fmt(amt.value);
+    else if (sup) extra = ' · supply ' + fmt(sup.value);
+  } else {
+    extra = ' · ' + a.data_len + ' bytes';
+  }
+  return `${short(a.address)}  —  ${kind}${extra}`;
+}
+
+function populateAccountSelect() {
+  const sel = $('acctSel');
+  // Mutable accounts only (programs can't be usefully mutated for what-if).
+  const mut = analysis.accounts.filter(a => !a.executable);
+  sel.innerHTML = mut.map((a, i) => `<option value="${esc(a.address)}">${esc(accountLabel(a))}</option>`).join('');
+  $('acctCount').textContent = mut.length + ' mutable';
+  if (mut.length) { sel.value = mut[0].address; renderEditor(mut[0].address); }
+  else $('editor').innerHTML = '<div class="empty" style="margin-top:12px">no mutable accounts in this transaction</div>';
+}
+
+function renderEditor(address) {
+  const a = analysis.accounts.find(x => x.address === address);
+  if (!a) return;
+  const typeTag = a.decoded
+    ? `<span class="type-tag">${esc(a.decoded.type_name)}</span>`
+    : `<span class="type-tag raw">Unknown layout</span>`;
+
+  let body = `
+    <div class="acct-meta">
+      ${typeTag}
+      <span>${copyPill(a.address)}</span>
+      <span>owner ${copyPill(a.owner)}</span>
+      <span>${fmt(a.lamports)} lamports · ${a.data_len} bytes</span>
+    </div>`;
+
+  // Lamports row — always available.
+  let rows = `
+    <tr>
+      <td><span class="f-name">lamports</span></td>
+      <td><span class="f-type">u64</span></td>
+      <td class="f-cur">${fmt(a.lamports)}</td>
+      <td><input class="f-in" data-kind="lamports" data-cur="${a.lamports}" value="${a.lamports}" spellcheck="false" /></td>
+    </tr>`;
+
+  if (a.decoded) {
+    rows += a.decoded.fields.map((f, i) => {
+      const cur = esc(f.value);
+      const type = `<span class="f-type">${esc(f.type)}</span>`;
+      const note = f.note ? `<div class="f-off">${esc(f.note)}</div>` : '';
+      const cell = f.editable
+        ? `<input class="f-in" data-kind="field" data-fi="${i}" data-cur="${cur}" value="${cur}" spellcheck="false" />`
+        : `<span class="ro-dash" title="read-only (option/tag field)">${cur} <span style="color:var(--border-strong)">·  read-only</span></span>`;
+      return `<tr>
+          <td><span class="f-name">${esc(f.name)}</span> <span class="f-off">@${f.offset}</span>${note}</td>
+          <td>${type}</td>
+          <td class="f-cur${f.editable ? '' : ' ro'}">${cur}</td>
+          <td>${cell}</td>
+        </tr>`;
+    }).join('');
+  }
+
+  body += `<table class="fields">
+    <thead><tr><th>Field</th><th>Type</th><th>Current</th><th>New value</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+
+  if (!a.decoded) {
+    body += `<div class="raw-note">
+      This account's layout isn't recognized, so there are no named fields.
+      You can still patch raw bytes at a chosen offset (hex, e.g. <code>00e1f505</code>).
+      <div class="raw-inputs">
+        <input id="rawOff" type="number" placeholder="offset" style="max-width:110px" />
+        <input id="rawHex" placeholder="hex bytes" style="flex:1" spellcheck="false" />
+      </div>
+    </div>`;
+  }
+
+  body += `<div class="editor-actions">
+      <button class="btn ghost sm" id="stageBtn">＋ Stage change(s)</button>
+      <span class="spacer"></span>
+      <button class="btn" id="simBtn">Simulate ⟶</button>
+    </div>`;
+
+  $('editor').innerHTML = body;
+
+  // dirty highlighting
+  $('editor').querySelectorAll('input.f-in').forEach(inp => {
+    inp.addEventListener('input', () => {
+      inp.classList.toggle('dirty', inp.value.trim() !== inp.dataset.cur);
+    });
+  });
+  wireCopy($('editor'));
+  $('stageBtn').addEventListener('click', () => { stageEdits(address); });
+  $('simBtn').addEventListener('click', simulate);
+}
+
+// collect changed edits in the current editor into wire-format mutations
+function collectEdits(address) {
+  const a = analysis.accounts.find(x => x.address === address);
+  const out = [];
+  $('editor').querySelectorAll('input.f-in').forEach(inp => {
+    const v = inp.value.trim();
+    if (v === inp.dataset.cur) return; // unchanged
+    if (inp.dataset.kind === 'lamports') {
+      out.push({ kind: 'lamports', address, lamports: Number(v), _label: `lamports → ${fmt(v)}` });
+    } else {
+      const f = a.decoded.fields[Number(inp.dataset.fi)];
+      const hex = encodeField(f, v); // may throw
+      out.push({ kind: 'data', address, offset: f.offset, bytes_hex: hex, _label: `${f.name} → ${v}` });
+    }
+  });
+  // raw patch (unknown layout)
+  const off = $('rawOff'), hx = $('rawHex');
+  if (off && hx && (off.value.trim() !== '' || hx.value.trim() !== '')) {
+    const o = Number(off.value), h = hx.value.trim().replace(/^0x/, '').replace(/[\s_]/g, '');
+    if (!Number.isInteger(o) || o < 0) throw new Error('raw patch: offset must be a non-negative integer');
+    if (!/^([0-9a-fA-F]{2})+$/.test(h)) throw new Error('raw patch: bytes must be even-length hex');
+    out.push({ kind: 'data', address, offset: o, bytes_hex: h, _label: `@${o} ← 0x${h}` });
+  }
+  return out;
+}
+
+function stageEdits(address) {
+  try {
+    const edits = collectEdits(address);
+    if (!edits.length) { flashSim('nothing changed to stage', true); return; }
+    mutations.push(...edits);
+    renderStaged();
+    // reset editor inputs to reflect nothing pending now that it's staged
+    $('editor').querySelectorAll('input.f-in.dirty').forEach(i => { i.value = i.dataset.cur; i.classList.remove('dirty'); });
+    if ($('rawOff')) { $('rawOff').value = ''; $('rawHex').value = ''; }
+    flashSim('');
+  } catch (e) { flashSim(e.message, true); }
+}
+
+function renderStaged() {
+  const wrap = $('stagedWrap');
+  if (!mutations.length) { wrap.classList.add('hidden'); $('staged').innerHTML = ''; return; }
+  wrap.classList.remove('hidden');
+  $('staged').innerHTML = mutations.map((m, i) =>
+    `<div class="staged-item">
+        <span class="k">${m.kind === 'lamports' ? 'LAMPORTS' : 'DATA'}</span>
+        <span class="body">${copyPill(m.address)} &nbsp;${esc(m._label || '')}</span>
+        <button class="rm" data-i="${i}" title="remove">✕</button>
+     </div>`).join('');
+  $('staged').querySelectorAll('.rm').forEach(b =>
+    b.addEventListener('click', () => { mutations.splice(Number(b.dataset.i), 1); renderStaged(); }));
+  wireCopy($('staged'));
+}
+
+function flashSim(msg, isErr) {
+  $('simResult').innerHTML = msg ? `<div class="status ${isErr ? 'err' : ''}">${esc(msg)}</div>` : '';
+}
+
+// ---------- actions ----------
+function wireCopy(root) {
+  root.querySelectorAll('.addr-pill').forEach(el => {
+    el.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(el.dataset.copy); } catch {}
+      el.classList.add('copied'); const t = el.textContent;
+      el.textContent = 'copied'; setTimeout(() => { el.textContent = t; el.classList.remove('copied'); }, 900);
+    });
+  });
 }
 
 async function analyze() {
   const sig = $('sig').value.trim();
   if (!sig) return;
-  currentSig = sig;
-  mutations = [];
-  renderMutList();
-  $('simResult').innerHTML = '';
+  currentSig = sig; mutations = [];
   $('go').disabled = true;
   $('out').classList.add('hidden');
+  $('hero').classList.add('hidden');
   const st = $('status');
   st.className = 'status'; st.classList.remove('hidden');
-  st.textContent = 'analyzing… (fetching state, loading programs, replaying)';
+  st.innerHTML = '<span class="spinner"></span>fetching state · loading programs · replaying…';
   try {
     const res = await fetch(`/analyze/${encodeURIComponent(sig)}`);
     if (!res.ok) throw new Error(await res.text());
-    const a = await res.json();
-    $('tree').innerHTML = renderTree(a.cpi_tree);
-    $('diffs').innerHTML = renderDiffs(a.balance_change);
-    $('compute').innerHTML = renderCompute(a.compute);
-    $('replay').innerHTML = renderReplay(a.replay);
+    analysis = await res.json();
+    $('tree').innerHTML = renderTree(analysis.cpi_tree);
+    $('diffs').innerHTML = renderDiffs(analysis.balance_change);
+    $('diffCount').textContent = analysis.balance_change.length;
+    $('compute').innerHTML = renderCompute(analysis.compute);
+    $('cuCount').textContent = analysis.compute.length;
+    $('replay').innerHTML = renderReplay(analysis.replay);
+    renderStaged();
+    flashSim('');
+    populateAccountSelect();
+    wireCopy($('out'));
     st.classList.add('hidden');
     $('out').classList.remove('hidden');
   } catch (e) {
@@ -203,113 +623,73 @@ async function analyze() {
   }
 }
 
-// ---- what-if mutation builder ----
-let mutations = []; // pending list, in the server's {kind,...} wire format
-
-function simError(msg) {
-  $('simResult').innerHTML = '<div class="status err">' + esc(msg) + '</div>';
-}
-
-// Encode a decimal string as 8 little-endian hex bytes (SPL amounts, most oracle prices).
-function u64leToHex(dec) {
-  let v = BigInt(dec);
-  if (v < 0n || v > 0xffffffffffffffffn) throw new Error('value out of u64 range');
-  let hex = '';
-  for (let i = 0; i < 8; i++) { hex += (v & 0xffn).toString(16).padStart(2, '0'); v >>= 8n; }
-  return hex;
-}
-
-function describeMutation(m) {
-  return m.kind === 'lamports'
-    ? `<span class="kind">LAMPORTS</span>${esc(m.address)} → ${Number(m.lamports).toLocaleString()}`
-    : `<span class="kind">DATA</span>${esc(m.address)} @ ${m.offset} ← 0x${esc(m.bytes_hex)}`;
-}
-
-function renderMutList() {
-  $('mutList').innerHTML = mutations.map((m, i) =>
-    `<div class="mut-row"><span>${describeMutation(m)}</span>` +
-    `<button class="rm" data-i="${i}" title="remove">✕</button></div>`
-  ).join('');
-  for (const b of $('mutList').querySelectorAll('.rm')) {
-    b.addEventListener('click', () => { mutations.splice(Number(b.dataset.i), 1); renderMutList(); });
-  }
-}
-
-// Read the input row into a mutation object, or throw. Returns null if the row is empty.
-function readMutationRow() {
-  const addr = $('mutAddr').value.trim();
-  const kind = $('mutKind').value;
-  if (kind === 'lamports') {
-    const lamports = $('mutLamports').value.trim();
-    if (!addr && lamports === '') return null;
-    if (!addr || lamports === '') throw new Error('enter an address and new lamports');
-    return { kind: 'lamports', address: addr, lamports: Number(lamports) };
-  }
-  const offset = $('mutOffset').value.trim();
-  const value = $('mutValue').value.trim();
-  if (!addr && value === '') return null;
-  if (!addr || offset === '' || value === '') throw new Error('enter an address, offset, and value');
-  const bytes_hex = $('mutEnc').value === 'u64le' ? u64leToHex(value) : value.replace(/^0x/, '');
-  if (!/^([0-9a-fA-F]{2})+$/.test(bytes_hex)) throw new Error('bytes must be even-length hex');
-  return { kind: 'data', address: addr, offset: Number(offset), bytes_hex };
-}
-
-function clearMutationRow() {
-  for (const id of ['mutAddr', 'mutLamports', 'mutOffset', 'mutValue']) $(id).value = '';
-}
-
-function addMutation() {
-  try {
-    const m = readMutationRow();
-    if (!m) { simError('fill in the mutation fields first'); return; }
-    mutations.push(m);
-    clearMutationRow();
-    renderMutList();
-    $('simResult').innerHTML = '';
-  } catch (e) { simError(e.message); }
-}
-
-function updateKindFields() {
-  const isData = $('mutKind').value === 'data';
-  $('mutLamports').classList.toggle('hidden', isData);
-  for (const id of ['mutOffset', 'mutValue', 'mutEnc']) $(id).classList.toggle('hidden', !isData);
-  $('mutValue').placeholder = $('mutEnc').value === 'u64le' ? 'value (decimal)' : 'bytes (hex)';
-}
-
 async function simulate() {
-  if (!currentSig) { simError('analyze a transaction first'); return; }
+  if (!analysis) { flashSim('analyze a transaction first', true); return; }
   let toSend;
   try {
-    const row = readMutationRow(); // include a filled-but-unadded row
-    toSend = row ? [...mutations, row] : [...mutations];
-  } catch (e) { simError(e.message); return; }
-  if (!toSend.length) { simError('add at least one mutation'); return; }
-  $('sim').disabled = true;
-  $('simResult').innerHTML = '<div class="status">simulating…</div>';
+    const live = collectEdits($('acctSel').value); // include current unsaved edits
+    toSend = [...mutations, ...live];
+  } catch (e) { flashSim(e.message, true); return; }
+  if (!toSend.length) { flashSim('change at least one field, or stage a mutation', true); return; }
+
+  const btn = $('simBtn'); btn.disabled = true;
+  $('simResult').innerHTML = '<div class="status"><span class="spinner"></span>replaying with mutations…</div>';
   try {
     const res = await fetch('/simulate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, mutations: toSend }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        signature: currentSig,
+        mutations: toSend.map(({ _label, ...m }) => m),
+      }),
     });
     if (!res.ok) throw new Error(await res.text());
     const r = await res.json();
-    $('simResult').innerHTML =
-      '<div style="margin-top:6px"><span class="badge" style="background:#21262d;color:var(--muted)">MUTATED REPLAY</span></div>'
-      + renderReplay(r);
+    renderComparison(analysis.replay, r, toSend.length);
   } catch (e) {
-    simError('error: ' + e.message);
+    flashSim('error: ' + e.message, true);
   } finally {
-    $('sim').disabled = false;
+    btn.disabled = false;
   }
 }
 
+function renderComparison(before, after, n) {
+  const chip = (r) => r.success
+    ? '<span class="badge ok"><span class="dot"></span>success</span>'
+    : '<span class="badge fail"><span class="dot"></span>failed</span>';
+  const dCU = after.compute_units - before.compute_units;
+  const deltaCls = dCU > 0 ? 'up' : dCU < 0 ? 'down' : 'same';
+  const deltaTxt = dCU === 0 ? 'no change in compute'
+    : `${dCU > 0 ? '+' : ''}${fmt(dCU)} CU vs. original`;
+  const flip = before.success !== after.success
+    ? `<div class="delta ${after.success ? 'up' : 'down'}">outcome flipped: ${before.success ? 'success → failed' : 'failed → success'}</div>` : '';
+
+  $('simResult').innerHTML = `
+    <div style="font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted);margin:6px 0 10px;font-weight:600">
+      Mutated replay <span style="color:var(--amber)">· ${n} mutation${n > 1 ? 's' : ''} applied</span>
+    </div>
+    <div class="compare">
+      <div class="compare-col">
+        <div class="lbl">Original</div>
+        ${chip(before)}
+        <div class="cu" style="margin-top:8px"><b>${fmt(before.compute_units)}</b> CU</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="compare-col">
+        <div class="lbl">Mutated</div>
+        ${chip(after)}
+        <div class="cu" style="margin-top:8px"><b>${fmt(after.compute_units)}</b> CU</div>
+        <div class="delta ${deltaCls}">${deltaTxt}</div>
+        ${flip}
+      </div>
+    </div>
+    ${after.error ? `<div class="err-box">${esc(after.error)}</div>` : ''}
+    ${after.logs && after.logs.length ? `<div class="logs">${after.logs.map(fmtLog).join('')}</div>` : ''}`;
+}
+
+// ---------- wiring ----------
 $('go').addEventListener('click', analyze);
 $('sig').addEventListener('keydown', e => { if (e.key === 'Enter') analyze(); });
-$('sim').addEventListener('click', simulate);
-$('add').addEventListener('click', addMutation);
-$('mutKind').addEventListener('change', updateKindFields);
-$('mutEnc').addEventListener('change', updateKindFields);
+$('acctSel').addEventListener('change', e => { flashSim(''); renderEditor(e.target.value); });
 </script>
 </body>
 </html>

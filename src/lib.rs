@@ -4,6 +4,7 @@
 
 pub mod compute;
 pub mod cpi_tree;
+pub mod decode;
 pub mod diffs;
 pub mod replay;
 pub mod state;
@@ -21,6 +22,9 @@ pub struct Analysis {
     pub balance_change: Vec<diffs::BalanceChange>,
     pub compute: Vec<compute::CuUsage>,
     pub replay: replay::ReplayResult,
+    /// The transaction's accounts, with decoded fields where the layout is known.
+    /// Drives the what-if editor: pick an account, edit named fields.
+    pub accounts: Vec<decode::AccountInfo>,
 }
 
 /// Fetch a transaction, decode it, and replay it — bundled into one `Analysis`.
@@ -43,6 +47,7 @@ pub fn analyze(client: &RpcClient, signature: &str) -> Result<Analysis, String> 
         balance_change: diffs::account_diffs(&tx),
         compute: compute::cu_per_program(&tx),
         replay: replay::replay_transaction(client, signature, &account_keys),
+        accounts: decode::describe_accounts(client, &account_keys),
     })
 }
 
