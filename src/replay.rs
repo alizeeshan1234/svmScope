@@ -18,6 +18,13 @@ const NATIVE_LOADER: &str = "NativeLoader1111111111111111111111111111111";
 const BPF_LOADER_2: &str = "BPFLoader2111111111111111111111111111111111";
 const BPF_LOADER_UPGRADEABLE: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
 
+pub struct ReplayResult {
+    pub success: bool,
+    pub error: Option<String>,
+    pub logs: Vec<String>,
+    pub compute_units: u64
+}
+
 fn b64_decode(s: &str) -> Vec<u8> {
     base64::engine::general_purpose::STANDARD
         .decode(s)
@@ -165,38 +172,41 @@ fn setup(
     (svm, tx)
 }
 
-/// Print a replay result under the given label.
-fn report(label: &str, result: TransactionResult) {
+/// Convert a raw transaction result into a `ReplayResult`.
+///
+/// This does NOT print — it just extracts the data. The caller (CLI or a UI)
+/// decides how to display it.
+fn to_replay_result(result: TransactionResult) -> ReplayResult {
     match result {
-        Ok(meta) => {
-            println!("{label}: success ✅  (compute units: {})", meta.compute_units_consumed);
-            for log in &meta.logs {
-                println!("  {log}");
-            }
-        }
-        Err(failed) => {
-            println!("{label}: failed ❌  error: {:?}", failed.err);
-            for log in &failed.meta.logs {
-                println!("  {log}");
-            }
-        }
+        Ok(meta) => ReplayResult {
+            success: true,
+            error: None,
+            logs: meta.logs,
+            compute_units: meta.compute_units_consumed,
+        },
+        Err(failed) => ReplayResult {
+            success: false,
+            error: Some(format!("{:?}", failed.err)),
+            logs: failed.meta.logs,
+            compute_units: failed.meta.compute_units_consumed,
+        },
     }
 }
 
-/// Replay the transaction against the reconstructed state and report the result.
-pub fn replay_transaction(client: &RpcClient, signature: &str, account_keys: &[String]) {
+/// Replay the transaction against the reconstructed state.
+pub fn replay_transaction(client: &RpcClient, signature: &str, account_keys: &[String]) -> ReplayResult {
     let (mut svm, tx) = setup(client, signature, account_keys);
     let result = svm.send_transaction(tx);
-    report("REPLAY", result);
+    to_replay_result(result)
 }
 
-/// Replay the transaction after applying the given mutations, and report the result.
+/// Replay the transaction after applying the given mutations.
 pub fn mutate_and_replay(
     client: &RpcClient,
     signature: &str,
     account_keys: &[String],
     mutations: &[Mutation],
-) {
+) -> ReplayResult {
     let (mut svm, tx) = setup(client, signature, account_keys);
 
     for m in mutations {
@@ -217,5 +227,5 @@ pub fn mutate_and_replay(
     }
 
     let result = svm.send_transaction(tx);
-    report("MUTATED REPLAY", result);
+    to_replay_result(result)
 }

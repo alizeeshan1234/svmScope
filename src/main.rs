@@ -41,13 +41,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err(format!("transaction not found: {signature}").into());
     }
 
-    cpi_tree::print_cpi_tree(&tx);
+    for e in &cpi_tree::build_cpi_tree(&tx) {
+        if e.stack_height == 1 {
+            println!("#{}  {}", e.index, e.program);
+        } else {
+            let indent = "    ".repeat((e.stack_height - 2) as usize);
+            println!("{}└─ [{}] {}", indent, e.stack_height, e.program);
+        }
+    }
 
     println!("\n-- account balance changes --");
-    diffs::print_account_diffs(&tx);
+    for c in &diffs::account_diffs(&tx) {
+         println!("{:<44} {:+} lamports", c.address, c.delta);
+    }
 
     println!("\n-- compute units per program --");
-    compute::print_cu_per_program(&tx);
+    for c in &compute::cu_per_program(&tx) {
+       println!("{:<44} {} CU", c.program, c.cu);
+    }
 
     // Stage 2: reconstruct the state the transaction ran against.
     let account_keys = utils::resolve_account_keys(&tx);
@@ -56,7 +67,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Stage 3: reconstruct state and replay the transaction locally.
     println!("\n-- replay --");
-    replay::replay_transaction(&client, signature, &account_keys);
+    let baseline = replay::replay_transaction(&client, signature, &account_keys);
+    print_replay("REPLAY", &baseline);
 
 
     // Mutations come only from the CLI (`--mutate <address>:<lamports>`).
@@ -85,8 +97,24 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Only run the mutated replay if the user actually asked for mutations.
     if !mutations.is_empty() {
-        replay::mutate_and_replay(&client, signature, &account_keys, &mutations);
+        let mutated = replay::mutate_and_replay(&client, signature, &account_keys, &mutations);
+        print_replay("MUTATED REPLAY", &mutated);
     }
 
     Ok(())
+}
+
+/// Display a replay result (the CLI's job — the module returns data, `main` prints it).
+fn print_replay(label: &str, r: &replay::ReplayResult) {
+    if r.success {
+        println!("{label}: success ✅  (compute units: {})", r.compute_units);
+    } else {
+        println!(
+            "{label}: failed ❌  error: {}",
+            r.error.as_deref().unwrap_or("unknown")
+        );
+    }
+    for log in &r.logs {
+        println!("  {log}");
+    }
 }
