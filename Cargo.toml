@@ -5,6 +5,7 @@ edition = "2021"
 description = "Transaction autopsy for Solana — paste a transaction, see exactly what happened."
 
 [dependencies]
+axum = "0.8.9"
 base64 = "0.23.1"
 bincode = "=1.3.3"
 clap = { version = "4", features = ["derive"] }
@@ -15,6 +16,7 @@ solana-account = "=4.3.2"
 solana-address = "=2.6.1"
 solana-client = "=4.1.1"
 solana-transaction = "=4.1.6"
+tokio = { version = "1.53.1", features = ["full"] }
 
 # Add later, when you need them:
 # solana-transaction-status = "2"   # typed tx/meta structs (upgrade from serde_json::Value)

@@ -3,6 +3,7 @@
 use crate::utils::resolve_account_keys;
 use serde_json::Value;
 
+#[derive(serde::Serialize)]
 pub struct BalanceChange {
     pub address: String,
     pub delta: i64

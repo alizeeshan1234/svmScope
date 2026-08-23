@@ -2,6 +2,7 @@
 
 use serde_json::Value;
 
+#[derive(serde::Serialize)]
 pub struct  CuUsage {
     pub program: String,
     pub cu: u64

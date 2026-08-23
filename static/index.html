@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>svmscope</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #21262d; --text: #e6edf3;
+    --muted: #8b949e; --accent: #58a6ff; --green: #3fb950; --red: #f85149;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    line-height: 1.5;
+  }
+  header { padding: 24px 20px 8px; max-width: 960px; margin: 0 auto; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: .3px; }
+  h1 .dim { color: var(--muted); font-weight: 400; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  main { max-width: 960px; margin: 0 auto; padding: 12px 20px 60px; }
+  .bar { display: flex; gap: 8px; margin: 16px 0 8px; }
+  input {
+    flex: 1; background: var(--panel); border: 1px solid var(--border);
+    color: var(--text); padding: 10px 12px; border-radius: 8px;
+    font-family: var(--mono); font-size: 13px;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  button {
+    background: var(--accent); color: #0d1117; border: 0; padding: 10px 18px;
+    border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  select {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 12px; border-radius: 8px; font-size: 13px; flex: 0 0 auto;
+  }
+  select:focus { outline: none; border-color: var(--accent); }
+  #add { background: var(--panel); color: var(--text); border: 1px solid var(--border); }
+  .mut-row {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    padding: 5px 10px; margin: 4px 0; background: #0d1117;
+    border: 1px solid var(--border); border-radius: 6px; font-size: 12px;
+  }
+  .mut-row .kind { color: var(--accent); font-weight: 600; margin-right: 6px; }
+  .mut-row .rm {
+    background: none; border: 0; color: var(--red); cursor: pointer;
+    padding: 0 4px; font-size: 15px; line-height: 1;
+  }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px; margin: 14px 0;
+  }
+  .panel h2 {
+    margin: 0 0 10px; font-size: 12px; text-transform: uppercase;
+    letter-spacing: .8px; color: var(--muted);
+  }
+  .mono { font-family: var(--mono); font-size: 12.5px; }
+  .tree div { white-space: pre; }
+  .tree .top { color: var(--text); }
+  .tree .inner { color: var(--muted); }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+  .row .addr { color: var(--text); }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+  .badge {
+    display: inline-block; padding: 3px 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 600;
+  }
+  .badge.ok { background: rgba(63,185,80,.15); color: var(--green); }
+  .badge.fail { background: rgba(248,81,73,.15); color: var(--red); }
+  .logs {
+    margin-top: 10px; background: #0d1117; border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px; max-height: 260px; overflow: auto;
+    color: var(--muted); font-family: var(--mono); font-size: 11.5px;
+  }
+  .logs div { white-space: pre-wrap; }
+  .status { color: var(--muted); font-size: 13px; margin: 10px 0; }
+  .status.err { color: var(--red); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>svmscope <span class="dim">— transaction simulator</span></h1>
+    <div class="sub">Paste a Solana transaction signature to decode &amp; replay it.</div>
+  </header>
+  <main>
+    <div class="bar">
+      <input id="sig" placeholder="transaction signature…" spellcheck="false" />
+      <button id="go">Analyze</button>
+    </div>
+    <div id="status" class="status hidden"></div>
+    <div id="out" class="hidden">
+      <div class="panel"><h2>CPI call tree</h2><div id="tree" class="mono tree"></div></div>
+      <div class="panel"><h2>Account balance changes</h2><div id="diffs" class="mono"></div></div>
+      <div class="panel"><h2>Compute units per program</h2><div id="compute" class="mono"></div></div>
+      <div class="panel"><h2>Replay</h2><div id="replay"></div></div>
+      <div class="panel">
+        <h2>What-if simulation</h2>
+        <div class="sub" style="margin-bottom:10px">
+          Mutate accounts, then re-replay to see what changes. <b>Lamports</b> sets a
+          balance; <b>Data</b> overwrites bytes at an offset (e.g. a token amount at
+          offset 64, as hex or a u64). Copy addresses from the sections above.
+        </div>
+        <div class="bar">
+          <select id="mutKind">
+            <option value="lamports">Lamports</option>
+            <option value="data">Data</option>
+          </select>
+          <input id="mutAddr" placeholder="account address…" spellcheck="false" />
+          <input id="mutLamports" type="number" placeholder="new lamports"
+                 style="max-width:150px; flex:0 0 auto" />
+          <input id="mutOffset" type="number" placeholder="offset" class="hidden"
+                 style="max-width:90px; flex:0 0 auto" />
+          <input id="mutValue" placeholder="bytes…" class="hidden" spellcheck="false"
+                 style="max-width:170px; flex:0 0 auto" />
+          <select id="mutEnc" class="hidden">
+            <option value="hex">hex</option>
+            <option value="u64le">u64 LE</option>
+          </select>
+          <button id="add" title="add to the mutation list">Add</button>
+          <button id="sim">Simulate</button>
+        </div>
+        <div id="mutList" class="mono"></div>
+        <div id="simResult"></div>
+      </div>
+    </div>
+  </main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+let currentSig = '';
+
+function renderTree(entries) {
+  return entries.map(e => {
+    if (e.stack_height === 1) {
+      return `<div class="top">#${e.index}  ${esc(e.program)}</div>`;
+    }
+    const indent = '    '.repeat(Math.max(0, e.stack_height - 2));
+    return `<div class="inner">${indent}└─ [${e.stack_height}] ${esc(e.program)}</div>`;
+  }).join('');
+}
+
+function renderDiffs(changes) {
+  if (!changes.length) return '<div class="status">no balance changes</div>';
+  return changes.map(c => {
+    const cls = c.delta >= 0 ? 'pos' : 'neg';
+    const sign = c.delta >= 0 ? '+' : '';
+    return `<div class="row"><span class="addr">${esc(c.address)}</span>` +
+           `<span class="${cls}">${sign}${c.delta.toLocaleString()} lamports</span></div>`;
+  }).join('');
+}
+
+function renderCompute(rows) {
+  if (!rows.length) return '<div class="status">no compute recorded</div>';
+  return rows.map(r =>
+    `<div class="row"><span class="addr">${esc(r.program)}</span>` +
+    `<span>${r.cu.toLocaleString()} CU</span></div>`
+  ).join('');
+}
+
+function renderReplay(r) {
+  const badge = r.success
+    ? `<span class="badge ok">success ✅</span>`
+    : `<span class="badge fail">failed ❌</span>`;
+  const err = r.error ? `<div class="status err">${esc(r.error)}</div>` : '';
+  const logs = r.logs && r.logs.length
+    ? `<div class="logs">${r.logs.map(l => `<div>${esc(l)}</div>`).join('')}</div>` : '';
+  return `<div>${badge} <span class="status" style="margin-left:8px">` +
+         `${r.compute_units.toLocaleString()} compute units</span></div>${err}${logs}`;
+}
+
+async function analyze() {
+  const sig = $('sig').value.trim();
+  if (!sig) return;
+  currentSig = sig;
+  mutations = [];
+  renderMutList();
+  $('simResult').innerHTML = '';
+  $('go').disabled = true;
+  $('out').classList.add('hidden');
+  const st = $('status');
+  st.className = 'status'; st.classList.remove('hidden');
+  st.textContent = 'analyzing… (fetching state, loading programs, replaying)';
+  try {
+    const res = await fetch(`/analyze/${encodeURIComponent(sig)}`);
+    if (!res.ok) throw new Error(await res.text());
+    const a = await res.json();
+    $('tree').innerHTML = renderTree(a.cpi_tree);
+    $('diffs').innerHTML = renderDiffs(a.balance_change);
+    $('compute').innerHTML = renderCompute(a.compute);
+    $('replay').innerHTML = renderReplay(a.replay);
+    st.classList.add('hidden');
+    $('out').classList.remove('hidden');
+  } catch (e) {
+    st.className = 'status err';
+    st.textContent = 'error: ' + e.message;
+  } finally {
+    $('go').disabled = false;
+  }
+}
+
+// ---- what-if mutation builder ----
+let mutations = []; // pending list, in the server's {kind,...} wire format
+
+function simError(msg) {
+  $('simResult').innerHTML = '<div class="status err">' + esc(msg) + '</div>';
+}
+
+// Encode a decimal string as 8 little-endian hex bytes (SPL amounts, most oracle prices).
+function u64leToHex(dec) {
+  let v = BigInt(dec);
+  if (v < 0n || v > 0xffffffffffffffffn) throw new Error('value out of u64 range');
+  let hex = '';
+  for (let i = 0; i < 8; i++) { hex += (v & 0xffn).toString(16).padStart(2, '0'); v >>= 8n; }
+  return hex;
+}
+
+function describeMutation(m) {
+  return m.kind === 'lamports'
+    ? `<span class="kind">LAMPORTS</span>${esc(m.address)} → ${Number(m.lamports).toLocaleString()}`
+    : `<span class="kind">DATA</span>${esc(m.address)} @ ${m.offset} ← 0x${esc(m.bytes_hex)}`;
+}
+
+function renderMutList() {
+  $('mutList').innerHTML = mutations.map((m, i) =>
+    `<div class="mut-row"><span>${describeMutation(m)}</span>` +
+    `<button class="rm" data-i="${i}" title="remove">✕</button></div>`
+  ).join('');
+  for (const b of $('mutList').querySelectorAll('.rm')) {
+    b.addEventListener('click', () => { mutations.splice(Number(b.dataset.i), 1); renderMutList(); });
+  }
+}
+
+// Read the input row into a mutation object, or throw. Returns null if the row is empty.
+function readMutationRow() {
+  const addr = $('mutAddr').value.trim();
+  const kind = $('mutKind').value;
+  if (kind === 'lamports') {
+    const lamports = $('mutLamports').value.trim();
+    if (!addr && lamports === '') return null;
+    if (!addr || lamports === '') throw new Error('enter an address and new lamports');
+    return { kind: 'lamports', address: addr, lamports: Number(lamports) };
+  }
+  const offset = $('mutOffset').value.trim();
+  const value = $('mutValue').value.trim();
+  if (!addr && value === '') return null;
+  if (!addr || offset === '' || value === '') throw new Error('enter an address, offset, and value');
+  const bytes_hex = $('mutEnc').value === 'u64le' ? u64leToHex(value) : value.replace(/^0x/, '');
+  if (!/^([0-9a-fA-F]{2})+$/.test(bytes_hex)) throw new Error('bytes must be even-length hex');
+  return { kind: 'data', address: addr, offset: Number(offset), bytes_hex };
+}
+
+function clearMutationRow() {
+  for (const id of ['mutAddr', 'mutLamports', 'mutOffset', 'mutValue']) $(id).value = '';
+}
+
+function addMutation() {
+  try {
+    const m = readMutationRow();
+    if (!m) { simError('fill in the mutation fields first'); return; }
+    mutations.push(m);
+    clearMutationRow();
+    renderMutList();
+    $('simResult').innerHTML = '';
+  } catch (e) { simError(e.message); }
+}
+
+function updateKindFields() {
+  const isData = $('mutKind').value === 'data';
+  $('mutLamports').classList.toggle('hidden', isData);
+  for (const id of ['mutOffset', 'mutValue', 'mutEnc']) $(id).classList.toggle('hidden', !isData);
+  $('mutValue').placeholder = $('mutEnc').value === 'u64le' ? 'value (decimal)' : 'bytes (hex)';
+}
+
+async function simulate() {
+  if (!currentSig) { simError('analyze a transaction first'); return; }
+  let toSend;
+  try {
+    const row = readMutationRow(); // include a filled-but-unadded row
+    toSend = row ? [...mutations, row] : [...mutations];
+  } catch (e) { simError(e.message); return; }
+  if (!toSend.length) { simError('add at least one mutation'); return; }
+  $('sim').disabled = true;
+  $('simResult').innerHTML = '<div class="status">simulating…</div>';
+  try {
+    const res = await fetch('/simulate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signature: currentSig, mutations: toSend }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const r = await res.json();
+    $('simResult').innerHTML =
+      '<div style="margin-top:6px"><span class="badge" style="background:#21262d;color:var(--muted)">MUTATED REPLAY</span></div>'
+      + renderReplay(r);
+  } catch (e) {
+    simError('error: ' + e.message);
+  } finally {
+    $('sim').disabled = false;
+  }
+}
+
+$('go').addEventListener('click', analyze);
+$('sig').addEventListener('keydown', e => { if (e.key === 'Enter') analyze(); });
+$('sim').addEventListener('click', simulate);
+$('add').addEventListener('click', addMutation);
+$('mutKind').addEventListener('change', updateKindFields);
+$('mutEnc').addEventListener('change', updateKindFields);
+</script>
+</body>
+</html>

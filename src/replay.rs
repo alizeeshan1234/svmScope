@@ -18,6 +18,7 @@ const NATIVE_LOADER: &str = "NativeLoader1111111111111111111111111111111";
 const BPF_LOADER_2: &str = "BPFLoader2111111111111111111111111111111111";
 const BPF_LOADER_UPGRADEABLE: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
 
+#[derive(serde::Serialize)]
 pub struct ReplayResult {
     pub success: bool,
     pub error: Option<String>,
@@ -123,7 +124,7 @@ pub fn build_svm(client: &RpcClient, account_keys: &[String]) -> LiteSVM {
         loaded += 1;
     }
 
-    println!("loaded {loaded} data accounts and {programs} programs into the SVM");
+    eprintln!("loaded {loaded} data accounts and {programs} programs into the SVM");
     svm
 }
 
@@ -144,12 +145,46 @@ fn fetch_transaction(client: &RpcClient, signature: &str) -> VersionedTransactio
 
 /// A change to apply to an account before replaying.
 ///
-/// `Data` is part of the mutation API (verified working) even though the CLI
-/// currently only constructs `Lamports` — hence the allow.
+/// `Data` replaces an account's bytes wholesale; `DataPatch` overwrites a slice
+/// at an offset (how you'd flip a token balance or an oracle price in place).
 #[allow(dead_code)]
 pub enum Mutation {
     Lamports { address: String, value: u64 },
     Data { address: String, bytes: Vec<u8> },
+    DataPatch { address: String, offset: usize, bytes: Vec<u8> },
+}
+
+/// Apply one mutation to the SVM, or explain why it can't be applied.
+fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<(), String> {
+    let (address, addr) = match m {
+        Mutation::Lamports { address, .. }
+        | Mutation::Data { address, .. }
+        | Mutation::DataPatch { address, .. } => (
+            address,
+            Address::from_str(address).map_err(|_| format!("invalid address: {address}"))?,
+        ),
+    };
+    let mut account = svm
+        .get_account(&addr)
+        .ok_or_else(|| format!("mutation target not loaded in SVM: {address}"))?;
+
+    match m {
+        Mutation::Lamports { value, .. } => account.lamports = *value,
+        Mutation::Data { bytes, .. } => account.data = bytes.clone(),
+        Mutation::DataPatch { offset, bytes, .. } => {
+            let end = offset + bytes.len();
+            if end > account.data.len() {
+                return Err(format!(
+                    "patch out of range for {address}: offset {offset} + {} bytes > account size {}",
+                    bytes.len(),
+                    account.data.len()
+                ));
+            }
+            account.data[*offset..end].copy_from_slice(bytes);
+        }
+    }
+    svm.set_account(addr, account)
+        .map_err(|e| format!("set_account failed for {address}: {e:?}"))
 }
 
 /// Shared setup: fetch the transaction, load the Address Lookup Table accounts it
@@ -210,19 +245,13 @@ pub fn mutate_and_replay(
     let (mut svm, tx) = setup(client, signature, account_keys);
 
     for m in mutations {
-        match m {
-            Mutation::Lamports { address, value } => {
-                let addr = Address::from_str(address).unwrap();
-                let mut account = svm.get_account(&addr).unwrap();
-                account.lamports = *value;
-                svm.set_account(addr, account).unwrap();
-            }
-            Mutation::Data { address, bytes } => {
-                let addr = Address::from_str(address).unwrap();
-                let mut account = svm.get_account(&addr).unwrap();
-                account.data = bytes.clone();
-                svm.set_account(addr, account).unwrap();
-            }
+        if let Err(e) = apply_mutation(&mut svm, m) {
+            return ReplayResult {
+                success: false,
+                error: Some(e),
+                logs: vec![],
+                compute_units: 0,
+            };
         }
     }
 
