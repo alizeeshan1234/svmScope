@@ -691,6 +691,44 @@ details.advanced .adv-body { padding-top: var(--s-2); }
 .ixtag.s { color: var(--amber); border-color: rgba(251,191,36,.35); background: var(--amber-soft); }
 .ixtag.w { color: var(--cyan); border-color: rgba(34,211,238,.3); background: rgba(34,211,238,.1); }
 
+/* ---------- global clock control (header) ---------- */
+.clockctl { position: relative; flex: 0 0 auto; }
+.clockbtn {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--font-sans); font-weight: 550; white-space: nowrap;
+}
+.clockbtn.warped { border-color: var(--brand-border); color: var(--brand-strong); background: var(--brand-soft); }
+.clockpop {
+  position: absolute; top: calc(100% + 8px); right: 0; z-index: 50;
+  width: 340px; padding: var(--s-4) var(--s-5);
+  background: var(--bg-1); border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-3);
+}
+.cp-title { font-size: 13px; font-weight: 650; margin-bottom: var(--s-1); }
+.cp-sub { color: var(--text-3); font-size: 12px; line-height: 1.5; margin-bottom: var(--s-3); }
+.cp-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s-2); }
+.cp-grid .chip { width: 100%; padding: 6px 4px; font-size: 11.5px; text-align: center; }
+.cp-custom { display: flex; gap: var(--s-2); margin-top: var(--s-3); }
+.cp-custom .finput { padding: 7px var(--s-2); font-size: 12.5px; }
+.cp-custom #ttAmount { width: 70px; font-family: var(--font-mono); }
+.cp-state {
+  margin-top: var(--s-3); padding-top: var(--s-3); border-top: 1px solid var(--border);
+  color: var(--text-2); font-family: var(--font-mono); font-size: 11.5px; line-height: 1.5;
+}
+.cp-state.warped { color: var(--brand-strong); }
+/* a page-wide banner so you never forget the clock is shifted */
+.clockbanner {
+  display: flex; align-items: center; gap: var(--s-3);
+  background: var(--brand-soft); border: 1px solid var(--brand-border);
+  border-radius: var(--r-md); padding: var(--s-3) var(--s-4); margin-bottom: var(--s-4);
+  font-size: 13px; color: var(--brand-strong);
+}
+.clockbanner .rst {
+  margin-left: auto; background: none; border: 0; cursor: pointer;
+  color: var(--text-2); font-family: var(--font-sans); font-size: 12.5px; text-decoration: underline;
+}
+.clockbanner .rst:hover { color: var(--text-1); }
+
 /* ---------- time travel ---------- */
 .timetravel {
   margin-top: var(--s-5);
@@ -771,6 +809,39 @@ details.advanced .adv-body { padding-top: var(--s-2); }
           <option value="testnet">Testnet</option>
           <option value="localnet">Localnet</option>
         </select>
+        <!-- Global clock: everything on the page simulates at this point in time -->
+        <div class="clockctl">
+          <button class="cluster clockbtn" id="clockBtn" title="Simulate at a different point in time">
+            <span id="clockLabel">⏱ Now</span>
+          </button>
+          <div class="clockpop hidden" id="clockPop">
+            <div class="cp-title">Simulate at</div>
+            <div class="cp-sub">Applies everywhere — replays, what-ifs and pre-flight all run at this time.
+              Test lockups, vesting cliffs, cooldowns, reward accrual, auctions.</div>
+            <div class="cp-grid">
+              <button class="chip gtt on" data-tt='{}'>Now</button>
+              <button class="chip gtt" data-tt='{"epochs":1}'>+1 epoch</button>
+              <button class="chip gtt" data-tt='{"seconds":3600}'>+1 hour</button>
+              <button class="chip gtt" data-tt='{"seconds":86400}'>+1 day</button>
+              <button class="chip gtt" data-tt='{"seconds":604800}'>+1 week</button>
+              <button class="chip gtt" data-tt='{"seconds":2592000}'>+30 days</button>
+              <button class="chip gtt" data-tt='{"seconds":7776000}'>+90 days</button>
+              <button class="chip gtt" data-tt='{"seconds":31536000}'>+1 year</button>
+            </div>
+            <div class="cp-custom">
+              <input id="ttAmount" class="finput" type="number" min="0" placeholder="0" />
+              <select id="ttUnit" class="finput">
+                <option value="minutes">minutes</option>
+                <option value="hours">hours</option>
+                <option value="days" selected>days</option>
+                <option value="epochs">epochs</option>
+                <option value="slots">slots</option>
+              </select>
+              <button class="btn sm" id="ttApply">Set</button>
+            </div>
+            <div id="ttState" class="cp-state">Simulating at the current time.</div>
+          </div>
+        </div>
         <input id="sig" placeholder="paste a transaction signature — or a program / account address…" spellcheck="false" autocomplete="off" />
         <button class="btn" id="go">Analyze</button>
       </div>
@@ -778,6 +849,7 @@ details.advanced .adv-body { padding-top: var(--s-2); }
   </div>
 
   <main>
+    <div id="clockBanner" class="clockbanner hidden"></div>
     <div id="hero" class="hero">
       <div class="eyebrow"><span class="pulse"></span> The Solana transaction simulation layer</div>
       <h1>Decode, replay &amp; <span class="grad">mutate</span> any transaction</h1>
@@ -826,35 +898,6 @@ details.advanced .adv-body { padding-top: var(--s-2); }
           </div>
         </div>
 
-        <!-- Time travel: warp the clock so time-gated logic can be tested now -->
-        <div class="timetravel">
-          <div class="tt-head">
-            <span class="tt-title">⏱ Time travel</span>
-            <span class="tt-sub">Warp the chain clock to test lockups, vesting cliffs, cooldowns,
-              reward accrual, auctions — anything gated on time.</span>
-          </div>
-          <div class="tt-row">
-            <button class="chip" data-tt='{}'>now</button>
-            <button class="chip" data-tt='{"epochs":1}'>+1 epoch</button>
-            <button class="chip" data-tt='{"seconds":86400}'>+1 day</button>
-            <button class="chip" data-tt='{"seconds":604800}'>+1 week</button>
-            <button class="chip" data-tt='{"seconds":2592000}'>+30 days</button>
-            <button class="chip" data-tt='{"seconds":31536000}'>+1 year</button>
-            <span class="tt-custom">
-              <input id="ttAmount" class="finput" type="number" min="0" placeholder="0" />
-              <select id="ttUnit" class="finput">
-                <option value="seconds">seconds</option>
-                <option value="minutes">minutes</option>
-                <option value="hours">hours</option>
-                <option value="days" selected>days</option>
-                <option value="epochs">epochs</option>
-                <option value="slots">slots</option>
-              </select>
-              <button class="btn ghost sm" id="ttApply">Set</button>
-            </span>
-          </div>
-          <div id="ttState" class="tt-state">Simulating at the current time.</div>
-        </div>
 
         <div class="editor-actions">
           <button class="btn ghost sm" id="closeSim">← Back</button>
@@ -1188,52 +1231,33 @@ function renderLogs(logs) {
 // Local replay is opt-in. Show a button until the user runs it (or it's been
 // run once as a scenario baseline).
 function renderReplayPanel() {
-  // Time travel is offered here too: replay this transaction at a future point to
-  // exercise lockups, cliffs and cooldowns without waiting.
-  const ttRow = `
-    <div class="timetravel" style="margin-top:14px">
-      <div class="tt-head"><span class="tt-title">⏱ Time travel</span>
-        <span class="tt-sub">Replay this transaction at a different point in time.</span></div>
-      <div class="tt-row">
-        <button class="chip rtt on" data-tt='{}'>now</button>
-        <button class="chip rtt" data-tt='{"epochs":1}'>+1 epoch</button>
-        <button class="chip rtt" data-tt='{"seconds":86400}'>+1 day</button>
-        <button class="chip rtt" data-tt='{"seconds":604800}'>+1 week</button>
-        <button class="chip rtt" data-tt='{"seconds":2592000}'>+30 days</button>
-        <button class="chip rtt" data-tt='{"seconds":31536000}'>+1 year</button>
-      </div>
-    </div>`;
+  const warped = !!Object.keys(timeTravel).length;
+
+  // With the clock shifted, replay through /replay_report so we run at that time
+  // and get the account diff; otherwise the plain cached replay is enough.
+  if (warped) {
+    $('replay').innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>replaying at the selected time…</div>';
+    api('/replay_report', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signature: currentSig, mutations: [], time_travel: timeTravel, cluster: currentCluster() }),
+    })
+      .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
+      .then(rep => renderReport(rep, $('replay')))
+      .catch(e => { $('replay').innerHTML = `<div class="err-box">${esc(e.message)}</div>`; });
+    return;
+  }
 
   const body = analysis.replay
     ? renderReplay(analysis.replay)
     : `<button class="btn ghost sm" id="runReplay">▶ Run local replay</button>
        <span class="cu-note" style="margin-left:10px">Re-execute this transaction locally against current state
          (it succeeded on-chain; local replay can differ if state has since moved).</span>`;
-
-  $('replay').innerHTML = body + ttRow + '<div id="replayTT"></div>';
-
+  $('replay').innerHTML = body;
   $('runReplay')?.addEventListener('click', async () => {
     const b = $('runReplay'); b.disabled = true; b.textContent = '▶ Replaying…';
     try { await ensureBaseline(); renderReplayPanel(); }
     catch (e) { $('replay').innerHTML = `<div class="err-box">${esc(e.message)}</div>`; }
   });
-
-  // Replaying at a warped clock uses /replay_report so we also get the diff.
-  $('replay').querySelectorAll('.chip.rtt').forEach(c => c.addEventListener('click', async () => {
-    $('replay').querySelectorAll('.chip.rtt').forEach(x => x.classList.toggle('on', x === c));
-    const tt = JSON.parse(c.dataset.tt);
-    const out = $('replayTT');
-    if (!Object.keys(tt).length) { out.innerHTML = ''; return; }
-    out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>replaying in the future…</div>';
-    try {
-      const res = await api('/replay_report', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ signature: currentSig, mutations: [], time_travel: tt, cluster: currentCluster() }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      renderReport(await res.json(), out);
-    } catch (e) { out.innerHTML = `<div class="err-box">${esc(e.message)}</div>`; }
-  }));
 }
 // Fetch the baseline replay once and cache it on `analysis.replay`.
 async function ensureBaseline() {
@@ -1985,21 +2009,59 @@ function describeTT(tt) {
 
 function setTimeTravel(tt, chipEl) {
   timeTravel = tt || {};
-  document.querySelectorAll('.chip[data-tt]').forEach(c => c.classList.toggle('on', c === chipEl));
-  const el = $('ttState');
-  el.textContent = describeTT(timeTravel);
-  el.classList.toggle('warped', !!Object.keys(timeTravel).length);
+  const warped = !!Object.keys(timeTravel).length;
+  document.querySelectorAll('.chip.gtt').forEach(c =>
+    c.classList.toggle('on', chipEl ? c === chipEl : (!warped && c.dataset.tt === '{}')));
+
+  const text = describeTT(timeTravel);
+  $('ttState').textContent = text;
+  $('ttState').classList.toggle('warped', warped);
+
+  // Header button reflects the current clock at a glance.
+  $('clockLabel').textContent = warped ? '⏱ ' + shortTT(timeTravel) : '⏱ Now';
+  $('clockBtn').classList.toggle('warped', warped);
+
+  // A page-wide banner so the shifted clock is never a surprise.
+  const b = $('clockBanner');
+  b.classList.toggle('hidden', !warped);
+  if (warped) {
+    b.innerHTML = `<span>⏱</span><span>${esc(text)} Everything below — replays, what-ifs and pre-flight — runs at this time.</span>
+      <button class="rst" id="clockReset">reset to now</button>`;
+    $('clockReset').addEventListener('click', () => setTimeTravel({}, null));
+  }
+  // Re-run whatever is on screen so results match the selected clock.
+  if (typeof onClockChanged === 'function') onClockChanged();
+}
+
+/** Compact label for the header button, e.g. "+30d" or "+1 epoch". */
+function shortTT(tt) {
+  if (tt.epochs) return `+${tt.epochs} epoch${tt.epochs === 1 ? '' : 's'}`;
+  if (tt.slots) return `+${fmt(tt.slots)} slots`;
+  if (tt.seconds) {
+    const s = tt.seconds;
+    if (s % 31536000 === 0) return `+${s / 31536000}y`;
+    if (s % 86400 === 0) return `+${s / 86400}d`;
+    if (s % 3600 === 0) return `+${s / 3600}h`;
+    return `+${Math.round(s / 60)}m`;
+  }
+  if (tt.at_unix_timestamp) return new Date(tt.at_unix_timestamp * 1000).toISOString().slice(0, 10);
+  return 'shifted';
 }
 
 function applyCustomTT() {
   const n = Number($('ttAmount').value);
   if (!n) { setTimeTravel({}, null); return; }
   const unit = $('ttUnit').value;
-  const mult = { seconds: 1, minutes: 60, hours: 3600, days: 86400 };
+  const mult = { minutes: 60, hours: 3600, days: 86400 };
   const tt = unit === 'epochs' ? { epochs: n }
            : unit === 'slots' ? { slots: n }
            : { seconds: n * mult[unit] };
   setTimeTravel(tt, null);
+}
+
+/** When the clock changes, refresh the replay result if one is showing. */
+function onClockChanged() {
+  if (analysis && !$('out').classList.contains('hidden')) renderReplayPanel();
 }
 
 async function runPreflight() {
@@ -2055,10 +2117,14 @@ function renderReport(rep, el) {
   wireCopy(el);
 }
 
-document.querySelectorAll('.chip[data-tt]').forEach(c =>
+document.querySelectorAll('.chip.gtt').forEach(c =>
   c.addEventListener('click', () => { $('ttAmount').value = ''; setTimeTravel(JSON.parse(c.dataset.tt), c); }));
 $('ttApply').addEventListener('click', applyCustomTT);
 $('ttAmount').addEventListener('keydown', e => { if (e.key === 'Enter') applyCustomTT(); });
+$('clockBtn').addEventListener('click', e => { e.stopPropagation(); $('clockPop').classList.toggle('hidden'); });
+document.addEventListener('click', e => {
+  if (!e.target.closest('.clockctl')) $('clockPop').classList.add('hidden');
+});
 
 $('openSim').addEventListener('click', () => showSim(true));
 $('navSim').addEventListener('click', () => showSim(true));
