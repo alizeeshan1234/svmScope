@@ -28,6 +28,129 @@ pub fn fetch_idl_json(client: &RpcClient, program_id: Address) -> Option<Value> 
 
 }
 
+/// A program error resolved from an IDL's `errors[]` — the difference between
+/// `Custom(6024)` and "Slippage exceeded".
+#[derive(serde::Serialize, Clone)]
+pub struct IdlError {
+    pub code: u64,
+    pub name: String,
+    pub msg: String,
+}
+
+/// Look up a custom error code in an IDL.
+pub fn error_for_code(idl: &Value, code: u64) -> Option<IdlError> {
+    idl.get("errors")?.as_array()?.iter().find_map(|e| {
+        (e.get("code")?.as_u64()? == code).then(|| IdlError {
+            code,
+            name: e.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+            msg: e.get("msg").and_then(|m| m.as_str()).unwrap_or("").to_string(),
+        })
+    })
+}
+
+/// One instruction a program exposes, for the transaction builder.
+#[derive(serde::Serialize)]
+pub struct IdlInstruction {
+    pub name: String,
+    /// 8-byte Anchor discriminator.
+    pub discriminator: Vec<u8>,
+    pub docs: Vec<String>,
+    pub accounts: Vec<IdlAccountSpec>,
+    pub args: Vec<IdlArg>,
+}
+
+#[derive(serde::Serialize)]
+pub struct IdlAccountSpec {
+    pub name: String,
+    pub writable: bool,
+    pub signer: bool,
+    /// True when the IDL says this account is a PDA (we can hint at derivation).
+    pub pda: bool,
+    /// A fixed address, when the IDL pins one (e.g. system_program).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct IdlArg {
+    pub name: String,
+    /// Wire type label, e.g. "u64" / "pubkey" / "string".
+    #[serde(rename = "type")]
+    pub ty: String,
+}
+
+/// Extract a program's instructions from its IDL, for building transactions.
+pub fn instructions(idl: &Value) -> Vec<IdlInstruction> {
+    let Some(list) = idl.get("instructions").and_then(|i| i.as_array()) else {
+        return vec![];
+    };
+    list.iter()
+        .filter_map(|ix| {
+            Some(IdlInstruction {
+                name: ix.get("name")?.as_str()?.to_string(),
+                discriminator: ix
+                    .get("discriminator")?
+                    .as_array()?
+                    .iter()
+                    .filter_map(|b| b.as_u64().map(|v| v as u8))
+                    .collect(),
+                docs: ix
+                    .get("docs")
+                    .and_then(|d| d.as_array())
+                    .map(|d| d.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
+                accounts: ix
+                    .get("accounts")
+                    .and_then(|a| a.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .map(|acc| IdlAccountSpec {
+                                name: acc.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+                                writable: acc.get("writable").and_then(|w| w.as_bool()).unwrap_or(false),
+                                signer: acc.get("signer").and_then(|s| s.as_bool()).unwrap_or(false),
+                                pda: acc.get("pda").is_some(),
+                                address: acc.get("address").and_then(|a| a.as_str()).map(String::from),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                args: ix
+                    .get("args")
+                    .and_then(|a| a.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .map(|arg| IdlArg {
+                                name: arg.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+                                ty: type_label(arg.get("type").unwrap_or(&Value::Null)),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// A readable label for an IDL type (used by the builder's arg inputs).
+fn type_label(ty: &Value) -> String {
+    if let Some(s) = ty.as_str() {
+        return s.to_string();
+    }
+    if let Some(d) = defined_name(ty) {
+        return d.to_string();
+    }
+    if ty.get("vec").is_some() {
+        return "vec".into();
+    }
+    if ty.get("option").is_some() {
+        return "option".into();
+    }
+    if ty.get("array").is_some() {
+        return "array".into();
+    }
+    "unknown".into()
+}
+
 // ---------------------------------------------------------------------------
 // IDL account decoding — turn raw program-account bytes into named fields.
 // ---------------------------------------------------------------------------

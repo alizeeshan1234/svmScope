@@ -338,6 +338,164 @@ pub fn simulate(
     Ok(replay::mutate_and_replay(client, signature, &account_keys, mutations, tx["slot"].as_u64(), &pre))
 }
 
+/// A simulation result enriched with what a developer actually needs: a
+/// human-readable failure reason and the field-level account diff.
+#[derive(Serialize)]
+pub struct SimulationReport {
+    pub replay: replay::ReplayResult,
+    /// The failure explained in plain language, resolved from the program's IDL
+    /// when possible ("Overflow — counter overflowed") instead of Custom(6000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explain: Option<Explanation>,
+    /// Every account the transaction changed, before → after.
+    pub diffs: Vec<AccountDiff>,
+}
+
+#[derive(Serialize)]
+pub struct Explanation {
+    /// e.g. "Overflow" (from the IDL) or "InsufficientFunds".
+    pub title: String,
+    /// The human message, e.g. "counter overflowed".
+    pub detail: String,
+    /// Which program raised it, when we can attribute it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    /// The raw error, kept for reference.
+    pub raw: String,
+}
+
+/// One account's before → after, with named field changes where the layout is known.
+#[derive(Serialize)]
+pub struct AccountDiff {
+    pub address: String,
+    pub owner: String,
+    pub lamports_before: u64,
+    pub lamports_after: u64,
+    /// Named fields that changed (empty when the layout isn't recognized).
+    pub fields: Vec<FieldDiff>,
+    /// True when data changed but we couldn't decode it into fields.
+    pub raw_data_changed: bool,
+}
+
+#[derive(Serialize)]
+pub struct FieldDiff {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+    pub before: String,
+    pub after: String,
+}
+
+/// Turn a program error into a human explanation using the invoking program's IDL.
+fn explain_error(client: &RpcClient, r: &replay::ReplayResult) -> Option<Explanation> {
+    let raw = r.error.as_ref()?;
+
+    // Which program failed? The last "Program <id> failed" line names it.
+    let program = r
+        .logs
+        .iter()
+        .rev()
+        .find_map(|l| l.strip_prefix("Program ").and_then(|s| s.split(" failed").next()))
+        .map(|s| s.trim().to_string())
+        .filter(|s| Address::from_str(s).is_ok());
+
+    // Anchor prints the resolved error itself — prefer that, it's already human.
+    if let Some(line) = r.logs.iter().rev().find(|l| l.contains("Error Message:")) {
+        let detail = line.split("Error Message:").nth(1).unwrap_or("").trim().to_string();
+        let title = line
+            .split("Error Code:")
+            .nth(1)
+            .and_then(|s| s.split('.').next())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "Program error".into());
+        return Some(Explanation { title, detail, program, raw: raw.clone() });
+    }
+
+    // Otherwise resolve the custom code against the program's IDL.
+    if let Some(code) = raw
+        .split("Custom(")
+        .nth(1)
+        .and_then(|s| s.split(')').next())
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        if let Some(pid) = program.as_ref().and_then(|p| Address::from_str(p).ok()) {
+            if let Some(e) = idl::fetch_idl_json(client, pid).and_then(|i| idl::error_for_code(&i, code)) {
+                return Some(Explanation { title: e.name, detail: e.msg, program, raw: raw.clone() });
+            }
+        }
+    }
+
+    // Fall back to a friendly reading of the common runtime errors.
+    let (title, detail) = if raw.contains("AccountNotFound") {
+        ("Account not found", "An account the transaction needs doesn't exist (an account with zero lamports is treated as deleted).")
+    } else if raw.contains("InsufficientFunds") {
+        ("Insufficient funds", "An account didn't have enough lamports for the transfer plus rent.")
+    } else if raw.contains("InvalidAddressLookupTableIndex") {
+        ("Lookup table index invalid", "The transaction referenced an address lookup table entry that isn't active at this slot.")
+    } else {
+        ("Transaction failed", "The program returned an error. See the logs below for the failing instruction.")
+    };
+    Some(Explanation { title: title.into(), detail: detail.into(), program, raw: raw.clone() })
+}
+
+/// Decode raw before/after bytes into named field changes.
+fn decode_diffs(client: &RpcClient, raw: Vec<replay::RawAccountDiff>) -> Vec<AccountDiff> {
+    // One IDL fetch per distinct owner program.
+    let mut idl_cache: std::collections::HashMap<String, Option<serde_json::Value>> =
+        std::collections::HashMap::new();
+
+    raw.into_iter()
+        .map(|d| {
+            // Fetch this owner's IDL once, then decode both sides with it.
+            let idl = idl_cache
+                .entry(d.owner.clone())
+                .or_insert_with(|| {
+                    Address::from_str(&d.owner).ok().and_then(|a| idl::fetch_idl_json(client, a))
+                })
+                .clone();
+            let decode_side = |bytes: &[u8]| -> Option<decode::DecodedAccount> {
+                decode::decode_bytes(&d.owner, bytes)
+                    .or_else(|| idl.as_ref().and_then(|i| idl::decode_with_idl(i, bytes)))
+            };
+            let (before, after) = (decode_side(&d.data_before), decode_side(&d.data_after));
+            let mut fields = Vec::new();
+            if let (Some(b), Some(a)) = (&before, &after) {
+                for (fb, fa) in b.fields.iter().zip(a.fields.iter()) {
+                    if fb.value != fa.value {
+                        fields.push(FieldDiff {
+                            name: fa.name.clone(),
+                            ty: fa.ty.clone(),
+                            before: fb.value.clone(),
+                            after: fa.value.clone(),
+                        });
+                    }
+                }
+            }
+            let raw_data_changed = d.data_before != d.data_after && fields.is_empty();
+            AccountDiff {
+                address: d.address,
+                owner: d.owner,
+                lamports_before: d.lamports_before,
+                lamports_after: d.lamports_after,
+                fields,
+                raw_data_changed,
+            }
+        })
+        .collect()
+}
+
+/// The instructions a program exposes, from its on-chain IDL — the input to the
+/// transaction builder.
+pub fn program_instructions(
+    client: &RpcClient,
+    program_id: &str,
+) -> Result<Vec<idl::IdlInstruction>, String> {
+    let addr = Address::from_str(program_id.trim()).map_err(|_| format!("bad program id: {program_id}"))?;
+    let idl = idl::fetch_idl_json(client, addr)
+        .ok_or_else(|| format!("no on-chain Anchor IDL published for {program_id}"))?;
+    Ok(idl::instructions(&idl))
+}
+
 /// Pre-flight simulate an **unsigned** transaction (base64 wire bytes) against
 /// current on-chain state — "what will this do if I send it now?" This is the
 /// primitive a wallet or bot calls before signing. Optional what-if `mutations`
@@ -355,6 +513,54 @@ pub fn simulate_preflight(
         bincode::deserialize(&bytes).map_err(|e| format!("could not deserialize transaction: {e}"))?;
     let ctx = replay::preflight_context(client, tx);
     Ok(ctx.run(mutations))
+}
+
+/// Pre-flight simulate and return the full developer report: outcome, a
+/// human-readable failure explanation, and the field-level account diff.
+pub fn preflight_report(
+    client: &RpcClient,
+    tx_b64: &str,
+    mutations: &[replay::Mutation],
+) -> Result<SimulationReport, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(tx_b64.trim())
+        .map_err(|e| format!("bad base64 transaction: {e}"))?;
+    let tx: solana_transaction::versioned::VersionedTransaction =
+        bincode::deserialize(&bytes).map_err(|e| format!("could not deserialize transaction: {e}"))?;
+    let ctx = replay::preflight_context(client, tx);
+    let (replay, raw_diffs) = ctx.run_with_diff(mutations);
+    Ok(SimulationReport {
+        explain: (!replay.success).then(|| explain_error(client, &replay)).flatten(),
+        diffs: decode_diffs(client, raw_diffs),
+        replay,
+    })
+}
+
+/// Replay a landed transaction and return the same enriched report.
+pub fn replay_report(
+    client: &RpcClient,
+    signature: &str,
+    mutations: &[replay::Mutation],
+) -> Result<SimulationReport, String> {
+    let tx: serde_json::Value = client
+        .send(
+            RpcRequest::GetTransaction,
+            json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
+        )
+        .map_err(|e| format!("RPC error: {e}"))?;
+    if tx.is_null() {
+        return Err(format!("transaction not found: {signature}"));
+    }
+    let account_keys = utils::resolve_account_keys(&tx);
+    let pre = replay::PreState::from_meta(&tx, &account_keys);
+    let ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre);
+    let (replay, raw_diffs) = ctx.run_with_diff(mutations);
+    Ok(SimulationReport {
+        explain: (!replay.success).then(|| explain_error(client, &replay)).flatten(),
+        diffs: decode_diffs(client, raw_diffs),
+        replay,
+    })
 }
 
 /// Run a suite of test scenarios against one transaction. State is fetched once

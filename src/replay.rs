@@ -163,6 +163,17 @@ pub struct ReplayContext {
     slot: Option<u64>,
 }
 
+/// An account that the transaction changed, with raw before/after bytes. The
+/// caller turns these into named field diffs using the account's layout.
+pub struct RawAccountDiff {
+    pub address: String,
+    pub owner: String,
+    pub lamports_before: u64,
+    pub lamports_after: u64,
+    pub data_before: Vec<u8>,
+    pub data_after: Vec<u8>,
+}
+
 impl ReplayContext {
     /// A pristine SVM loaded with the reconstructed state, its clock advanced to
     /// the transaction's slot.
@@ -180,6 +191,29 @@ impl ReplayContext {
     /// state. Repeatable and side-effect-free across calls.
     pub fn run(&self, mutations: &[Mutation]) -> ReplayResult {
         self.run_full(mutations).0
+    }
+
+    /// Replay and report **what changed** — every touched account's lamports and
+    /// raw data, before and after. The caller decodes the bytes into named fields.
+    pub fn run_with_diff(&self, mutations: &[Mutation]) -> (ReplayResult, Vec<RawAccountDiff>) {
+        let (result, svm) = self.run_full(mutations);
+        let mut diffs = Vec::new();
+        for (addr, l) in &self.loaded {
+            let Loaded::Data(before) = l else { continue };
+            let Some(after) = svm.get_account(addr) else { continue };
+            if after.lamports == before.lamports && after.data == before.data {
+                continue; // untouched
+            }
+            diffs.push(RawAccountDiff {
+                address: addr.to_string(),
+                owner: after.owner.to_string(),
+                lamports_before: before.lamports,
+                lamports_after: after.lamports,
+                data_before: before.data.clone(),
+                data_after: after.data.clone(),
+            });
+        }
+        (result, diffs)
     }
 
     /// The pre-transaction state of an account (for delta assertions).

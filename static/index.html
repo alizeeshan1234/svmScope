@@ -629,6 +629,79 @@ details.advanced[open] > summary::before { transform: rotate(90deg); }
 details.advanced > summary:hover { color: var(--text-1); }
 details.advanced .adv-body { padding-top: var(--s-2); }
 
+/* ---------- pre-flight simulator ---------- */
+.hero-cta { margin-top: var(--s-6); }
+.simview { animation: fade-up .45s var(--ease) both; }
+.tabs { display: flex; gap: var(--s-1); margin: var(--s-4) 0 var(--s-5); border-bottom: 1px solid var(--border); }
+.tab {
+  appearance: none; background: none; border: 0; cursor: pointer;
+  padding: var(--s-3) var(--s-4); margin-bottom: -1px;
+  color: var(--text-3); font-family: var(--font-sans); font-size: 13.5px; font-weight: 550;
+  border-bottom: 2px solid transparent;
+  transition: color var(--t-fast), border-color var(--t-fast);
+}
+.tab:hover { color: var(--text-2); }
+.tab.on { color: var(--text-1); border-bottom-color: var(--brand); }
+.flabel {
+  display: block; margin-bottom: var(--s-2);
+  font-size: 10.5px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3);
+}
+.ta {
+  width: 100%; min-height: 130px; resize: vertical;
+  background: var(--bg-inset); border: 1px solid var(--border); color: var(--text-1);
+  padding: var(--s-3) var(--s-4); border-radius: var(--r-md);
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.6;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+.ta::placeholder { color: var(--text-3); }
+.ta:focus { outline: none; border-color: var(--brand-border); box-shadow: var(--ring); }
+.finput {
+  width: 100%;
+  background: var(--bg-inset); border: 1px solid var(--border); color: var(--text-1);
+  padding: 9px var(--s-3); border-radius: var(--r-md);
+  font-family: var(--font-sans); font-size: 13px;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+.finput.mono { font-family: var(--font-mono); font-size: 12.5px; }
+.finput::placeholder { color: var(--text-3); }
+.finput:focus { outline: none; border-color: var(--brand-border); box-shadow: var(--ring); }
+.row-inline { display: flex; gap: var(--s-2); align-items: center; }
+.ixdoc { color: var(--text-2); font-size: 12.5px; margin: var(--s-3) 0 0; line-height: 1.55; }
+.ixsec { font-size: 10.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--text-3); margin: var(--s-5) 0 var(--s-2); }
+.ixrow { display: grid; grid-template-columns: 190px 1fr; gap: var(--s-3); align-items: center; margin-bottom: var(--s-2); }
+@media (max-width: 620px) { .ixrow { grid-template-columns: 1fr; } }
+.ixrow .nm { font-family: var(--font-mono); font-size: 12.5px; }
+.ixrow .tags { display: inline-flex; gap: 5px; margin-left: 6px; }
+.ixtag { font-size: 9.5px; font-weight: 650; padding: 1px 5px; border-radius: 4px; letter-spacing: .04em;
+  background: var(--bg-2); color: var(--text-3); border: 1px solid var(--border); }
+.ixtag.s { color: var(--amber); border-color: rgba(251,191,36,.35); background: var(--amber-soft); }
+.ixtag.w { color: var(--cyan); border-color: rgba(34,211,238,.3); background: rgba(34,211,238,.1); }
+
+/* ---------- explanation + account diff ---------- */
+.explain {
+  display: flex; gap: var(--s-4); align-items: flex-start;
+  background: var(--red-soft); border: 1px solid rgba(248,113,113,.32);
+  border-radius: var(--r-md); padding: var(--s-4) var(--s-5); margin-bottom: var(--s-4);
+}
+.explain .ic { font-size: 20px; line-height: 1.2; flex: 0 0 auto; }
+.explain .t { font-weight: 700; font-size: 15px; color: var(--red); letter-spacing: -0.01em; }
+.explain .d { color: var(--text-1); font-size: 13.5px; margin-top: 3px; line-height: 1.55; }
+.explain .meta { color: var(--text-3); font-family: var(--font-mono); font-size: 11px; margin-top: var(--s-2); }
+
+.diffs { display: flex; flex-direction: column; gap: var(--s-2); }
+.dcard { background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s-3) var(--s-4); }
+.dhead { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
+.dhead .lam { margin-left: auto; font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 12px; }
+.drow { display: grid; grid-template-columns: 160px 1fr; gap: var(--s-3); align-items: baseline;
+  padding: 6px 0; border-top: 1px solid var(--border); font-family: var(--font-mono); font-size: 12px; }
+.drow:first-of-type { margin-top: var(--s-2); }
+.drow .fname { color: var(--text-2); }
+.drow .fv { display: flex; align-items: baseline; gap: var(--s-2); flex-wrap: wrap; }
+.drow .old { color: var(--text-3); text-decoration: line-through; }
+.drow .arr { color: var(--text-3); }
+.drow .new { color: var(--green); font-weight: 600; word-break: break-all; }
+
 .hidden { display: none !important; }
 
 /* aliases for inline styles in templates */
@@ -662,10 +735,56 @@ details.advanced .adv-body { padding-top: var(--s-2); }
       <p>Reconstruct the exact state a Solana transaction ran against, re-execute the real
          programs locally, then rewrite an account's fields to ask <em>“what if?”</em></p>
       <div class="hint">Paste a <kbd>signature</kbd> or a <kbd>program&nbsp;/&nbsp;account address</kbd> above to begin</div>
+      <div class="hero-cta">
+        <button class="btn ghost" id="openSim">⚡ Simulate a transaction before sending it</button>
+      </div>
     </div>
 
     <div id="status" class="status hidden"></div>
     <div id="txlist" class="txlist hidden"></div>
+
+    <!-- Pre-flight: simulate an unsigned transaction, or build one from an IDL -->
+    <div id="sim" class="simview hidden">
+      <div class="card full">
+        <h2>Pre-flight simulation</h2>
+        <p class="whatif-lead">See exactly what a transaction will do <em>before</em> you send it —
+          run it against live state, get the failure explained in plain English, and see every
+          account it would change.</p>
+
+        <div class="tabs">
+          <button class="tab on" data-tab="paste">Paste a transaction</button>
+          <button class="tab" data-tab="build">Build from IDL</button>
+        </div>
+
+        <!-- paste mode -->
+        <div id="tabPaste" class="tabpane">
+          <label class="flabel">Serialized transaction (base64)</label>
+          <textarea id="txB64" class="ta" spellcheck="false"
+            placeholder="paste the base64 of an unsigned VersionedTransaction — e.g. Buffer.from(tx.serialize()).toString('base64')"></textarea>
+        </div>
+
+        <!-- build mode -->
+        <div id="tabBuild" class="tabpane hidden">
+          <label class="flabel">Program ID (must publish an on-chain Anchor IDL)</label>
+          <div class="row-inline">
+            <input id="buildProg" class="finput mono" spellcheck="false" placeholder="program address…" />
+            <button class="btn ghost sm" id="loadIx">Load instructions</button>
+          </div>
+          <div id="ixPicker" class="hidden">
+            <label class="flabel" style="margin-top:14px">Instruction</label>
+            <select id="ixSelect" class="finput"></select>
+            <div id="ixForm"></div>
+          </div>
+        </div>
+
+        <div class="editor-actions">
+          <button class="btn ghost sm" id="closeSim">← Back</button>
+          <span class="spacer"></span>
+          <button class="btn" id="runSim">Simulate ⟶</button>
+        </div>
+        <div id="simOut"></div>
+      </div>
+    </div>
 
     <div id="out" class="hidden">
       <div id="overview"></div>
@@ -1557,6 +1676,229 @@ function showResult(before, after, opts) {
     ${after.logs && after.logs.length ? `<div class="logs">${renderLogs(after.logs)}</div>` : ''}`;
   $('simResult').scrollIntoView({ block: 'nearest' });
 }
+
+// ===========================================================================
+// Pre-flight simulator: simulate an unsigned tx, or build one from an IDL.
+// ===========================================================================
+
+// base58 encode (for building instructions we need the reverse of bs58decode)
+function bs58encode(bytes) {
+  if (!bytes.length) return '';
+  const digits = [0];
+  for (const b of bytes) {
+    let carry = b;
+    for (let i = 0; i < digits.length; i++) { carry += digits[i] << 8; digits[i] = carry % 58; carry = (carry / 58) | 0; }
+    while (carry) { digits.push(carry % 58); carry = (carry / 58) | 0; }
+  }
+  let out = '';
+  for (const b of bytes) { if (b === 0) out += '1'; else break; }
+  for (let i = digits.length - 1; i >= 0; i--) out += B58[digits[i]];
+  return out;
+}
+
+function showSim(on) {
+  $('sim').classList.toggle('hidden', !on);
+  $('hero').classList.toggle('hidden', on);
+  if (on) { $('out').classList.add('hidden'); $('txlist').classList.add('hidden'); $('status').classList.add('hidden'); }
+  else { $('simOut').innerHTML = ''; }
+}
+
+let loadedIx = [];   // instructions from the loaded program's IDL
+
+async function loadInstructions() {
+  const prog = $('buildProg').value.trim();
+  if (!prog) return;
+  const btn = $('loadIx'); btn.disabled = true; btn.textContent = 'Loading…';
+  $('simOut').innerHTML = '';
+  try {
+    const res = await api(`/instructions/${encodeURIComponent(prog)}` + clusterQ());
+    if (!res.ok) throw new Error(await res.text());
+    loadedIx = await res.json();
+    if (!loadedIx.length) throw new Error('this program publishes no instructions');
+    $('ixSelect').innerHTML = loadedIx.map((ix, i) => `<option value="${i}">${esc(ix.name)}</option>`).join('');
+    $('ixPicker').classList.remove('hidden');
+    renderIxForm();
+  } catch (e) {
+    $('simOut').innerHTML = `<div class="status err" style="text-align:left">${esc(e.message)}</div>`;
+    $('ixPicker').classList.add('hidden');
+  } finally { btn.disabled = false; btn.textContent = 'Load instructions'; }
+}
+
+// Render inputs for the selected instruction's accounts and args.
+function renderIxForm() {
+  const ix = loadedIx[Number($('ixSelect').value)];
+  if (!ix) return;
+  const docs = ix.docs?.length ? `<p class="ixdoc">${esc(ix.docs.join(' '))}</p>` : '';
+  const accounts = ix.accounts.map((a, i) => `
+    <div class="ixrow">
+      <div><span class="nm">${esc(a.name)}</span><span class="tags">
+        ${a.signer ? '<span class="ixtag s">signer</span>' : ''}
+        ${a.writable ? '<span class="ixtag w">writable</span>' : ''}
+        ${a.pda ? '<span class="ixtag">pda</span>' : ''}</span></div>
+      <input class="finput mono ixacct" data-i="${i}" spellcheck="false"
+             value="${esc(a.address || '')}" placeholder="account address…" />
+    </div>`).join('');
+  const args = ix.args.length ? ix.args.map((a, i) => `
+    <div class="ixrow">
+      <div><span class="nm">${esc(a.name)}</span><span class="tags"><span class="ixtag">${esc(a.type)}</span></span></div>
+      <input class="finput mono ixarg" data-i="${i}" data-type="${esc(a.type)}" spellcheck="false" placeholder="${esc(a.type)} value…" />
+    </div>`).join('') : '<div class="empty">no arguments</div>';
+
+  $('ixForm').innerHTML = `${docs}
+    <div class="ixsec">Accounts</div>${accounts}
+    <div class="ixsec">Arguments</div>${args}
+    <div class="ixsec">Fee payer &amp; signer</div>
+    <div class="ixrow"><div><span class="nm">payer</span></div>
+      <input class="finput mono" id="ixPayer" spellcheck="false" placeholder="wallet address that pays the fee…" /></div>`;
+}
+
+// Encode an instruction argument to Borsh bytes.
+function encodeArg(type, raw) {
+  const v = (raw ?? '').trim();
+  const le = (bi, n) => { const o = []; let x = BigInt(bi); for (let i = 0; i < n; i++) { o.push(Number(x & 0xffn)); x >>= 8n; } return o; };
+  switch (type) {
+    case 'u8': return [Number(v) & 0xff];
+    case 'u16': return le(v || 0, 2);
+    case 'u32': return le(v || 0, 4);
+    case 'u64': return le(v || 0, 8);
+    case 'u128': return le(v || 0, 16);
+    case 'i8': case 'i16': case 'i32': case 'i64': case 'i128': {
+      const bits = { i8: 8, i16: 16, i32: 32, i64: 64, i128: 128 }[type];
+      let x = BigInt(v || 0); if (x < 0n) x += 1n << BigInt(bits);
+      return le(x, bits / 8);
+    }
+    case 'bool': return [/^(1|true|yes)$/i.test(v) ? 1 : 0];
+    case 'pubkey': case 'publicKey': return bs58decode(v);
+    case 'string': { const b = [...new TextEncoder().encode(v)]; return [...le(b.length, 4), ...b]; }
+    default: throw new Error(`unsupported argument type "${type}" — use the paste tab`);
+  }
+}
+
+// Build a legacy VersionedTransaction (unsigned) from the form, as base64.
+function buildTxB64() {
+  const ix = loadedIx[Number($('ixSelect').value)];
+  if (!ix) throw new Error('pick an instruction');
+  const payer = $('ixPayer').value.trim();
+  if (!payer) throw new Error('enter a fee payer address');
+  const program = $('buildProg').value.trim();
+
+  const accts = [...$('ixForm').querySelectorAll('.ixacct')].map((el, i) => {
+    const addr = el.value.trim();
+    if (!addr) throw new Error(`account "${ix.accounts[i].name}" is required`);
+    return { addr, signer: ix.accounts[i].signer, writable: ix.accounts[i].writable };
+  });
+
+  // instruction data = discriminator + borsh args
+  let data = [...ix.discriminator];
+  [...$('ixForm').querySelectorAll('.ixarg')].forEach((el, i) => {
+    data = data.concat(encodeArg(el.dataset.type, el.value));
+  });
+
+  // Assemble the account key list: payer first (signer+writable), then the
+  // instruction's accounts, then the program id — ordered signers → writables.
+  const keys = new Map();
+  const put = (addr, signer, writable) => {
+    const cur = keys.get(addr) || { signer: false, writable: false };
+    keys.set(addr, { signer: cur.signer || signer, writable: cur.writable || writable });
+  };
+  put(payer, true, true);
+  accts.forEach(a => put(a.addr, a.signer, a.writable));
+  put(program, false, false);
+
+  const entries = [...keys.entries()];
+  const order = [
+    ...entries.filter(([, m]) => m.signer && m.writable),
+    ...entries.filter(([, m]) => m.signer && !m.writable),
+    ...entries.filter(([, m]) => !m.signer && m.writable),
+    ...entries.filter(([, m]) => !m.signer && !m.writable),
+  ];
+  const idxOf = a => order.findIndex(([k]) => k === a);
+  const numSigners = order.filter(([, m]) => m.signer).length;
+  const numReadonlySigned = order.filter(([, m]) => m.signer && !m.writable).length;
+  const numReadonlyUnsigned = order.filter(([, m]) => !m.signer && !m.writable).length;
+
+  const shortvec = n => { const o = []; let x = n; do { let b = x & 0x7f; x >>= 7; if (x) b |= 0x80; o.push(b); } while (x); return o; };
+
+  const msg = [
+    numSigners, numReadonlySigned, numReadonlyUnsigned,
+    ...shortvec(order.length),
+    ...order.flatMap(([k]) => bs58decode(k)),
+    ...new Array(32).fill(0),                  // recent blockhash (replay ignores it)
+    ...shortvec(1),                            // one instruction
+    idxOf(program),
+    ...shortvec(accts.length),
+    ...accts.map(a => idxOf(a.addr)),
+    ...shortvec(data.length),
+    ...data,
+  ];
+  // legacy transaction: signature count + blank signatures + message
+  const tx = [...shortvec(numSigners), ...new Array(64 * numSigners).fill(0), ...msg];
+  let bin = ''; for (const b of tx) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+async function runPreflight() {
+  const btn = $('runSim'); btn.disabled = true;
+  $('simOut').innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>simulating against live state…</div>';
+  try {
+    const building = !$('tabBuild').classList.contains('hidden');
+    const b64 = building ? buildTxB64() : $('txB64').value.trim();
+    if (!b64) throw new Error('paste a base64 transaction first');
+    const res = await api('/preflight_report', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transaction: b64, mutations: [], cluster: currentCluster() }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    renderReport(await res.json(), $('simOut'));
+  } catch (e) {
+    $('simOut').innerHTML = `<div class="status err" style="text-align:left">${esc(e.message)}</div>`;
+  } finally { btn.disabled = false; }
+}
+
+// Shared renderer: verdict + human explanation + account diff + logs.
+function renderReport(rep, el) {
+  const r = rep.replay;
+  const head = r.success
+    ? `<div class="verdict ok"><div class="ic">✅</div><div><div class="vt">This transaction would succeed</div>
+         <div class="vs">Ran against live state · ${fmt(r.compute_units)} compute units</div></div></div>`
+    : '';
+  const ex = rep.explain
+    ? `<div class="explain"><div class="ic">⚠️</div><div>
+         <div class="t">${esc(rep.explain.title)}</div>
+         <div class="d">${esc(rep.explain.detail)}</div>
+         <div class="meta">${esc(rep.explain.raw)}${rep.explain.program ? ' · ' + esc(short(rep.explain.program)) : ''}</div>
+       </div></div>`
+    : '';
+  const diffs = (rep.diffs || []).length ? `
+    <div class="card" style="margin-top:14px">
+      <h2>Account changes <span class="count">${rep.diffs.length}</span></h2>
+      <div class="diffs">${rep.diffs.map(d => {
+        const dl = d.lamports_after - d.lamports_before;
+        const lam = dl !== 0
+          ? `<span class="lam ${dl > 0 ? 'amt pos' : 'amt neg'}">${dl > 0 ? '+' : '−'}${fmtSol(Math.abs(dl))}</span>` : '';
+        const rows = d.fields.map(f => `
+          <div class="drow"><span class="fname">${esc(f.name)} <span class="f-off">${esc(f.type)}</span></span>
+            <span class="fv"><span class="old">${esc(f.before)}</span><span class="arr">→</span><span class="new">${esc(f.after)}</span></span>
+          </div>`).join('');
+        const raw = d.raw_data_changed ? '<div class="drow"><span class="fname">data</span><span class="fv"><span class="new">changed (layout not decoded)</span></span></div>' : '';
+        return `<div class="dcard"><div class="dhead">${copyPill(d.address)}${progPill(d.owner)}${lam}</div>${rows}${raw}</div>`;
+      }).join('')}</div>
+    </div>` : '';
+  const logs = r.logs?.length ? `<div class="card" style="margin-top:14px"><h2>Program logs</h2><div class="logs">${renderLogs(r.logs)}</div></div>` : '';
+  el.innerHTML = head + ex + diffs + logs;
+  wireCopy(el);
+}
+
+$('openSim').addEventListener('click', () => showSim(true));
+$('closeSim').addEventListener('click', () => showSim(false));
+$('runSim').addEventListener('click', runPreflight);
+$('loadIx').addEventListener('click', loadInstructions);
+$('ixSelect').addEventListener('change', renderIxForm);
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x === t));
+  $('tabPaste').classList.toggle('hidden', t.dataset.tab !== 'paste');
+  $('tabBuild').classList.toggle('hidden', t.dataset.tab !== 'build');
+}));
 
 $('go').addEventListener('click', runInput);
 $('sig').addEventListener('keydown', e => { if (e.key === 'Enter') runInput(); });

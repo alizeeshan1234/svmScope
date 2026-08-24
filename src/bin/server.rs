@@ -236,6 +236,69 @@ async fn signatures_handler(
     }
 }
 
+/// POST /preflight_report — simulate an unsigned tx and return the full developer
+/// report: outcome, human-readable failure reason, and the account diff.
+async fn preflight_report_handler(
+    Json(req): Json<PreflightRequest>,
+) -> Result<Json<svmscope::SimulationReport>, (StatusCode, String)> {
+    let mutations: Vec<Mutation> = req
+        .mutations
+        .into_iter()
+        .map(MutationInput::into_mutation)
+        .collect::<Result<_, _>>()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let result = tokio::task::spawn_blocking(move || {
+        let client = RpcClient::new(url);
+        svmscope::preflight_report(&client, &req.transaction, &mutations)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+
+    result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
+}
+
+/// POST /replay_report — replay a landed tx (optionally mutated) with explanation
+/// and account diff.
+async fn replay_report_handler(
+    Json(req): Json<SimRequest>,
+) -> Result<Json<svmscope::SimulationReport>, (StatusCode, String)> {
+    let mutations: Vec<Mutation> = req
+        .mutations
+        .into_iter()
+        .map(MutationInput::into_mutation)
+        .collect::<Result<_, _>>()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let result = tokio::task::spawn_blocking(move || {
+        let client = RpcClient::new(url);
+        svmscope::replay_report(&client, &req.signature, &mutations)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+
+    result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
+}
+
+/// GET /instructions/:program — the instructions a program exposes (from its IDL),
+/// for the transaction builder.
+async fn instructions_handler(
+    Path(program): Path<String>,
+    Query(q): Query<ClusterQuery>,
+) -> Result<Json<Vec<svmscope::idl::IdlInstruction>>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let result = tokio::task::spawn_blocking(move || {
+        let client = RpcClient::new(url);
+        svmscope::program_instructions(&client, &program)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+
+    result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
+}
+
 /// GET /replay/:signature — run the local replay on demand (analyze skips it).
 async fn replay_handler(
     Path(signature): Path<String>,
@@ -395,6 +458,9 @@ async fn main() {
         .route("/simulate", post(simulate_handler))
         .route("/simulate_suite", post(suite_handler))
         .route("/preflight", post(preflight_handler))
+        .route("/preflight_report", post(preflight_report_handler))
+        .route("/replay_report", post(replay_report_handler))
+        .route("/instructions/{program}", get(instructions_handler))
         .route("/account/{address}", get(account_handler))
         .route("/signatures/{address}", get(signatures_handler))
         .route("/replay/{signature}", get(replay_handler))

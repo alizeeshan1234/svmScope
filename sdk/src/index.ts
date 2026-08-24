@@ -160,6 +160,55 @@ export interface SigInfo {
   block_time?: number;
 }
 
+
+/** A failure explained in human terms, resolved from the program's IDL when possible. */
+export interface Explanation {
+  /** e.g. "Overflow" or "Slippage exceeded". */
+  title: string;
+  /** The human message, e.g. "counter overflowed". */
+  detail: string;
+  /** Which program raised it, when attributable. */
+  program?: string;
+  /** The raw error, e.g. "InstructionError(0, Custom(6000))". */
+  raw: string;
+}
+
+/** One field that changed in an account, before → after. */
+export interface FieldDiff {
+  name: string;
+  type: string;
+  before: string;
+  after: string;
+}
+
+/** An account the transaction changed. */
+export interface AccountDiff {
+  address: string;
+  owner: string;
+  lamports_before: number;
+  lamports_after: number;
+  fields: FieldDiff[];
+  /** Data changed but the layout wasn't decodable. */
+  raw_data_changed: boolean;
+}
+
+/** A simulation plus everything a developer needs to act on it. */
+export interface SimulationReport {
+  replay: ReplayResult;
+  /** Present when the transaction failed. */
+  explain?: Explanation;
+  diffs: AccountDiff[];
+}
+
+/** One instruction a program exposes (from its on-chain IDL). */
+export interface IdlInstruction {
+  name: string;
+  discriminator: number[];
+  docs: string[];
+  accounts: { name: string; writable: boolean; signer: boolean; pda: boolean; address?: string }[];
+  args: { name: string; type: string }[];
+}
+
 /** A self-contained, deterministic snapshot for offline replay. */
 export interface Fixture {
   signature: string;
@@ -307,6 +356,30 @@ export class Svmscope {
   ): Promise<ReplayResult> {
     const b64 = typeof transaction === "string" ? transaction : toBase64(transaction);
     return this.post("/preflight", { transaction: b64, mutations, ...this.clusterBody(cluster) });
+  }
+
+
+  /**
+   * Pre-flight simulate an unsigned transaction and get the full report:
+   * outcome, a human-readable failure reason, and the field-level account diff.
+   */
+  preflightReport(
+    transaction: string | Uint8Array,
+    mutations: Mutation[] = [],
+    cluster?: Cluster,
+  ): Promise<SimulationReport> {
+    const b64 = typeof transaction === "string" ? transaction : toBase64(transaction);
+    return this.post("/preflight_report", { transaction: b64, mutations, ...this.clusterBody(cluster) });
+  }
+
+  /** Replay a landed transaction (optionally mutated) with explanation + diff. */
+  replayReport(signature: string, mutations: Mutation[] = [], cluster?: Cluster): Promise<SimulationReport> {
+    return this.post("/replay_report", { signature, mutations, ...this.clusterBody(cluster) });
+  }
+
+  /** The instructions a program exposes, from its on-chain IDL. */
+  instructions(programId: string, cluster?: Cluster): Promise<IdlInstruction[]> {
+    return this.get(`/instructions/${encodeURIComponent(programId)}` + this.clusterQuery(cluster));
   }
 
   /** Capture a self-contained fixture for deterministic, offline replay. */
