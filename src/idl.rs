@@ -2,7 +2,7 @@ use std::io::Read;
 
 use crate::decode::{DecodedAccount, Field};
 use flate2::bufread::ZlibDecoder;
-use serde_json::Value;
+use serde_json::{json, Value};
 use solana_client::rpc_client::RpcClient;
 use solana_address::Address;
 
@@ -264,6 +264,12 @@ fn defined_name(ty: &Value) -> Option<&str> {
     d.as_str().or_else(|| d.get("name").and_then(|n| n.as_str()))
 }
 
+/// Read a little-endian u32 at `offset` (borsh length prefixes).
+fn read_u32_at(data: &[u8], offset: usize) -> Option<u32> {
+    let b = data.get(offset..offset + 4)?;
+    Some(u32::from_le_bytes(b.try_into().ok()?))
+}
+
 /// Look up a struct type's fields in `idl["types"]` by name.
 /// Returns `None` for enums / unknown types — the walk stops there.
 fn struct_fields<'a>(types: &'a [Value], name: &str) -> Option<&'a Vec<Value>> {
@@ -333,10 +339,74 @@ fn walk_fields(
             }
         }
 
+        // Variable-length borsh types carry their length in the data, so we can
+        // read them and keep walking — the offsets after them are still correct.
+        //
+        // string: u32 length + utf8 bytes
+        if ty.as_str() == Some("string") {
+            let Some(len) = read_u32_at(data, *offset) else { return false };
+            let start = *offset + 4;
+            let end = start + len as usize;
+            if end > data.len() {
+                return false;
+            }
+            let text = String::from_utf8_lossy(&data[start..end]).to_string();
+            out.push(Field {
+                name: fname, offset: *offset, ty: "string".into(), size: 4 + len as usize,
+                value: text, editable: false, note: None,
+            });
+            *offset = end;
+            continue;
+        }
+
+        // option<T>: 1-byte tag, then T when present.
+        if let Some(inner) = ty.get("option") {
+            let Some(&tag) = data.get(*offset) else { return false };
+            *offset += 1;
+            if tag == 0 {
+                out.push(Field {
+                    name: fname, offset: *offset - 1, ty: "option".into(), size: 1,
+                    value: "none".into(), editable: false, note: None,
+                });
+                continue;
+            }
+            // Present: fall through by walking the inner type as a single field.
+            let one = json!([{ "name": fname, "type": inner.clone() }]);
+            let Some(arr) = one.as_array() else { return false };
+            if !walk_fields(arr, types, data, offset, "", out) {
+                return false;
+            }
+            continue;
+        }
+
+        // vec<T>: u32 count, then the elements. Walk each so the cursor stays true.
+        if let Some(inner) = ty.get("vec") {
+            let Some(count) = read_u32_at(data, *offset) else { return false };
+            out.push(Field {
+                name: format!("{fname}.len"), offset: *offset, ty: "u32".into(), size: 4,
+                value: count.to_string(), editable: false, note: None,
+            });
+            *offset += 4;
+            // Cap how many elements we expand so a huge vec can't flood the UI;
+            // beyond the cap we can't know the size, so stop cleanly.
+            const MAX_ELEMS: u32 = 32;
+            if count > MAX_ELEMS {
+                return false;
+            }
+            for i in 0..count {
+                let one = json!([{ "name": format!("{fname}[{i}]"), "type": inner.clone() }]);
+                let Some(arr) = one.as_array() else { return false };
+                if !walk_fields(arr, types, data, offset, "", out) {
+                    return false;
+                }
+            }
+            continue;
+        }
+
         // Otherwise it's a plain scalar or fixed array. Read it and advance.
         let kind = match resolve_fixed(ty) {
             Some(k) => k,
-            None => return false, // vec / string / option → stop
+            None => return false, // unknown type → stop
         };
         let size = kind.size();
         if *offset + size > data.len() {
