@@ -6169,6 +6169,7 @@ dependencies = [
  "solana-account 4.3.2",
  "solana-address 2.6.1",
  "solana-client",
+ "solana-clock",
  "solana-transaction",
  "tokio",
 ]

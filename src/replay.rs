@@ -6,6 +6,7 @@
 use crate::fixture::{Fixture, FixtureEntry};
 use base64::Engine;
 use litesvm::types::TransactionResult;
+use solana_clock::Clock;
 use litesvm::LiteSVM;
 use serde_json::json;
 use solana_account::Account;
@@ -144,25 +145,43 @@ fn svm_from_loaded(loaded: &[(Address, Loaded)]) -> LiteSVM {
 pub struct ReplayContext {
     tx: VersionedTransaction,
     loaded: Vec<(Address, Loaded)>,
+    /// The slot the transaction landed in. The SVM clock is set to this so
+    /// Address Lookup Table resolution — and slot-sensitive program logic like
+    /// oracle staleness checks — sees the same world the transaction ran in.
+    /// Without it, LiteSVM's default slot is below recent mainnet slots, and any
+    /// ALT extended more recently fails with `InvalidAddressLookupTableIndex`.
+    slot: Option<u64>,
 }
 
 impl ReplayContext {
+    /// A pristine SVM loaded with the reconstructed state, its clock advanced to
+    /// the transaction's slot.
+    fn fresh_svm(&self) -> LiteSVM {
+        let mut svm = svm_from_loaded(&self.loaded);
+        if let Some(slot) = self.slot {
+            let mut clock = svm.get_sysvar::<Clock>();
+            clock.slot = slot;
+            svm.set_sysvar::<Clock>(&clock);
+        }
+        svm
+    }
+
     /// Replay the transaction after applying `mutations` to a fresh copy of the
     /// state. Repeatable and side-effect-free across calls.
     pub fn run(&self, mutations: &[Mutation]) -> ReplayResult {
-        let mut svm = svm_from_loaded(&self.loaded);
-        for m in mutations {
-            if let Err(e) = apply_mutation(&mut svm, m) {
-                return ReplayResult { success: false, error: Some(e), logs: vec![], compute_units: 0 };
-            }
-        }
-        to_replay_result(svm.send_transaction(self.tx.clone()))
+        self.run_full(mutations).0
     }
 }
 
 /// Fetch everything needed to replay `signature` (transaction + all touched
 /// accounts + program ELFs, including Address Lookup Table accounts) once.
-pub fn build_context(client: &RpcClient, signature: &str, account_keys: &[String]) -> ReplayContext {
+/// Pass the transaction's `slot` so ALT resolution matches the real world.
+pub fn build_context(
+    client: &RpcClient,
+    signature: &str,
+    account_keys: &[String],
+    slot: Option<u64>,
+) -> ReplayContext {
     let tx = fetch_transaction(client, signature);
     let mut all_keys = account_keys.to_vec();
     if let Some(lookups) = tx.message.address_table_lookups() {
@@ -171,7 +190,7 @@ pub fn build_context(client: &RpcClient, signature: &str, account_keys: &[String
         }
     }
     let loaded = fetch_loaded(client, &all_keys);
-    ReplayContext { tx, loaded }
+    ReplayContext { tx, loaded, slot }
 }
 
 fn b64_encode(bytes: &[u8]) -> String {
@@ -245,7 +264,7 @@ impl ReplayContext {
                 }
             }
         }
-        Ok(ReplayContext { tx, loaded })
+        Ok(ReplayContext { tx, loaded, slot: fx.captured_slot })
     }
 }
 
@@ -330,8 +349,13 @@ fn to_replay_result(result: TransactionResult) -> ReplayResult {
 }
 
 /// Replay the transaction against the reconstructed state.
-pub fn replay_transaction(client: &RpcClient, signature: &str, account_keys: &[String]) -> ReplayResult {
-    build_context(client, signature, account_keys).run(&[])
+pub fn replay_transaction(
+    client: &RpcClient,
+    signature: &str,
+    account_keys: &[String],
+    slot: Option<u64>,
+) -> ReplayResult {
+    build_context(client, signature, account_keys, slot).run(&[])
 }
 
 /// Replay the transaction after applying the given mutations.
@@ -340,8 +364,9 @@ pub fn mutate_and_replay(
     signature: &str,
     account_keys: &[String],
     mutations: &[Mutation],
+    slot: Option<u64>,
 ) -> ReplayResult {
-    build_context(client, signature, account_keys).run(mutations)
+    build_context(client, signature, account_keys, slot).run(mutations)
 }
 
 // ---------------------------------------------------------------------------
@@ -506,7 +531,7 @@ pub struct ScenarioOutcome {
 impl ReplayContext {
     /// Run mutations and keep the post-replay SVM so state can be inspected.
     fn run_full(&self, mutations: &[Mutation]) -> (ReplayResult, LiteSVM) {
-        let mut svm = svm_from_loaded(&self.loaded);
+        let mut svm = self.fresh_svm();
         for m in mutations {
             if let Err(e) = apply_mutation(&mut svm, m) {
                 return (

@@ -104,7 +104,7 @@ pub fn run_replay(client: &RpcClient, signature: &str) -> Result<replay::ReplayR
         return Err(format!("transaction not found: {signature}"));
     }
     let account_keys = utils::resolve_account_keys(&tx);
-    Ok(replay::replay_transaction(client, signature, &account_keys))
+    Ok(replay::replay_transaction(client, signature, &account_keys, tx["slot"].as_u64()))
 }
 
 /// Replay a transaction after applying what-if mutations, returning just the result.
@@ -125,7 +125,7 @@ pub fn simulate(
     }
 
     let account_keys = utils::resolve_account_keys(&tx);
-    Ok(replay::mutate_and_replay(client, signature, &account_keys, mutations))
+    Ok(replay::mutate_and_replay(client, signature, &account_keys, mutations, tx["slot"].as_u64()))
 }
 
 /// Run a suite of test scenarios against one transaction. State is fetched once
@@ -145,7 +145,7 @@ pub fn simulate_suite(
         return Err(format!("transaction not found: {signature}"));
     }
     let account_keys = utils::resolve_account_keys(&tx);
-    let ctx = replay::build_context(client, signature, &account_keys);
+    let ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64());
     Ok(replay::run_suite(&ctx, &scenarios))
 }
 
@@ -163,7 +163,7 @@ pub fn capture_fixture(client: &RpcClient, signature: &str) -> Result<fixture::F
     }
     let slot = tx["slot"].as_u64();
     let account_keys = utils::resolve_account_keys(&tx);
-    let ctx = replay::build_context(client, signature, &account_keys);
+    let ctx = replay::build_context(client, signature, &account_keys, slot);
     Ok(ctx.to_fixture(signature, slot))
 }
 

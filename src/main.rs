@@ -100,7 +100,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     state::fetch_account_states(&client, &account_keys);
 
     println!("\n-- replay --");
-    let baseline = replay::replay_transaction(&client, signature, &account_keys);
+    let baseline = replay::replay_transaction(&client, signature, &account_keys, tx["slot"].as_u64());
     print_replay("REPLAY", &baseline);
 
     // Mutations come only from the CLI (`--mutate <address>:<lamports>`).
@@ -124,7 +124,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if !mutations.is_empty() {
-        let mutated = replay::mutate_and_replay(&client, signature, &account_keys, &mutations);
+        let mutated = replay::mutate_and_replay(&client, signature, &account_keys, &mutations, tx["slot"].as_u64());
         print_replay("MUTATED REPLAY", &mutated);
     }
 
