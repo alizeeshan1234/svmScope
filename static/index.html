@@ -268,8 +268,17 @@
     border-radius: 10px; padding: 10px 12px; font-family: var(--mono); font-size: 12px; word-break: break-word; }
   .logs { margin-top: 12px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px;
     max-height: 300px; overflow: auto; color: var(--dim); font-family: var(--mono); font-size: 11.5px; }
-  .logs div { white-space: pre-wrap; line-height: 1.65; }
-  .logs .invoke { color: var(--accent-2); } .logs .ok { color: var(--green); } .logs .fail { color: var(--red); }
+  .logs .lg-line { white-space: pre-wrap; line-height: 1.75; display: flex; align-items: baseline; flex-wrap: wrap; }
+  .lg-dot { width: 6px; height: 6px; border-radius: 50%; margin-right: 7px; box-shadow: 0 0 7px currentColor; align-self: center; }
+  .lg-prog { font-weight: 650; }
+  .lg-kw { color: var(--muted); text-transform: uppercase; font-size: 9.5px; letter-spacing: .8px; margin: 0 6px; }
+  .lg-lvl { color: var(--dim); }
+  .lg-ok { color: var(--green); font-weight: 600; }
+  .lg-fail { color: var(--red); }
+  .lg-inst { color: var(--cyan); font-weight: 600; }
+  .lg-key { color: var(--accent); opacity: .85; }
+  .lg-msg { color: var(--dim); }
+  .lg-dim { color: var(--muted); }
   .logs .lg { color: var(--cyan); }
 
   /* what-if */
@@ -280,12 +289,14 @@
   .editor-toolbar .filter:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(153,69,255,.14); }
   .editor-toolbar .summary { color: var(--muted); font-size: 12px; white-space: nowrap; }
 
-  .acct-card { border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); margin: 8px 0; overflow: hidden; transition: border-color .15s; }
-  .acct-card.open { border-color: var(--line-2); }
-  .acct-card.has-edits { border-color: rgba(255,176,32,.55); }
+  .acct-card { border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.02); margin: 9px 0; overflow: hidden;
+    transition: border-color .18s, box-shadow .18s, transform .18s cubic-bezier(.2,.8,.2,1); }
+  .acct-card:hover { border-color: var(--line-2); transform: translateY(-1px); box-shadow: 0 10px 26px -16px rgba(0,0,0,.8); }
+  .acct-card.open { border-color: var(--line-2); background: rgba(255,255,255,.03); }
+  .acct-card.has-edits { border-color: rgba(255,176,32,.55); box-shadow: 0 0 0 1px rgba(255,176,32,.2), 0 0 26px -10px rgba(255,176,32,.5); }
   .acct-head { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: none; border: 0;
-    color: var(--text); padding: 11px 14px; cursor: pointer; font-family: var(--sans); font-size: 13px; }
-  .acct-head:hover { background: rgba(153,69,255,.05); }
+    color: var(--text); padding: 12px 15px; cursor: pointer; font-family: var(--sans); font-size: 13px; transition: background .15s; }
+  .acct-head:hover { background: rgba(153,69,255,.06); }
   .acct-head .chev { color: var(--muted); font-size: 10px; transition: transform .15s; width: 10px; flex: 0 0 auto; }
   .acct-card.open .acct-head .chev { transform: rotate(90deg); }
   .acct-head .edit-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); flex: 0 0 auto; box-shadow: 0 0 0 3px rgba(255,176,32,.18); }
@@ -343,11 +354,13 @@
   .suite-result { font-family: var(--mono); font-size: 13px; font-weight: 650; }
   .suite-result.pass { color: var(--green); } .suite-result.fail { color: var(--red); }
 
-  .suite { display: flex; flex-direction: column; gap: 8px; }
-  .srow { border: 1px solid var(--line); border-left: 3px solid var(--line-2); border-radius: 11px;
-    background: var(--panel-2); overflow: hidden; transition: border-color .15s; }
-  .srow.pass { border-left-color: var(--green); }
-  .srow.fail { border-left-color: var(--red); }
+  .suite { display: flex; flex-direction: column; gap: 9px; }
+  .srow { border: 1px solid var(--line); border-left: 3px solid var(--line-2); border-radius: 12px;
+    background: rgba(255,255,255,.02); overflow: hidden;
+    transition: border-color .18s, box-shadow .18s, transform .18s cubic-bezier(.2,.8,.2,1); }
+  .srow:hover { transform: translateY(-1px); box-shadow: 0 10px 26px -16px rgba(0,0,0,.8); }
+  .srow.pass { border-left-color: var(--green); box-shadow: -6px 0 20px -14px var(--green); }
+  .srow.fail { border-left-color: var(--red); box-shadow: -6px 0 20px -14px var(--red); }
   .srow-head { display: flex; align-items: center; gap: 12px; padding: 11px 14px; }
   .srow .st { width: 20px; flex: 0 0 auto; text-align: center; font-size: 14px; }
   .srow .st .pend { color: var(--muted); }
@@ -704,13 +717,46 @@ function renderTokens(changes) {
   }).join('');
 }
 
-function fmtLog(l) {
-  let cls = '';
-  if (/invoke \[\d+\]/.test(l)) cls = 'invoke';
-  else if (/success$/.test(l)) cls = 'ok';
-  else if (/failed|error/i.test(l)) cls = 'fail';
-  else if (/^Program log:|^Program return:/.test(l)) cls = 'lg';
-  return `<div class="${cls}">${esc(l)}</div>`;
+// Render program logs like a real trace viewer: indent by CPI depth, name the
+// programs, highlight instructions, and dim the boilerplate.
+function renderLogs(logs) {
+  let depth = 0;
+  const rows = logs.map((l) => {
+    const invoke = l.match(/^Program (\S+) invoke \[(\d+)\]/);
+    let indent, html;
+    if (invoke) {
+      const pid = invoke[1], lvl = Number(invoke[2]);
+      indent = lvl - 1; depth = lvl;
+      const p = progInfo(pid);
+      html = `<span class="lg-dot" style="color:${p.color};background:${p.color}"></span>` +
+             `<span class="lg-prog" style="color:${p.color}">${esc(p.known ? p.name : short(pid))}</span>` +
+             `<span class="lg-kw">invoke</span><span class="lg-lvl">#${lvl}</span>`;
+    } else if (/^Program \S+ success$/.test(l)) {
+      depth = Math.max(0, depth - 1); indent = depth;
+      const pid = l.split(' ')[1], p = progInfo(pid);
+      html = `<span class="lg-prog" style="color:${p.color}">${esc(p.known ? p.name : short(pid))}</span> <span class="lg-ok">✓ success</span>`;
+    } else if (/failed|AnchorError|Error (Code|Number|Message)|panicked/i.test(l)) {
+      indent = depth;
+      html = `<span class="lg-fail">${esc(l.replace(/^Program \S+ /, ''))}</span>`;
+    } else if (/consumed \d+ of \d+ compute units/.test(l)) {
+      indent = depth;
+      const m = l.match(/consumed (\d+) of (\d+)/);
+      html = `<span class="lg-dim">consumed ${fmt(m[1])} of ${fmt(m[2])} CU</span>`;
+    } else if (/^Program log: Instruction: /.test(l)) {
+      indent = depth;
+      html = `<span class="lg-kw">ix</span><span class="lg-inst">${esc(l.replace('Program log: Instruction: ', ''))}</span>`;
+    } else if (/^Program (log|data|return):/.test(l)) {
+      indent = depth;
+      const kw = l.match(/^Program (log|data|return):/)[0];
+      const body = l.slice(kw.length).trim();
+      html = `<span class="lg-key">${esc(kw)}</span> <span class="lg-msg">${esc(body)}</span>`;
+    } else {
+      indent = depth;
+      html = `<span class="lg-dim">${esc(l)}</span>`;
+    }
+    return `<div class="lg-line" style="padding-left:${indent * 18}px">${html}</div>`;
+  });
+  return rows.join('');
 }
 // Local replay is opt-in. Show a button until the user runs it (or it's been
 // run once as a scenario baseline).
@@ -738,7 +784,7 @@ function renderReplay(r) {
   const badge = r.success ? `<span class="badge ok"><span class="b-dot"></span>replay success</span>`
                           : `<span class="badge fail"><span class="b-dot"></span>replay failed</span>`;
   const err = r.error ? `<div class="err-box">${esc(r.error)}</div>` : '';
-  const logs = r.logs && r.logs.length ? `<div class="logs">${r.logs.map(fmtLog).join('')}</div>` : '';
+  const logs = r.logs && r.logs.length ? `<div class="logs">${renderLogs(r.logs)}</div>` : '';
   return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${err}${logs}`;
 }
 
@@ -813,7 +859,7 @@ function renderSuite() {
 }
 function renderReplaySmall(r) {
   const err = r.error ? `<div class="err-box" style="margin-top:0">${esc(r.error)}</div>` : '';
-  const logs = r.logs && r.logs.length ? `<div class="logs" style="margin-top:8px;max-height:200px">${r.logs.map(fmtLog).join('')}</div>` : '';
+  const logs = r.logs && r.logs.length ? `<div class="logs" style="margin-top:8px;max-height:200px">${renderLogs(r.logs)}</div>` : '';
   return err + logs || '<div class="empty">no logs</div>';
 }
 async function runSuite() {
@@ -1275,7 +1321,7 @@ function showResult(before, after, opts) {
         <div class="delta ${dc}">${dt}</div></div>
     </div>
     ${after.error ? `<div class="err-box">${esc(after.error)}</div>` : ''}
-    ${after.logs && after.logs.length ? `<div class="logs">${after.logs.map(fmtLog).join('')}</div>` : ''}`;
+    ${after.logs && after.logs.length ? `<div class="logs">${renderLogs(after.logs)}</div>` : ''}`;
   $('simResult').scrollIntoView({ block: 'nearest' });
 }
 
