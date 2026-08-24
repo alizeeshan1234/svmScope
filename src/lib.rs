@@ -343,6 +343,9 @@ pub fn simulate(
 #[derive(Serialize)]
 pub struct SimulationReport {
     pub replay: replay::ReplayResult,
+    /// Where the clock was warped to, when time travel was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clock: Option<String>,
     /// The failure explained in plain language, resolved from the program's IDL
     /// when possible ("Overflow — counter overflowed") instead of Custom(6000).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -564,6 +567,7 @@ pub fn preflight_report(
     client: &RpcClient,
     tx_b64: &str,
     mutations: &[replay::Mutation],
+    time_travel: replay::TimeTravel,
 ) -> Result<SimulationReport, String> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -571,9 +575,13 @@ pub fn preflight_report(
         .map_err(|e| format!("bad base64 transaction: {e}"))?;
     let tx: solana_transaction::versioned::VersionedTransaction =
         bincode::deserialize(&bytes).map_err(|e| format!("could not deserialize transaction: {e}"))?;
-    let ctx = replay::preflight_context(client, tx);
+    let mut ctx = replay::preflight_context(client, tx);
+    let warped = !time_travel.is_noop();
+    ctx.set_time_travel(time_travel);
+    let clock_desc = warped.then(|| ctx.describe_clock());
     let (replay, raw_diffs) = ctx.run_with_diff(mutations);
     Ok(SimulationReport {
+        clock: clock_desc,
         explain: (!replay.success).then(|| explain_error(client, &replay)).flatten(),
         diffs: decode_diffs(client, raw_diffs),
         replay,
@@ -585,6 +593,7 @@ pub fn replay_report(
     client: &RpcClient,
     signature: &str,
     mutations: &[replay::Mutation],
+    time_travel: replay::TimeTravel,
 ) -> Result<SimulationReport, String> {
     let tx: serde_json::Value = client
         .send(
@@ -597,9 +606,13 @@ pub fn replay_report(
     }
     let account_keys = utils::resolve_account_keys(&tx);
     let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre);
+    let mut ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre);
+    let warped = !time_travel.is_noop();
+    ctx.set_time_travel(time_travel);
+    let clock_desc = warped.then(|| ctx.describe_clock());
     let (replay, raw_diffs) = ctx.run_with_diff(mutations);
     Ok(SimulationReport {
+        clock: clock_desc,
         explain: (!replay.success).then(|| explain_error(client, &replay)).flatten(),
         diffs: decode_diffs(client, raw_diffs),
         replay,

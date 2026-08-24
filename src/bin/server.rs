@@ -73,6 +73,9 @@ fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> String {
 struct SimRequest {
     signature: String,
     mutations: Vec<MutationInput>,
+    /// Optional clock warp — test time-gated logic without waiting.
+    #[serde(default)]
+    time_travel: svmscope::replay::TimeTravel,
     #[serde(default)]
     cluster: Option<String>,
     #[serde(default)]
@@ -166,6 +169,9 @@ struct PreflightRequest {
     transaction: String,
     #[serde(default)]
     mutations: Vec<MutationInput>,
+    /// Optional clock warp — test time-gated logic without waiting.
+    #[serde(default)]
+    time_travel: svmscope::replay::TimeTravel,
     #[serde(default)]
     cluster: Option<String>,
     #[serde(default)]
@@ -249,9 +255,10 @@ async fn preflight_report_handler(
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(move || {
         let client = RpcClient::new(url);
-        svmscope::preflight_report(&client, &req.transaction, &mutations)
+        svmscope::preflight_report(&client, &req.transaction, &mutations, tt)
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
@@ -272,9 +279,10 @@ async fn replay_report_handler(
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(move || {
         let client = RpcClient::new(url);
-        svmscope::replay_report(&client, &req.signature, &mutations)
+        svmscope::replay_report(&client, &req.signature, &mutations, tt)
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;

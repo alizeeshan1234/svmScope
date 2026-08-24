@@ -161,6 +161,8 @@ pub struct ReplayContext {
     /// Without it, LiteSVM's default slot is below recent mainnet slots, and any
     /// ALT extended more recently fails with `InvalidAddressLookupTableIndex`.
     slot: Option<u64>,
+    /// Optional clock warp applied on top of `slot` (see [`TimeTravel`]).
+    time_travel: TimeTravel,
 }
 
 /// An account that the transaction changed, with raw before/after bytes. The
@@ -174,16 +176,153 @@ pub struct RawAccountDiff {
     pub data_after: Vec<u8>,
 }
 
+/// Move the SVM's clock forward (or to an absolute point) so time-gated program
+/// logic can be tested without waiting: unstake after an epoch, claim after a
+/// vesting cliff, withdraw after a cooldown, settle after an auction ends.
+///
+/// Relative fields add to the transaction's own clock; absolute fields replace it.
+/// Slots and epochs are kept consistent with each other where possible
+/// (Solana's ~432,000 slots per epoch, ~400ms per slot).
+#[derive(Default, Clone, serde::Deserialize)]
+pub struct TimeTravel {
+    /// Jump forward this many epochs (the common case for staking).
+    #[serde(default)]
+    pub epochs: Option<i64>,
+    /// Jump forward this many slots.
+    #[serde(default)]
+    pub slots: Option<i64>,
+    /// Jump forward this many seconds (vesting cliffs, cooldowns).
+    #[serde(default)]
+    pub seconds: Option<i64>,
+    /// Set the unix timestamp outright.
+    #[serde(default)]
+    pub at_unix_timestamp: Option<i64>,
+    /// Set the slot outright.
+    #[serde(default)]
+    pub at_slot: Option<u64>,
+    /// Set the epoch outright.
+    #[serde(default)]
+    pub at_epoch: Option<u64>,
+}
+
+/// Slots per epoch on mainnet, used to keep slot/epoch/time coherent when warping.
+const SLOTS_PER_EPOCH: i64 = 432_000;
+/// Approximate seconds per slot.
+const SECS_PER_SLOT: f64 = 0.4;
+
+impl TimeTravel {
+    pub fn is_noop(&self) -> bool {
+        self.epochs.is_none() && self.slots.is_none() && self.seconds.is_none()
+            && self.at_unix_timestamp.is_none() && self.at_slot.is_none() && self.at_epoch.is_none()
+    }
+
+    /// Apply this warp to a clock, advancing the related fields together so a
+    /// program that reads epoch *and* timestamp sees a consistent world.
+    fn apply(&self, clock: &mut Clock) {
+        let mut slot_delta: i64 = 0;
+        if let Some(e) = self.epochs {
+            slot_delta += e * SLOTS_PER_EPOCH;
+        }
+        if let Some(s) = self.slots {
+            slot_delta += s;
+        }
+        if slot_delta != 0 {
+            clock.slot = clock.slot.saturating_add_signed(slot_delta);
+            clock.epoch = clock.epoch.saturating_add_signed(slot_delta / SLOTS_PER_EPOCH);
+            clock.unix_timestamp += (slot_delta as f64 * SECS_PER_SLOT) as i64;
+        }
+        if let Some(secs) = self.seconds {
+            clock.unix_timestamp += secs;
+            // Keep slots roughly in step so slot-based checks move too.
+            let by = (secs as f64 / SECS_PER_SLOT) as i64;
+            clock.slot = clock.slot.saturating_add_signed(by);
+            clock.epoch = clock.epoch.saturating_add_signed(by / SLOTS_PER_EPOCH);
+        }
+        // Absolute settings win over the relative jumps above.
+        if let Some(t) = self.at_unix_timestamp {
+            clock.unix_timestamp = t;
+        }
+        if let Some(s) = self.at_slot {
+            clock.slot = s;
+        }
+        if let Some(e) = self.at_epoch {
+            clock.epoch = e;
+        }
+        clock.leader_schedule_epoch = clock.epoch + 1;
+        // The epoch's start can't be after "now" once we've moved.
+        clock.epoch_start_timestamp = clock.epoch_start_timestamp.min(clock.unix_timestamp);
+    }
+
+    /// A human summary of where we travelled to, for the UI.
+    pub fn describe(&self, clock: &Clock) -> String {
+        format!(
+            "slot {} · epoch {} · {}",
+            clock.slot,
+            clock.epoch,
+            chrono_like(clock.unix_timestamp)
+        )
+    }
+}
+
+/// Format a unix timestamp as UTC without pulling in a date crate.
+fn chrono_like(ts: i64) -> String {
+    // days since epoch → civil date (Howard Hinnant's algorithm)
+    let days = ts.div_euclid(86_400);
+    let secs = ts.rem_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", secs / 3600, (secs % 3600) / 60)
+}
+
 impl ReplayContext {
+    /// Warp the clock for subsequent runs (see [`TimeTravel`]).
+    pub fn set_time_travel(&mut self, tt: TimeTravel) {
+        self.time_travel = tt;
+    }
+
+    /// Seed the clock with the transaction's real slot, and derive the epoch and
+    /// wall-clock time from it. LiteSVM starts at epoch 0 / timestamp 0, which
+    /// would make any date-based program logic nonsense, so we anchor to reality:
+    /// Solana's genesis (2020-03-16) plus ~400ms per slot.
+    fn base_clock(&self, clock: &mut Clock) {
+        let Some(slot) = self.slot else { return };
+        const GENESIS_UNIX: i64 = 1_584_368_940; // 2020-03-16, mainnet genesis
+        clock.slot = slot;
+        clock.epoch = slot / SLOTS_PER_EPOCH as u64;
+        clock.unix_timestamp = GENESIS_UNIX + (slot as f64 * SECS_PER_SLOT) as i64;
+        clock.epoch_start_timestamp =
+            GENESIS_UNIX + ((clock.epoch * SLOTS_PER_EPOCH as u64) as f64 * SECS_PER_SLOT) as i64;
+        clock.leader_schedule_epoch = clock.epoch + 1;
+    }
+
+    /// A human description of the clock this context replays with, e.g.
+    /// "slot 487,817,148 · epoch 1128 · 2026-09-01 04:12 UTC".
+    pub fn describe_clock(&self) -> String {
+        let svm = LiteSVM::new();
+        let mut clock = svm.get_sysvar::<Clock>();
+        self.base_clock(&mut clock);
+        self.time_travel.apply(&mut clock);
+        self.time_travel.describe(&clock)
+    }
+
     /// A pristine SVM loaded with the reconstructed state, its clock advanced to
-    /// the transaction's slot.
+    /// the transaction's slot (and then by any requested time travel).
     fn fresh_svm(&self) -> LiteSVM {
         let mut svm = svm_from_loaded(&self.loaded);
-        if let Some(slot) = self.slot {
-            let mut clock = svm.get_sysvar::<Clock>();
-            clock.slot = slot;
-            svm.set_sysvar::<Clock>(&clock);
+        let mut clock = svm.get_sysvar::<Clock>();
+        self.base_clock(&mut clock);
+        if !self.time_travel.is_noop() {
+            self.time_travel.apply(&mut clock);
         }
+        svm.set_sysvar::<Clock>(&clock);
         svm
     }
 
@@ -374,7 +513,7 @@ pub fn build_context(
         }
     }
 
-    ReplayContext { tx, loaded, slot }
+    ReplayContext { tx, loaded, slot, time_travel: TimeTravel::default() }
 }
 
 fn b64_encode(bytes: &[u8]) -> String {
@@ -434,7 +573,7 @@ pub fn preflight_context(client: &RpcClient, tx: VersionedTransaction) -> Replay
     }
     let (loaded, _existing) = fetch_loaded(client, &all_keys);
     let slot = client.get_slot().ok();
-    ReplayContext { tx, loaded, slot }
+    ReplayContext { tx, loaded, slot, time_travel: TimeTravel::default() }
 }
 
 impl ReplayContext {
@@ -504,7 +643,7 @@ impl ReplayContext {
                 }
             }
         }
-        Ok(ReplayContext { tx, loaded, slot: fx.captured_slot })
+        Ok(ReplayContext { tx, loaded, slot: fx.captured_slot, time_travel: TimeTravel::default() })
     }
 }
 

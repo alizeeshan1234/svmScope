@@ -192,9 +192,28 @@ export interface AccountDiff {
   raw_data_changed: boolean;
 }
 
+/**
+ * Warp the SVM clock so time-gated logic can be tested without waiting —
+ * unstake after an epoch, claim after a vesting cliff, withdraw after a cooldown.
+ * Relative fields add to the transaction's clock; `at*` fields set it outright.
+ */
+export interface TimeTravel {
+  /** Jump forward this many epochs (staking). */
+  epochs?: number;
+  /** Jump forward this many slots. */
+  slots?: number;
+  /** Jump forward this many seconds (cliffs, cooldowns). */
+  seconds?: number;
+  at_unix_timestamp?: number;
+  at_slot?: number;
+  at_epoch?: number;
+}
+
 /** A simulation plus everything a developer needs to act on it. */
 export interface SimulationReport {
   replay: ReplayResult;
+  /** Where the clock was warped to, when time travel was requested. */
+  clock?: string;
   /** Present when the transaction failed. */
   explain?: Explanation;
   diffs: AccountDiff[];
@@ -366,15 +385,27 @@ export class Svmscope {
   preflightReport(
     transaction: string | Uint8Array,
     mutations: Mutation[] = [],
-    cluster?: Cluster,
+    opts: { timeTravel?: TimeTravel; cluster?: Cluster } = {},
   ): Promise<SimulationReport> {
     const b64 = typeof transaction === "string" ? transaction : toBase64(transaction);
-    return this.post("/preflight_report", { transaction: b64, mutations, ...this.clusterBody(cluster) });
+    return this.post("/preflight_report", {
+      transaction: b64, mutations,
+      time_travel: opts.timeTravel ?? {},
+      ...this.clusterBody(opts.cluster),
+    });
   }
 
   /** Replay a landed transaction (optionally mutated) with explanation + diff. */
-  replayReport(signature: string, mutations: Mutation[] = [], cluster?: Cluster): Promise<SimulationReport> {
-    return this.post("/replay_report", { signature, mutations, ...this.clusterBody(cluster) });
+  replayReport(
+    signature: string,
+    mutations: Mutation[] = [],
+    opts: { timeTravel?: TimeTravel; cluster?: Cluster } = {},
+  ): Promise<SimulationReport> {
+    return this.post("/replay_report", {
+      signature, mutations,
+      time_travel: opts.timeTravel ?? {},
+      ...this.clusterBody(opts.cluster),
+    });
   }
 
   /** The instructions a program exposes, from its on-chain IDL. */
