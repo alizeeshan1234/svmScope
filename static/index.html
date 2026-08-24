@@ -123,6 +123,19 @@ body::before {
 .logo b { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
 .logo .tag { color: var(--text-3); font-size: 13px; }
 
+.logo { cursor: pointer; }
+.nav { display: flex; gap: var(--s-1); flex: 0 0 auto; background: var(--bg-2);
+  border: 1px solid var(--border); border-radius: var(--r-md); padding: 3px; }
+.navtab {
+  appearance: none; border: 0; cursor: pointer; background: transparent;
+  color: var(--text-3); padding: 6px var(--s-3); border-radius: 7px;
+  font-family: var(--font-sans); font-size: 13px; font-weight: 550; white-space: nowrap;
+  transition: color var(--t-fast), background var(--t-fast);
+}
+.navtab:hover { color: var(--text-1); }
+.navtab.on { background: var(--bg-1); color: var(--text-1); box-shadow: var(--shadow-1); }
+@media (max-width: 860px) { .nav { display: none; } }
+
 .search { display: flex; gap: var(--s-2); flex: 1; min-width: 0; }
 .search input {
   flex: 1; min-width: 0;
@@ -743,10 +756,14 @@ details.advanced .adv-body { padding-top: var(--s-2); }
 <body>
   <div class="topbar">
     <div class="topbar-inner">
-      <div class="logo">
+      <div class="logo" id="brand" title="Home">
         <div class="mark">◎</div>
-        <div><b>svmscope</b> &nbsp;<span class="tag">transaction simulator</span></div>
+        <div><b>svmscope</b></div>
       </div>
+      <nav class="nav">
+        <button class="navtab on" id="navAnalyze">Analyze</button>
+        <button class="navtab" id="navSim">⚡ Simulate</button>
+      </nav>
       <div class="search">
         <select id="cluster" class="cluster" title="Cluster / RPC">
           <option value="mainnet">Mainnet</option>
@@ -1171,16 +1188,52 @@ function renderLogs(logs) {
 // Local replay is opt-in. Show a button until the user runs it (or it's been
 // run once as a scenario baseline).
 function renderReplayPanel() {
-  if (analysis.replay) { $('replay').innerHTML = renderReplay(analysis.replay); return; }
-  $('replay').innerHTML =
-    `<button class="btn ghost sm" id="runReplay">▶ Run local replay</button>
-     <span class="cu-note" style="margin-left:10px">Re-execute this transaction locally against current state
-       (it succeeded on-chain; local replay can differ if state has since moved).</span>`;
-  $('runReplay').addEventListener('click', async () => {
+  // Time travel is offered here too: replay this transaction at a future point to
+  // exercise lockups, cliffs and cooldowns without waiting.
+  const ttRow = `
+    <div class="timetravel" style="margin-top:14px">
+      <div class="tt-head"><span class="tt-title">⏱ Time travel</span>
+        <span class="tt-sub">Replay this transaction at a different point in time.</span></div>
+      <div class="tt-row">
+        <button class="chip rtt on" data-tt='{}'>now</button>
+        <button class="chip rtt" data-tt='{"epochs":1}'>+1 epoch</button>
+        <button class="chip rtt" data-tt='{"seconds":86400}'>+1 day</button>
+        <button class="chip rtt" data-tt='{"seconds":604800}'>+1 week</button>
+        <button class="chip rtt" data-tt='{"seconds":2592000}'>+30 days</button>
+        <button class="chip rtt" data-tt='{"seconds":31536000}'>+1 year</button>
+      </div>
+    </div>`;
+
+  const body = analysis.replay
+    ? renderReplay(analysis.replay)
+    : `<button class="btn ghost sm" id="runReplay">▶ Run local replay</button>
+       <span class="cu-note" style="margin-left:10px">Re-execute this transaction locally against current state
+         (it succeeded on-chain; local replay can differ if state has since moved).</span>`;
+
+  $('replay').innerHTML = body + ttRow + '<div id="replayTT"></div>';
+
+  $('runReplay')?.addEventListener('click', async () => {
     const b = $('runReplay'); b.disabled = true; b.textContent = '▶ Replaying…';
     try { await ensureBaseline(); renderReplayPanel(); }
     catch (e) { $('replay').innerHTML = `<div class="err-box">${esc(e.message)}</div>`; }
   });
+
+  // Replaying at a warped clock uses /replay_report so we also get the diff.
+  $('replay').querySelectorAll('.chip.rtt').forEach(c => c.addEventListener('click', async () => {
+    $('replay').querySelectorAll('.chip.rtt').forEach(x => x.classList.toggle('on', x === c));
+    const tt = JSON.parse(c.dataset.tt);
+    const out = $('replayTT');
+    if (!Object.keys(tt).length) { out.innerHTML = ''; return; }
+    out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>replaying in the future…</div>';
+    try {
+      const res = await api('/replay_report', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ signature: currentSig, mutations: [], time_travel: tt, cluster: currentCluster() }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      renderReport(await res.json(), out);
+    } catch (e) { out.innerHTML = `<div class="err-box">${esc(e.message)}</div>`; }
+  }));
 }
 // Fetch the baseline replay once and cache it on `analysis.replay`.
 async function ensureBaseline() {
@@ -1760,9 +1813,17 @@ function bs58encode(bytes) {
 
 function showSim(on) {
   $('sim').classList.toggle('hidden', !on);
-  $('hero').classList.toggle('hidden', on);
-  if (on) { $('out').classList.add('hidden'); $('txlist').classList.add('hidden'); $('status').classList.add('hidden'); }
-  else { $('simOut').innerHTML = ''; }
+  // Keep whatever analysis is on screen when leaving Simulate, so switching tabs
+  // doesn't throw away the user's work.
+  const hasResults = !!analysis;
+  $('hero').classList.toggle('hidden', on || hasResults);
+  if (on) {
+    $('out').classList.add('hidden'); $('txlist').classList.add('hidden'); $('status').classList.add('hidden');
+  } else if (hasResults) {
+    $('out').classList.remove('hidden');
+  }
+  $('navSim').classList.toggle('on', on);
+  $('navAnalyze').classList.toggle('on', !on);
 }
 
 let loadedIx = [];   // instructions from the loaded program's IDL
@@ -2000,6 +2061,12 @@ $('ttApply').addEventListener('click', applyCustomTT);
 $('ttAmount').addEventListener('keydown', e => { if (e.key === 'Enter') applyCustomTT(); });
 
 $('openSim').addEventListener('click', () => showSim(true));
+$('navSim').addEventListener('click', () => showSim(true));
+$('navAnalyze').addEventListener('click', () => showSim(false));
+$('brand').addEventListener('click', () => {
+  showSim(false);
+  if (!analysis) { $('hero').classList.remove('hidden'); $('out').classList.add('hidden'); $('txlist').classList.add('hidden'); }
+});
 $('closeSim').addEventListener('click', () => showSim(false));
 $('runSim').addEventListener('click', runPreflight);
 $('loadIx').addEventListener('click', loadInstructions);
