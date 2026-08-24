@@ -691,6 +691,17 @@ details.advanced .adv-body { padding-top: var(--s-2); }
 .ixtag.s { color: var(--amber); border-color: rgba(251,191,36,.35); background: var(--amber-soft); }
 .ixtag.w { color: var(--cyan); border-color: rgba(34,211,238,.3); background: rgba(34,211,238,.1); }
 input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
+.buildhint { margin-top: var(--s-4); color: var(--text-3); font-size: 12.5px; line-height: 1.6; }
+.tryrow { margin-top: var(--s-3); display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+.trychip {
+  appearance: none; cursor: pointer;
+  background: var(--brand-soft); border: 1px solid var(--brand-border); color: var(--brand-strong);
+  padding: 6px var(--s-3); border-radius: var(--r-full);
+  font-family: var(--font-sans); font-size: 12.5px; font-weight: 550;
+  transition: filter var(--t-fast);
+}
+.trychip:hover { filter: brightness(1.15); }
+.trychip .dim { color: var(--text-3); font-weight: 400; }
 
 /* ---------- global clock control (header) ---------- */
 .clockctl { position: relative; flex: 0 0 auto; }
@@ -874,23 +885,33 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
           account it would change.</p>
 
         <div class="tabs">
-          <button class="tab on" data-tab="paste">Paste a transaction</button>
-          <button class="tab" data-tab="build">Build from IDL</button>
+          <button class="tab on" data-tab="build">Build a transaction</button>
+          <button class="tab" data-tab="paste">Paste base64 (advanced)</button>
         </div>
 
         <!-- paste mode -->
-        <div id="tabPaste" class="tabpane">
+        <div id="tabPaste" class="tabpane hidden">
           <label class="flabel">Serialized transaction (base64)</label>
           <textarea id="txB64" class="ta" spellcheck="false"
             placeholder="paste the base64 of an unsigned VersionedTransaction — e.g. Buffer.from(tx.serialize()).toString('base64')"></textarea>
         </div>
 
         <!-- build mode -->
-        <div id="tabBuild" class="tabpane hidden">
-          <label class="flabel">Program ID (must publish an on-chain Anchor IDL)</label>
+        <div id="tabBuild" class="tabpane">
+          <label class="flabel">Program ID — we'll read its instructions from the on-chain IDL</label>
           <div class="row-inline">
             <input id="buildProg" class="finput mono" spellcheck="false" placeholder="program address…" />
             <button class="btn ghost sm" id="loadIx">Load instructions</button>
+          </div>
+          <div id="ixHint" class="buildhint">
+            Pick any Anchor program and we'll list its instructions — fill in the accounts
+            (PDAs derive themselves) and simulate, no serialized transaction needed.
+            <div class="tryrow">Try:
+              <button class="trychip" data-prog="HqJiDmNcC1MBD5FTCQTddFX2zJTGW4XcCt8tZWTP7K9V" data-cluster="devnet"
+                      data-payer="A1iQJhg25EPc8VwXXngJ58GwVJAsCzsMnt2ybSu93yvD" data-ix="claim">
+                vesting · claim <span class="dim">(devnet — fails now, works in +30 days)</span>
+              </button>
+            </div>
           </div>
           <div id="ixPicker" class="hidden">
             <label class="flabel" style="margin-top:14px">Instruction</label>
@@ -1882,6 +1903,7 @@ async function loadInstructions() {
     if (!loadedIx.length) throw new Error('this program publishes no instructions');
     $('ixSelect').innerHTML = loadedIx.map((ix, i) => `<option value="${i}">${esc(ix.name)}</option>`).join('');
     $('ixPicker').classList.remove('hidden');
+    $('ixHint').classList.add('hidden');
     renderIxForm();
   } catch (e) {
     $('simOut').innerHTML = `<div class="status err" style="text-align:left">${esc(e.message)}</div>`;
@@ -2255,6 +2277,17 @@ $('brand').addEventListener('click', () => {
 $('closeSim').addEventListener('click', () => showSim(false));
 $('runSim').addEventListener('click', runPreflight);
 $('loadIx').addEventListener('click', loadInstructions);
+document.querySelectorAll('.trychip').forEach(chip => chip.addEventListener('click', async () => {
+  $('cluster').value = chip.dataset.cluster || 'devnet';
+  $('buildProg').value = chip.dataset.prog;
+  await loadInstructions();
+  const want = chip.dataset.ix;
+  const i = loadedIx.findIndex(x => x.name === want);
+  if (i >= 0) { $('ixSelect').value = i; renderIxForm(); }
+  if (chip.dataset.payer) {
+    const p = $('ixPayer'); p.value = chip.dataset.payer; p.dispatchEvent(new Event('input'));
+  }
+}));
 $('ixSelect').addEventListener('change', renderIxForm);
 document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
   document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x === t));
