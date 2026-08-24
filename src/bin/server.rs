@@ -100,6 +100,23 @@ async fn suite_handler(
     }
 }
 
+/// GET /replay/:signature — run the local replay on demand (analyze skips it).
+async fn replay_handler(
+    Path(signature): Path<String>,
+) -> Result<Json<ReplayResult>, (StatusCode, String)> {
+    let result = tokio::task::spawn_blocking(move || {
+        let client = RpcClient::new(RPC_URL.to_string());
+        svmscope::run_replay(&client, &signature)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+
+    match result {
+        Ok(replay) => Ok(Json(replay)),
+        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+    }
+}
+
 /// GET /freeze/:signature — capture a self-contained fixture for offline replay.
 async fn freeze_handler(
     Path(signature): Path<String>,
@@ -124,6 +141,7 @@ async fn main() {
         .route("/analyze/{signature}", get(analyze_handler))
         .route("/simulate", post(simulate_handler))
         .route("/simulate_suite", post(suite_handler))
+        .route("/replay/{signature}", get(replay_handler))
         .route("/freeze/{signature}", get(freeze_handler));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")

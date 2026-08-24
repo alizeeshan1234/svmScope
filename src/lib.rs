@@ -26,7 +26,9 @@ pub struct Analysis {
     pub balance_change: Vec<diffs::BalanceChange>,
     pub token_change: Vec<diffs::TokenChange>,
     pub compute: Vec<compute::CuUsage>,
-    pub replay: replay::ReplayResult,
+    /// Local replay is opt-in (it's the slow, drift-prone part) — `analyze` leaves
+    /// this `None` and the client runs it on demand via `run_replay` / `/replay`.
+    pub replay: Option<replay::ReplayResult>,
     /// The transaction's accounts, with decoded fields where the layout is known.
     /// Drives the what-if editor: pick an account, edit named fields.
     pub accounts: Vec<decode::AccountInfo>,
@@ -84,9 +86,25 @@ pub fn analyze(client: &RpcClient, signature: &str) -> Result<Analysis, String> 
         balance_change: diffs::account_diffs(&tx),
         token_change: diffs::token_diffs(&tx),
         compute: compute::cu_per_program(&tx),
-        replay: replay::replay_transaction(client, signature, &account_keys),
+        replay: None, // run on demand — see run_replay
         accounts: decode::describe_accounts(client, &account_keys),
     })
+}
+
+/// Replay a transaction against current on-chain state — the opt-in step that
+/// `analyze` no longer runs automatically.
+pub fn run_replay(client: &RpcClient, signature: &str) -> Result<replay::ReplayResult, String> {
+    let tx: serde_json::Value = client
+        .send(
+            RpcRequest::GetTransaction,
+            json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
+        )
+        .map_err(|e| format!("RPC error: {e}"))?;
+    if tx.is_null() {
+        return Err(format!("transaction not found: {signature}"));
+    }
+    let account_keys = utils::resolve_account_keys(&tx);
+    Ok(replay::replay_transaction(client, signature, &account_keys))
 }
 
 /// Replay a transaction after applying what-if mutations, returning just the result.

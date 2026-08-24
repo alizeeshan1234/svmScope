@@ -498,13 +498,13 @@ function primaryProgram(top, compute) {
   const pool = app.length ? app : top;
   return pool.slice().sort((a, b) => (cu[b] || 0) - (cu[a] || 0))[0] || null;
 }
-function renderOverview(o, replay, compute) {
+function renderOverview(o, compute) {
   const ok = o.success;
   const prim = primaryProgram(o.top_programs, compute);
   const title = prim ? progInfo(prim).name : 'Transaction';
   const stats = [
     ['Fee', fmtSol(o.fee)],
-    ['Compute', (o.compute_units != null ? fmt(o.compute_units) : fmt(replay.compute_units)) + ' CU'],
+    ['Compute', (o.compute_units != null ? fmt(o.compute_units) : '—') + ' CU'],
     ['Instructions', o.top_programs.length],
   ];
   if (o.slot != null) stats.push(['Slot', fmt(o.slot)]);
@@ -516,7 +516,7 @@ function renderOverview(o, replay, compute) {
           <div class="ov-ring ${ok ? 'ok' : 'fail'}">${ok ? '✓' : '✕'}</div>
           <div>
             <div class="ov-title">${esc(title)}</div>
-            <div class="ov-sub">${ok ? 'Succeeded on-chain' : 'Failed on-chain'} · replayed ${replay.success ? 'successfully' : 'with failure'} locally</div>
+            <div class="ov-sub">${ok ? 'Succeeded on-chain' : 'Failed on-chain'}</div>
           </div>
         </div>
         <div class="ov-spacer"></div>
@@ -586,6 +586,28 @@ function fmtLog(l) {
   else if (/^Program log:|^Program return:/.test(l)) cls = 'lg';
   return `<div class="${cls}">${esc(l)}</div>`;
 }
+// Local replay is opt-in. Show a button until the user runs it (or it's been
+// run once as a scenario baseline).
+function renderReplayPanel() {
+  if (analysis.replay) { $('replay').innerHTML = renderReplay(analysis.replay); return; }
+  $('replay').innerHTML =
+    `<button class="btn ghost sm" id="runReplay">▶ Run local replay</button>
+     <span class="cu-note" style="margin-left:10px">Re-execute this transaction locally against current state
+       (it succeeded on-chain; local replay can differ if state has since moved).</span>`;
+  $('runReplay').addEventListener('click', async () => {
+    const b = $('runReplay'); b.disabled = true; b.textContent = '▶ Replaying…';
+    try { await ensureBaseline(); renderReplayPanel(); }
+    catch (e) { $('replay').innerHTML = `<div class="err-box">${esc(e.message)}</div>`; }
+  });
+}
+// Fetch the baseline replay once and cache it on `analysis.replay`.
+async function ensureBaseline() {
+  if (analysis.replay) return analysis.replay;
+  const res = await fetch('/replay/' + encodeURIComponent(currentSig));
+  if (!res.ok) throw new Error(await res.text());
+  analysis.replay = await res.json();
+  return analysis.replay;
+}
 function renderReplay(r) {
   const badge = r.success ? `<span class="badge ok"><span class="b-dot"></span>replay success</span>`
                           : `<span class="badge fail"><span class="b-dot"></span>replay failed</span>`;
@@ -606,7 +628,7 @@ const makeRow = (name, muts, expect, changeText, contains = '') =>
 // a developer of this kind of program would want to have covered.
 function buildSuite() {
   suiteRows = [];
-  suiteRows.push(makeRow('Baseline — transaction unchanged', [], analysis.replay.success ? 'success' : 'any', 'no changes'));
+  suiteRows.push(makeRow('Baseline — transaction unchanged', [], analysis.overview.success ? 'success' : 'any', 'no changes'));
 
   const toks = mutableAccounts
     .filter(a => a.decoded && a.decoded.type_name === 'SPL Token Account')
@@ -964,12 +986,12 @@ async function analyze() {
     const res = await fetch(`/analyze/${encodeURIComponent(sig)}`);
     if (!res.ok) throw new Error(await res.text());
     analysis = await res.json();
-    renderOverview(analysis.overview, analysis.replay, analysis.compute);
+    renderOverview(analysis.overview, analysis.compute);
     renderTree(analysis.cpi_tree);
     renderCompute(analysis.compute);
     renderDiffs(analysis.balance_change);
     renderTokens(analysis.token_change);
-    $('replay').innerHTML = renderReplay(analysis.replay);
+    renderReplayPanel();
     renderStaged(); flashSim('');
     renderAccountList();
     buildSuite(); renderSuite();
@@ -988,10 +1010,12 @@ async function simulate() {
   const btn = $('simBtn'); btn.disabled = true;
   $('simResult').innerHTML = '<div class="status" style="text-align:left;margin:12px 0"><span class="spinner"></span>replaying with mutations…</div>';
   try {
+    // Need the un-mutated baseline for the before/after comparison; fetch it lazily.
+    const before = await ensureBaseline();
     const res = await fetch('/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m) }) });
     if (!res.ok) throw new Error(await res.text());
-    showResult(analysis.replay, await res.json(), { n: toSend.length });
+    showResult(before, await res.json(), { n: toSend.length });
   } catch (e) { flashSim('error: ' + e.message, true); }
   finally { btn.disabled = false; }
 }
