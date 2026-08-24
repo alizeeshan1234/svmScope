@@ -93,6 +93,8 @@ export interface Overview {
 
 /** The full decode of a transaction (`analyze`). `replay` is opt-in, so null here. */
 export interface Analysis {
+  /** Resolved signature (useful when the input was an address). */
+  signature: string;
   overview: Overview;
   cpi_tree: CpiEntry[];
   balance_change: BalanceChange[];

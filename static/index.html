@@ -309,7 +309,7 @@
           <option value="testnet">Testnet</option>
           <option value="localnet">Localnet</option>
         </select>
-        <input id="sig" placeholder="paste a Solana transaction signature…" spellcheck="false" autocomplete="off" />
+        <input id="sig" placeholder="paste a transaction signature — or a program / account address…" spellcheck="false" autocomplete="off" />
         <button class="btn" id="go">Analyze</button>
       </div>
     </div>
@@ -1000,6 +1000,12 @@ async function analyze() {
     const res = await fetch(`/analyze/${encodeURIComponent(sig)}` + clusterQ());
     if (!res.ok) throw new Error(await res.text());
     analysis = await res.json();
+    // The input may have been an address we resolved to its latest transaction —
+    // adopt the resolved signature so replay/simulate/freeze use the real tx.
+    if (analysis.signature && analysis.signature !== sig) {
+      currentSig = analysis.signature;
+      $('sig').value = analysis.signature;
+    }
     renderOverview(analysis.overview, analysis.compute);
     renderTree(analysis.cpi_tree);
     renderCompute(analysis.compute);

@@ -16,8 +16,10 @@ pub mod idl;
 
 use serde::Serialize;
 use serde_json::json;
+use solana_address::Address;
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_request::RpcRequest;
+use std::str::FromStr;
 
 /// Resolve a cluster name or explicit RPC URL to an endpoint, so one instance
 /// serves every cluster. Precedence: explicit `rpc` URL > `cluster` name > `default`.
@@ -51,6 +53,9 @@ pub fn resolve_rpc(cluster: Option<&str>, rpc: Option<&str>, default: &str) -> S
 /// The full analysis of a transaction — the payload the CLI prints and the API serves.
 #[derive(Serialize)]
 pub struct Analysis {
+    /// The resolved transaction signature (echoed back — useful when the input
+    /// was an address that we resolved to its latest transaction).
+    pub signature: String,
     pub overview: Overview,
     pub cpi_tree: Vec<cpi_tree::CpiEntry>,
     pub balance_change: Vec<diffs::BalanceChange>,
@@ -94,8 +99,31 @@ fn build_overview(tx: &serde_json::Value, cpi_tree: &[cpi_tree::CpiEntry]) -> Ov
     }
 }
 
+/// Accept a transaction signature OR an account/program address. A 32-byte value
+/// parses as an address, so we resolve it to its most recent transaction; a
+/// 64-byte signature is used as-is. Lets a user paste a program ID and see its
+/// latest transaction.
+fn resolve_signature(client: &RpcClient, input: &str) -> Result<String, String> {
+    let input = input.trim();
+    if Address::from_str(input).is_ok() {
+        let resp: serde_json::Value = client
+            .send(RpcRequest::GetSignaturesForAddress, json!([input, { "limit": 1 }]))
+            .map_err(|e| format!("RPC error: {e}"))?;
+        return resp
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|s| s["signature"].as_str())
+            .map(String::from)
+            .ok_or_else(|| format!("no transactions found for address {input}"));
+    }
+    Ok(input.to_string())
+}
+
 /// Fetch a transaction, decode it, and replay it — bundled into one `Analysis`.
-pub fn analyze(client: &RpcClient, signature: &str) -> Result<Analysis, String> {
+/// `input` may be a signature or an account/program address (resolved to its
+/// latest transaction).
+pub fn analyze(client: &RpcClient, input: &str) -> Result<Analysis, String> {
+    let signature = resolve_signature(client, input)?;
     let tx: serde_json::Value = client
         .send(
             RpcRequest::GetTransaction,
@@ -111,6 +139,7 @@ pub fn analyze(client: &RpcClient, signature: &str) -> Result<Analysis, String> 
 
     let cpi_tree = cpi_tree::build_cpi_tree(&tx);
     Ok(Analysis {
+        signature,
         overview: build_overview(&tx, &cpi_tree),
         cpi_tree,
         balance_change: diffs::account_diffs(&tx),
