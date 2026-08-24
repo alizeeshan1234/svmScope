@@ -2,13 +2,18 @@
 //!
 //! Run with `cargo run --bin server`, then open http://127.0.0.1:3000.
 
+mod guard;
+
 use axum::{
-    extract::{Path, Query},
-    http::StatusCode,
-    response::Html,
+    body::Body,
+    extract::{ConnectInfo, Path, Query, Request},
+    http::{header, StatusCode},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use std::net::SocketAddr;
 use serde::Deserialize;
 use serde_json::json;
 use solana_client::rpc_client::RpcClient;
@@ -287,6 +292,96 @@ async fn api_index() -> Json<serde_json::Value> {
     }))
 }
 
+/// The client's address, preferring the proxy-forwarded IP since we run behind
+/// Render's load balancer (otherwise every request looks like the same peer).
+fn client_id(req: &Request, peer: Option<SocketAddr>) -> String {
+    req.headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| peer.map(|p| p.ip().to_string()))
+        .unwrap_or_else(|| "unknown".into())
+}
+
+/// Reject clients that exceed the per-minute allowance. Simulation is expensive,
+/// so one script shouldn't be able to monopolise the instance.
+async fn rate_limit(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    // Only meter the work-doing API; serving the page itself is cheap.
+    let path = req.uri().path();
+    let metered = path.starts_with("/analyze")
+        || path.starts_with("/replay")
+        || path.starts_with("/simulate")
+        || path.starts_with("/preflight")
+        || path.starts_with("/freeze")
+        || path.starts_with("/account")
+        || path.starts_with("/signatures");
+
+    if metered {
+        if let Err(retry) = guard::rate_check(&client_id(&req, Some(peer))) {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, retry.to_string())],
+                format!("rate limit reached — try again in {retry}s"),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
+
+/// Serve repeat GETs of the same URL from a short-lived cache. Demo traffic means
+/// many people opening the *same* link, so this is where most of the savings are.
+async fn cache_layer(req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let cacheable = req.method() == axum::http::Method::GET
+        && (path.starts_with("/analyze")
+            || path.starts_with("/account")
+            || path.starts_with("/signatures")
+            || path.starts_with("/replay"));
+
+    if !cacheable {
+        return next.run(req).await;
+    }
+
+    let key = req.uri().to_string();
+    if let Some(body) = guard::cache_get(&key) {
+        return (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::HeaderName::from_static("x-cache"), "HIT"),
+            ],
+            body,
+        )
+            .into_response();
+    }
+
+    let res = next.run(req).await;
+    if res.status() != StatusCode::OK {
+        return res;
+    }
+
+    // Buffer the body so it can be cached and still returned.
+    let (mut parts, body) = res.into_parts();
+    let bytes = match axum::body::to_bytes(body, 32 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "response read error").into_response(),
+    };
+    if let Ok(text) = String::from_utf8(bytes.to_vec()) {
+        guard::cache_put(key, text);
+    }
+    parts.headers.insert(
+        header::HeaderName::from_static("x-cache"),
+        header::HeaderValue::from_static("MISS"),
+    );
+    Response::from_parts(parts, Body::from(bytes))
+}
+
 #[tokio::main]
 async fn main() {
     // Permissive CORS so any web app can call the API cross-origin — this is what
@@ -304,6 +399,10 @@ async fn main() {
         .route("/signatures/{address}", get(signatures_handler))
         .route("/replay/{signature}", get(replay_handler))
         .route("/freeze/{signature}", get(freeze_handler))
+        // Order matters: rate limit first (cheapest rejection), then serve from
+        // cache, then CORS headers on whatever comes back.
+        .layer(middleware::from_fn(cache_layer))
+        .layer(middleware::from_fn(rate_limit))
         .layer(cors);
 
     // Host/port from the environment so it runs unchanged locally and on any
@@ -325,5 +424,8 @@ async fn main() {
         }
     };
     println!("svmscope → http://{addr}   (API index: /api)");
-    axum::serve(listener, app).await.unwrap();
+    // into_make_service_with_connect_info gives the rate limiter the peer address.
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .await
+        .unwrap();
 }
