@@ -188,6 +188,17 @@ writes the matching `suite.json`.
 
 See [VISION.md](./VISION.md) for the full architecture.
 
+## Live
+
+| | |
+| --- | --- |
+| **App** | https://svmscope.vercel.app |
+| **Engine (API)** | https://svmscope.onrender.com |
+
+The UI is static and hosted on Vercel; the engine runs as a container (it executes
+real Solana programs in an embedded SVM, so it needs a long-lived process). They
+talk over HTTP — point the UI at any engine with `?api=<url>`.
+
 ## API & SDK
 
 `cargo run --bin server` exposes the engine over HTTP (CORS-enabled; `GET /api`
