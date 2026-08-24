@@ -1,0 +1,41 @@
+{
+  "name": "svmscope",
+  "version": "0.1.0",
+  "description": "TypeScript client for svmscope — Solana transaction simulation: decode, replay, mutate, assert, and pre-flight simulate any transaction against real on-chain programs.",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src", "README.md"],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "solana",
+    "transaction",
+    "simulation",
+    "preflight",
+    "litesvm",
+    "svm",
+    "testing",
+    "what-if",
+    "debugging",
+    "anchor"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alizeeshan1234/svmScope.git",
+    "directory": "sdk"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}
