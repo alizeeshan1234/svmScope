@@ -785,13 +785,17 @@ const TOKEN_2022 = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 // A human name for an account, derived from its decoded type or owning program.
 function accountName(a) {
   if (a.decoded) {
-    if (a.decoded.type_name === 'SPL Mint') {
+    const tn = a.decoded.type_name;
+    if (tn === 'SPL Mint') {
       const m = mintInfo(a.address);
       return m.known ? `${m.sym} Mint` : 'SPL Mint';
     }
-    const mintf = a.decoded.fields.find(f => f.name === 'mint');
-    const m = mintf ? mintInfo(mintf.value) : { known: false };
-    return m.known ? `${m.sym} Token Account` : 'Token Account';
+    if (tn === 'SPL Token Account') {
+      const mintf = a.decoded.fields.find(f => f.name === 'mint');
+      const m = mintf ? mintInfo(mintf.value) : { known: false };
+      return m.known ? `${m.sym} Token Account` : 'Token Account';
+    }
+    return tn; // IDL-decoded account, e.g. "Pool", "LbPair", "FeeConfig"
   }
   if (a.owner === SYSTEM_PROGRAM) return 'Wallet';
   if (PROGRAMS[a.owner]) return `${PROGRAMS[a.owner][0]} account`;
@@ -801,8 +805,15 @@ function accountName(a) {
 function accountTypeTag(a) {
   const name = accountName(a);
   if (a.decoded) {
-    const cls = a.decoded.type_name === 'SPL Mint' ? 'mint' : '';
-    return `<span class="type-tag ${cls}">${esc(name)}</span>`;
+    const tn = a.decoded.type_name;
+    if (tn === 'SPL Mint') return `<span class="type-tag mint">${esc(name)}</span>`;
+    if (tn === 'SPL Token Account') return `<span class="type-tag">${esc(name)}</span>`;
+    // IDL-decoded: tint with the owning program's brand color when we know it.
+    if (PROGRAMS[a.owner]) {
+      const c = PROGRAMS[a.owner][1];
+      return `<span class="type-tag" style="color:${c};border-color:${c}55;background:${c}1e">${esc(name)}</span>`;
+    }
+    return `<span class="type-tag">${esc(name)}</span>`;
   }
   if (a.owner === SYSTEM_PROGRAM) return `<span class="type-tag sys">${esc(name)}</span>`;
   if (PROGRAMS[a.owner]) {

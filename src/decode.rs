@@ -192,6 +192,11 @@ pub fn describe_accounts(client: &RpcClient, account_keys: &[String]) -> Vec<Acc
         None => return vec![],
     };
 
+    // Cache each program's IDL so we fetch it at most once per analysis (an IDL
+    // fetch is an RPC call). `None` = we already checked and it has no on-chain IDL.
+    let mut idl_cache: std::collections::HashMap<String, Option<serde_json::Value>> =
+        std::collections::HashMap::new();
+
     let mut out = Vec::new();
     for (i, acc) in values.iter().enumerate() {
         if acc.is_null() {
@@ -205,7 +210,21 @@ pub fn describe_accounts(client: &RpcClient, account_keys: &[String]) -> Vec<Acc
             .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
             .unwrap_or_default();
 
-        let decoded = if executable { None } else { decode(&owner, &data) };
+        // Try the built-in SPL layouts first; fall back to the program's Anchor
+        // IDL (fetched + cached) so arbitrary program accounts decode too.
+        let decoded = if executable {
+            None
+        } else {
+            decode(&owner, &data).or_else(|| {
+                let idl = idl_cache.entry(owner.clone()).or_insert_with(|| {
+                    std::str::FromStr::from_str(&owner)
+                        .ok()
+                        .and_then(|a| crate::idl::fetch_idl_json(client, a))
+                });
+                idl.as_ref()
+                    .and_then(|idl| crate::idl::decode_with_idl(idl, &data))
+            })
+        };
 
         out.push(AccountInfo {
             address: account_keys[i].clone(),

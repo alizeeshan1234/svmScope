@@ -8,6 +8,7 @@ use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_request::RpcRequest;
 use std::env;
 use std::error::Error;
+use std::str::FromStr;
 
 use svmscope::{analyze, api, compute, cpi_tree, diffs, replay, simulate_suite, state, utils};
 
@@ -25,6 +26,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     if signature == "test" {
         let path = args.get(2).ok_or("usage: svmscope test <scenarios.json>")?;
         return run_tests(&client, path);
+    }
+
+    // IDL probe: `svmscope idl <program_id>` prints a program's on-chain Anchor IDL.
+    if signature == "idl" {
+        let prog = args.get(2).ok_or("usage: svmscope idl <program_id>")?;
+        let id = solana_address::Address::from_str(prog).map_err(|_| "bad program id")?;
+        match svmscope::idl::fetch_idl_json(&client, id) {
+            Some(j) => println!("{}", serde_json::to_string_pretty(&j)?),
+            None => println!("no on-chain IDL for {prog}"),
+        }
+        return Ok(());
     }
 
     // Freeze mode: `svmscope freeze <sig> [-o fixture.json]` captures a

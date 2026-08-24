@@ -11,6 +11,7 @@ pub mod diffs;
 pub mod replay;
 pub mod state;
 pub mod utils;
+pub mod idl;
 
 use serde::Serialize;
 use serde_json::json;
