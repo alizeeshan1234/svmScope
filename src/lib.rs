@@ -61,6 +61,9 @@ pub struct Analysis {
     pub balance_change: Vec<diffs::BalanceChange>,
     pub token_change: Vec<diffs::TokenChange>,
     pub compute: Vec<compute::CuUsage>,
+    /// The program logs the transaction actually produced on-chain. Available
+    /// immediately from the transaction metadata — no replay needed.
+    pub logs: Vec<String>,
     /// Local replay is opt-in (it's the slow, drift-prone part) — `analyze` leaves
     /// this `None` and the client runs it on demand via `run_replay` / `/replay`.
     pub replay: Option<replay::ReplayResult>,
@@ -294,6 +297,10 @@ pub fn analyze(client: &RpcClient, input: &str) -> Result<Analysis, String> {
         balance_change: diffs::account_diffs(&tx),
         token_change: diffs::token_diffs(&tx),
         compute: compute::cu_per_program(&tx),
+        logs: tx["meta"]["logMessages"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
         replay: None, // run on demand — see run_replay
         accounts: decode::describe_accounts(client, &account_keys),
     })

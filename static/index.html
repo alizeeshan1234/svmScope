@@ -918,6 +918,12 @@ details.advanced .adv-body { padding-top: var(--s-2); }
         <div class="card"><h2>Token balance changes <span id="tokCount" class="count"></span></h2><div id="tokens" class="rows"></div></div>
       </div>
 
+      <!-- The logs the transaction actually produced on-chain, shown immediately. -->
+      <div class="card full" style="margin-top:16px" id="onchainLogsCard">
+        <h2>Program logs <span id="logCount" class="count"></span></h2>
+        <div id="onchainLogs"></div>
+      </div>
+
       <div class="card full" style="margin-top:16px"><h2>Local replay</h2><div id="replay"></div></div>
 
       <div class="card full" style="margin-top:16px">
@@ -1230,6 +1236,16 @@ function renderLogs(logs) {
 }
 // Local replay is opt-in. Show a button until the user runs it (or it's been
 // run once as a scenario baseline).
+// The transaction's real on-chain logs — available straight from metadata, so
+// they show without waiting for a local replay (this is what an explorer shows).
+function renderOnchainLogs(logs) {
+  const card = $('onchainLogsCard');
+  if (!logs || !logs.length) { card.classList.add('hidden'); return; }
+  card.classList.remove('hidden');
+  $('logCount').textContent = logs.length + ' lines';
+  $('onchainLogs').innerHTML = `<div class="logs">${renderLogs(logs)}</div>`;
+}
+
 function renderReplayPanel() {
   const warped = !!Object.keys(timeTravel).length;
 
@@ -1754,6 +1770,7 @@ async function analyze() {
     renderCompute(analysis.compute);
     renderDiffs(analysis.balance_change);
     renderTokens(analysis.token_change);
+    renderOnchainLogs(analysis.logs);
     renderReplayPanel();
     renderStaged(); flashSim('');
     renderAccountList();
