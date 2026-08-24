@@ -64,11 +64,26 @@ pub struct IdlAccountSpec {
     pub name: String,
     pub writable: bool,
     pub signer: bool,
-    /// True when the IDL says this account is a PDA (we can hint at derivation).
+    /// True when the IDL says this account is a PDA.
     pub pda: bool,
+    /// The PDA's seeds, so the client can derive the address instead of making
+    /// the user paste it: `const` carries literal bytes, `account` names another
+    /// account in this instruction whose key is the seed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub seeds: Vec<PdaSeed>,
     /// A fixed address, when the IDL pins one (e.g. system_program).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
+}
+
+/// One seed of a PDA derivation.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum PdaSeed {
+    /// Literal bytes.
+    Const { bytes: Vec<u8> },
+    /// The public key of another account in the same instruction.
+    Account { path: String },
 }
 
 #[derive(serde::Serialize)]
@@ -109,6 +124,28 @@ pub fn instructions(idl: &Value) -> Vec<IdlInstruction> {
                                 writable: acc.get("writable").and_then(|w| w.as_bool()).unwrap_or(false),
                                 signer: acc.get("signer").and_then(|s| s.as_bool()).unwrap_or(false),
                                 pda: acc.get("pda").is_some(),
+                                seeds: acc
+                                    .get("pda")
+                                    .and_then(|p| p.get("seeds"))
+                                    .and_then(|s| s.as_array())
+                                    .map(|seeds| {
+                                        seeds
+                                            .iter()
+                                            .filter_map(|sd| match sd.get("kind")?.as_str()? {
+                                                "const" => Some(PdaSeed::Const {
+                                                    bytes: sd.get("value")?.as_array()?
+                                                        .iter()
+                                                        .filter_map(|b| b.as_u64().map(|v| v as u8))
+                                                        .collect(),
+                                                }),
+                                                "account" => Some(PdaSeed::Account {
+                                                    path: sd.get("path")?.as_str()?.to_string(),
+                                                }),
+                                                _ => None,
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default(),
                                 address: acc.get("address").and_then(|a| a.as_str()).map(String::from),
                             })
                             .collect()

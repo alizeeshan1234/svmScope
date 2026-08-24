@@ -690,6 +690,7 @@ details.advanced .adv-body { padding-top: var(--s-2); }
   background: var(--bg-2); color: var(--text-3); border: 1px solid var(--border); }
 .ixtag.s { color: var(--amber); border-color: rgba(251,191,36,.35); background: var(--amber-soft); }
 .ixtag.w { color: var(--cyan); border-color: rgba(34,211,238,.3); background: rgba(34,211,238,.1); }
+input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 
 /* ---------- global clock control (header) ---------- */
 .clockctl { position: relative; flex: 0 0 auto; }
@@ -1889,6 +1890,87 @@ async function loadInstructions() {
 }
 
 // Render inputs for the selected instruction's accounts and args.
+
+// ---- PDA derivation (so users never paste a derived address) ----
+// A program address must be *off* the ed25519 curve; findProgramAddress walks the
+// bump downward until it finds one, exactly like the on-chain implementation.
+const PDA_MARKER = new TextEncoder().encode('ProgramDerivedAddress');
+
+async function sha256(bytes) {
+  const d = await crypto.subtle.digest('SHA-256', new Uint8Array(bytes));
+  return new Uint8Array(d);
+}
+
+/** Is this 32-byte value a valid ed25519 point? (decompression check) */
+function isOnCurve(p) {
+  const P = (1n << 255n) - 19n;
+  const D = -121665n * modInv(121666n, P) % P;
+  const bytes = [...p];
+  const sign = bytes[31] >> 7;
+  bytes[31] &= 0x7f;
+  let y = 0n;
+  for (let i = 31; i >= 0; i--) y = (y << 8n) | BigInt(bytes[i]);
+  if (y >= P) return false;
+  const y2 = y * y % P;
+  const u = (y2 - 1n + P) % P;
+  const v = (D * y2 % P + 1n) % P;
+  // x = sqrt(u/v) exists iff (u/v)^((P-1)/2) == 1
+  const uv = u * modInv(v, P) % P;
+  let x = modPow(uv, (P + 3n) / 8n, P);
+  if (x * x % P !== uv) x = x * modPow(2n, (P - 1n) / 4n, P) % P;
+  if (x * x % P !== uv) return false;
+  if (x === 0n && sign === 1) return false;
+  return true;
+}
+function modPow(b, e, m) { let r = 1n; b %= m; while (e > 0n) { if (e & 1n) r = r * b % m; b = b * b % m; e >>= 1n; } return r; }
+function modInv(a, m) { return modPow(((a % m) + m) % m, m - 2n, m); }
+
+/** Derive a PDA from seeds + program id; returns base58 or null. */
+async function findProgramAddress(seedByteArrays, programId) {
+  const pid = bs58decode(programId);
+  for (let bump = 255; bump >= 0; bump--) {
+    const buf = [];
+    for (const s of seedByteArrays) buf.push(...s);
+    buf.push(bump, ...pid, ...PDA_MARKER);
+    const h = await sha256(buf);
+    if (!isOnCurve(h)) return bs58encode([...h]);
+  }
+  return null;
+}
+
+/** Fill any PDA account inputs whose seed accounts are all known. */
+async function autoDerivePdas() {
+  const ix = loadedIx[Number($('ixSelect').value)];
+  const program = $('buildProg').value.trim();
+  if (!ix || !program) return;
+  const inputs = [...$('ixForm').querySelectorAll('.ixacct')];
+  const valueOf = (name) => {
+    const i = ix.accounts.findIndex(a => a.name === name);
+    return i >= 0 ? inputs[i]?.value.trim() : '';
+  };
+
+  for (let i = 0; i < ix.accounts.length; i++) {
+    const spec = ix.accounts[i];
+    if (!spec.seeds?.length) continue;
+    const el = inputs[i];
+    if (el.dataset.userEdited === '1') continue;   // never clobber a manual entry
+
+    const seeds = [];
+    let ok = true;
+    for (const sd of spec.seeds) {
+      if (sd.kind === 'const') { seeds.push(sd.bytes); continue; }
+      const v = valueOf(sd.path);
+      if (!v) { ok = false; break; }
+      try { seeds.push(bs58decode(v)); } catch { ok = false; break; }
+    }
+    if (!ok) continue;
+    try {
+      const pda = await findProgramAddress(seeds, program);
+      if (pda) { el.value = pda; el.classList.add('derived'); el.title = 'derived from seeds'; }
+    } catch { /* leave it for manual entry */ }
+  }
+}
+
 function renderIxForm() {
   const ix = loadedIx[Number($('ixSelect').value)];
   if (!ix) return;
@@ -1899,8 +1981,9 @@ function renderIxForm() {
         ${a.signer ? '<span class="ixtag s">signer</span>' : ''}
         ${a.writable ? '<span class="ixtag w">writable</span>' : ''}
         ${a.pda ? '<span class="ixtag">pda</span>' : ''}</span></div>
-      <input class="finput mono ixacct" data-i="${i}" spellcheck="false"
-             value="${esc(a.address || '')}" placeholder="account address…" />
+      <input class="finput mono ixacct${a.seeds?.length ? ' pdaField' : ''}" data-i="${i}" spellcheck="false"
+             value="${esc(a.address || '')}"
+             placeholder="${a.seeds?.length ? 'derived automatically from seeds…' : 'account address…'}" />
     </div>`).join('');
   const args = ix.args.length ? ix.args.map((a, i) => `
     <div class="ixrow">
@@ -1914,6 +1997,25 @@ function renderIxForm() {
     <div class="ixsec">Fee payer &amp; signer</div>
     <div class="ixrow"><div><span class="nm">payer</span></div>
       <input class="finput mono" id="ixPayer" spellcheck="false" placeholder="wallet address that pays the fee…" /></div>`;
+
+  // Derive PDAs as their seed accounts get filled in, so the user never has to
+  // paste an address the IDL already knows how to compute.
+  $('ixForm').querySelectorAll('.ixacct').forEach(el => {
+    el.addEventListener('input', () => {
+      if (!el.classList.contains('pdaField')) autoDerivePdas();
+      else { el.dataset.userEdited = el.value.trim() ? '1' : '0'; el.classList.remove('derived'); }
+    });
+  });
+  // A payer is usually also a seed account (signer), so derive from it too.
+  $('ixPayer').addEventListener('input', () => {
+    $('ixForm').querySelectorAll('.ixacct').forEach(el => {
+      const i = Number(el.dataset.i);
+      const spec = loadedIx[Number($('ixSelect').value)]?.accounts[i];
+      if (spec?.signer && !el.value.trim()) el.value = $('ixPayer').value.trim();
+    });
+    autoDerivePdas();
+  });
+  autoDerivePdas();
 }
 
 // Encode an instruction argument to Borsh bytes.
