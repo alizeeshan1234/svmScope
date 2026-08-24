@@ -271,7 +271,7 @@ fn read_u32_at(data: &[u8], offset: usize) -> Option<u32> {
 }
 
 /// Look up a struct type's fields in `idl["types"]` by name.
-/// Returns `None` for enums / unknown types — the walk stops there.
+/// Returns `None` for enums / unknown types — those are handled separately.
 fn struct_fields<'a>(types: &'a [Value], name: &str) -> Option<&'a Vec<Value>> {
     let t = types
         .iter()
@@ -279,6 +279,19 @@ fn struct_fields<'a>(types: &'a [Value], name: &str) -> Option<&'a Vec<Value>> {
     let ty = t.get("type")?;
     if ty.get("kind").and_then(|k| k.as_str()) == Some("struct") {
         ty.get("fields")?.as_array()
+    } else {
+        None
+    }
+}
+
+/// The variants of an enum type in `idl["types"]`, if `name` is an enum.
+fn enum_variants<'a>(types: &'a [Value], name: &str) -> Option<&'a Vec<Value>> {
+    let t = types
+        .iter()
+        .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(name))?;
+    let ty = t.get("type")?;
+    if ty.get("kind").and_then(|k| k.as_str()) == Some("enum") {
+        ty.get("variants")?.as_array()
     } else {
         None
     }
@@ -312,15 +325,52 @@ fn walk_fields(
         // Is this field a nested struct? If so, read its fields inline, right
         // here at the current cursor, by calling ourselves with a dotted prefix.
         if let Some(name) = defined_name(ty) {
-            match struct_fields(types, name) {
-                Some(sub) => {
-                    if !walk_fields(sub, types, data, offset, &format!("{fname}."), out) {
-                        return false; // the nested struct hit something variable
-                    }
-                    continue;
+            if let Some(sub) = struct_fields(types, name) {
+                if !walk_fields(sub, types, data, offset, &format!("{fname}."), out) {
+                    return false; // the nested struct hit something variable
                 }
-                None => return false, // enum / unknown → stop
+                continue;
             }
+            // An enum is a 1-byte variant tag, then that variant's payload (if any),
+            // so we can read the tag, name the variant, and walk its fields.
+            if let Some(variants) = enum_variants(types, name) {
+                let Some(&tag) = data.get(*offset) else { return false };
+                let variant = variants.get(tag as usize);
+                let vname = variant
+                    .and_then(|v| v.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("unknown");
+                out.push(Field {
+                    name: fname.clone(),
+                    offset: *offset,
+                    ty: format!("enum {name}"),
+                    size: 1,
+                    value: vname.to_string(),
+                    editable: false,
+                    note: Some(format!("variant {tag}")),
+                });
+                *offset += 1;
+                // Tuple/struct variants carry fields; walk them so the cursor stays true.
+                if let Some(vfields) = variant.and_then(|v| v.get("fields")).and_then(|f| f.as_array()) {
+                    // Tuple variants are bare types; give them positional names.
+                    let named: Vec<Value> = vfields
+                        .iter()
+                        .enumerate()
+                        .map(|(i, f)| {
+                            if f.get("name").is_some() {
+                                f.clone()
+                            } else {
+                                json!({ "name": i.to_string(), "type": f.clone() })
+                            }
+                        })
+                        .collect();
+                    if !walk_fields(&named, types, data, offset, &format!("{fname}."), out) {
+                        return false;
+                    }
+                }
+                continue;
+            }
+            return false; // unknown defined type → stop
         }
 
         // A fixed array of structs (e.g. `reward_infos: [WhirlpoolRewardInfo; 3]`)
