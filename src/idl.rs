@@ -317,6 +317,22 @@ fn walk_fields(
             }
         }
 
+        // A fixed array of structs (e.g. `reward_infos: [WhirlpoolRewardInfo; 3]`)
+        // expands into indexed sub-fields, read inline like a nested struct.
+        if let Some(arr) = ty.get("array").and_then(|a| a.as_array()) {
+            if let (Some(inner), Some(count)) = (arr.first(), arr.get(1).and_then(|c| c.as_u64())) {
+                if let Some(name) = defined_name(inner) {
+                    let Some(sub) = struct_fields(types, name) else { return false };
+                    for i in 0..count {
+                        if !walk_fields(sub, types, data, offset, &format!("{fname}[{i}]."), out) {
+                            return false;
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+
         // Otherwise it's a plain scalar or fixed array. Read it and advance.
         let kind = match resolve_fixed(ty) {
             Some(k) => k,
