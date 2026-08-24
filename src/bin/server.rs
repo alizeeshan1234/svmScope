@@ -26,6 +26,21 @@ fn rpc_url() -> String {
         .unwrap_or_else(|_| DEFAULT_RPC.to_string())
 }
 
+/// A per-cluster RPC override, so a deployment can use its own (faster, higher
+/// rate-limit) endpoint for each cluster:
+///   SVMSCOPE_RPC_URL_MAINNET / _DEVNET / _TESTNET
+/// Falls back to the generic default for mainnet, and the public endpoints
+/// otherwise (handled by resolve_rpc).
+fn cluster_env_rpc(cluster: Option<&str>) -> Option<String> {
+    let key = match cluster.map(|c| c.trim().to_ascii_lowercase()).as_deref() {
+        Some("devnet") | Some("d") => "SVMSCOPE_RPC_URL_DEVNET",
+        Some("testnet") | Some("t") => "SVMSCOPE_RPC_URL_TESTNET",
+        Some("mainnet") | Some("mainnet-beta") | Some("m") => "SVMSCOPE_RPC_URL_MAINNET",
+        _ => return None,
+    };
+    std::env::var(key).ok().filter(|v| v.starts_with("http"))
+}
+
 /// Per-request cluster selection: `?cluster=devnet` (or mainnet/testnet/localnet)
 /// or `?rpc=<url>`, so one instance serves every cluster.
 #[derive(Deserialize)]
@@ -34,8 +49,17 @@ struct ClusterQuery {
     rpc: Option<String>,
 }
 
-/// Resolve a per-request RPC from a cluster/rpc pair, falling back to the env default.
+/// Resolve a per-request RPC. Precedence: explicit ?rpc= > per-cluster env var >
+/// cluster's public endpoint > the generic env default.
 fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> String {
+    if let Some(u) = rpc {
+        if u.starts_with("http") {
+            return u.to_string();
+        }
+    }
+    if let Some(u) = cluster_env_rpc(cluster) {
+        return u;
+    }
     svmscope::resolve_rpc(cluster, rpc, &rpc_url())
 }
 
