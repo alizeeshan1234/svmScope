@@ -7,6 +7,7 @@ pub mod compute;
 pub mod cpi_tree;
 pub mod decode;
 pub mod fixture;
+pub mod report;
 pub mod diffs;
 pub mod replay;
 pub mod state;

@@ -28,6 +28,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         return run_tests(&client, path);
     }
 
+    // Report mode: run a suite and render a shareable HTML report.
+    if signature == "report" {
+        let path = args.get(2).ok_or("usage: svmscope report <scenarios.json> [-o report.html]")?;
+        let out = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1));
+        return run_report(&client, path, out);
+    }
+
     // IDL probe: `svmscope idl <program_id>` prints a program's on-chain Anchor IDL.
     if signature == "idl" {
         let prog = args.get(2).ok_or("usage: svmscope idl <program_id>")?;
@@ -132,11 +139,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Run a scenario suite from a JSON file and print a test-runner report.
-/// Exits the process with code 1 if any scenario fails its assertion.
-///
-/// Prefers a frozen `fixture` (deterministic, offline) over a live `signature`.
-fn run_tests(client: &RpcClient, path: &str) -> Result<(), Box<dyn Error>> {
+/// Load a suite file and run it, preferring a frozen `fixture` (deterministic,
+/// offline) over a live `signature`. Returns a human label + the outcomes.
+fn load_and_run_suite(
+    client: &RpcClient,
+    path: &str,
+) -> Result<(String, Vec<replay::ScenarioOutcome>), Box<dyn Error>> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let req: api::SuiteRequest = serde_json::from_str(&text).map_err(|e| format!("bad scenario file: {e}"))?;
 
@@ -145,10 +153,9 @@ fn run_tests(client: &RpcClient, path: &str) -> Result<(), Box<dyn Error>> {
         .into_iter()
         .map(|s| s.into_spec())
         .collect::<Result<Vec<_>, _>>()?;
-    let n = scenarios.len();
 
-    // Fixture path is resolved relative to the suite file's directory.
-    let outcomes = if let Some(fx_ref) = &req.fixture {
+    if let Some(fx_ref) = &req.fixture {
+        // Fixture path is resolved relative to the suite file's directory.
         let fx_path = std::path::Path::new(path)
             .parent()
             .map(|d| d.join(fx_ref))
@@ -156,18 +163,36 @@ fn run_tests(client: &RpcClient, path: &str) -> Result<(), Box<dyn Error>> {
         let fx_text = std::fs::read_to_string(&fx_path)
             .map_err(|e| format!("cannot read fixture {}: {e}", fx_path.display()))?;
         let fx = svmscope::fixture::Fixture::from_json(&fx_text)?;
-        println!(
-            "svmscope test — fixture {} ({}, {n} scenarios) [deterministic, offline]\n",
-            fx.signature,
-            fx.summary()
-        );
-        svmscope::run_fixture_suite(&fx, scenarios)?
+        let label = format!("fixture {} ({}) [deterministic, offline]", fx.signature, fx.summary());
+        Ok((label, svmscope::run_fixture_suite(&fx, scenarios)?))
     } else if let Some(sig) = &req.signature {
-        println!("svmscope test — {sig} ({n} scenarios) [live RPC — may drift]\n");
-        simulate_suite(client, sig, scenarios)?
+        let label = format!("{sig} [live RPC — may drift]");
+        Ok((label, simulate_suite(client, sig, scenarios)?))
     } else {
-        return Err("suite must specify either \"fixture\" or \"signature\"".into());
-    };
+        Err("suite must specify either \"fixture\" or \"signature\"".into())
+    }
+}
+
+/// Run a scenario suite and render a shareable, self-contained HTML report.
+fn run_report(client: &RpcClient, path: &str, out: Option<&String>) -> Result<(), Box<dyn Error>> {
+    let (label, outcomes) = load_and_run_suite(client, path)?;
+    let html = svmscope::report::render_html(&label, &outcomes);
+    match out {
+        Some(p) => {
+            std::fs::write(p, &html).map_err(|e| format!("write {p}: {e}"))?;
+            let passed = outcomes.iter().filter(|o| o.pass).count();
+            eprintln!("wrote {p} — {passed}/{} scenarios ({} bytes)", outcomes.len(), html.len());
+        }
+        None => println!("{html}"),
+    }
+    Ok(())
+}
+
+/// Run a scenario suite from a JSON file and print a test-runner report.
+/// Exits the process with code 1 if any scenario fails its assertion.
+fn run_tests(client: &RpcClient, path: &str) -> Result<(), Box<dyn Error>> {
+    let (label, outcomes) = load_and_run_suite(client, path)?;
+    println!("svmscope test — {label}\n");
 
     let mut passed = 0;
     for o in &outcomes {
