@@ -10,6 +10,7 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
+use serde_json::json;
 use solana_client::rpc_client::RpcClient;
 use svmscope::api::{MutationInput, SuiteRequest};
 use svmscope::replay::{Mutation, ReplayResult, ScenarioOutcome};
@@ -134,19 +135,52 @@ async fn freeze_handler(
     }
 }
 
+/// GET /api — machine-readable index of the public API, so anything that wants to
+/// call svmscope (a dApp, wallet, bot, CI job) can discover the surface in one hit.
+async fn api_index() -> Json<serde_json::Value> {
+    Json(json!({
+        "name": "svmscope",
+        "description": "Solana transaction simulation layer — decode, replay, mutate, assert.",
+        "version": env!("CARGO_PKG_VERSION"),
+        "endpoints": {
+            "GET  /analyze/{signature}":  "Decode a transaction: CPI tree, balance & token changes, compute, and IDL-decoded accounts.",
+            "GET  /replay/{signature}":   "Re-execute the transaction locally against reconstructed pre-state.",
+            "POST /simulate":             "{ signature, mutations[] } — replay with what-if account mutations.",
+            "POST /simulate_suite":       "{ signature, scenarios[] } — run a suite of scenarios with outcome + state assertions.",
+            "GET  /freeze/{signature}":   "Capture a self-contained fixture for deterministic, offline replay."
+        }
+    }))
+}
+
 #[tokio::main]
 async fn main() {
+    // Permissive CORS so any web app can call the API cross-origin — this is what
+    // turns the engine from a local binary into infrastructure others build on.
+    let cors = tower_http::cors::CorsLayer::permissive();
+
     let app = Router::new()
         .route("/", get(index))
+        .route("/api", get(api_index))
         .route("/analyze/{signature}", get(analyze_handler))
         .route("/simulate", post(simulate_handler))
         .route("/simulate_suite", post(suite_handler))
         .route("/replay/{signature}", get(replay_handler))
-        .route("/freeze/{signature}", get(freeze_handler));
+        .route("/freeze/{signature}", get(freeze_handler))
+        .layer(cors);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
-        .await
-        .unwrap();
-    println!("svmscope server → http://127.0.0.1:3000");
+    let addr = "127.0.0.1:3000";
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            eprintln!("svmscope: port 3000 is already in use — is a server already running?");
+            eprintln!("  (stop it with:  lsof -ti:3000 | xargs kill )");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("svmscope: could not bind {addr}: {e}");
+            std::process::exit(1);
+        }
+    };
+    println!("svmscope → http://{addr}   (API index: http://{addr}/api)");
     axum::serve(listener, app).await.unwrap();
 }

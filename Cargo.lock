@@ -6172,6 +6172,7 @@ dependencies = [
  "solana-clock",
  "solana-transaction",
  "tokio",
+ "tower-http",
 ]
 
 [[package]]

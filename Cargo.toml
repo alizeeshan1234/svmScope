@@ -6,6 +6,7 @@ description = "Transaction autopsy for Solana — paste a transaction, see exact
 
 [dependencies]
 axum = "0.8.9"
+tower-http = { version = "0.6", features = ["cors"] }
 base64 = "0.23.1"
 bincode = "=1.3.3"
 clap = { version = "4", features = ["derive"] }
