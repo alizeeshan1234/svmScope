@@ -117,12 +117,23 @@
 
   main { max-width: 1120px; margin: 0 auto; padding: 22px 22px 90px; }
 
-  .hero { text-align: center; padding: 64px 0 14px; animation: fadeUp .6s cubic-bezier(.2,.8,.2,1) both; }
-  .hero h1 { margin: 0 0 14px; font-size: 40px; font-weight: 800; letter-spacing: -1px; line-height: 1.1; }
+  .hero { text-align: center; min-height: calc(100vh - 128px); display: flex; flex-direction: column;
+    align-items: center; justify-content: center; padding: 20px 0 40px;
+    animation: fadeUp .6s cubic-bezier(.2,.8,.2,1) both; }
+  .hero .eyebrow { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 22px;
+    padding: 6px 14px; border-radius: 999px; font-size: 12px; font-weight: 550; color: var(--dim);
+    background: rgba(255,255,255,.03); border: 1px solid var(--line-2); backdrop-filter: blur(10px); }
+  .hero .eyebrow .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--accent-2);
+    box-shadow: 0 0 0 0 rgba(20,241,149,.6); animation: dot 2.4s ease-out infinite; }
+  @keyframes dot { 0% { box-shadow: 0 0 0 0 rgba(20,241,149,.55); } 70%,100% { box-shadow: 0 0 0 8px rgba(20,241,149,0); } }
+  .hero h1 { margin: 0 0 18px; font-size: 46px; font-weight: 800; letter-spacing: -1.4px; line-height: 1.08; max-width: 780px; }
   .hero h1 .grad { background: linear-gradient(100deg, var(--accent), var(--cyan) 45%, var(--accent-2));
     background-size: 200% auto; -webkit-background-clip: text; background-clip: text; color: transparent;
     animation: shimmer 6s linear infinite; }
-  .hero p { margin: 0 auto; max-width: 580px; color: var(--dim); font-size: 15.5px; line-height: 1.6; }
+  .hero p { margin: 0 auto; max-width: 560px; color: var(--dim); font-size: 16px; line-height: 1.65; }
+  .hero .hint { margin-top: 26px; color: var(--muted); font-size: 12.5px; font-family: var(--mono); }
+  .hero .hint kbd { background: rgba(255,255,255,.05); border: 1px solid var(--line-2); border-radius: 6px;
+    padding: 2px 7px; font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
 
   .status { color: var(--dim); font-size: 13.5px; margin: 22px auto; text-align: center; }
   .status.err { color: var(--red); }
@@ -441,9 +452,11 @@
 
   <main>
     <div id="hero" class="hero">
+      <div class="eyebrow"><span class="pulse"></span> The Solana transaction simulation layer</div>
       <h1>Decode, replay &amp; <span class="grad">mutate</span> any transaction</h1>
       <p>Reconstruct the exact state a Solana transaction ran against, re-execute the real
          programs locally, then rewrite an account's fields to ask <em>“what if?”</em></p>
+      <div class="hint">Paste a <kbd>signature</kbd> or a <kbd>program&nbsp;/&nbsp;account address</kbd> above to begin</div>
     </div>
 
     <div id="status" class="status hidden"></div>
