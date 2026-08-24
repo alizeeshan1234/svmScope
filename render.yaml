@@ -1,0 +1,17 @@
+# Render.com blueprint — deploy svmscope from GitHub with no local Docker or CLI.
+#   1. Push (done).
+#   2. render.com → New → Blueprint → connect this repo.
+#   3. Set SVMSCOPE_RPC_URL in the dashboard (your own RPC; the public one is rate-limited).
+# Builds the Dockerfile remotely on Render's builders.
+services:
+  - type: web
+    name: svmscope
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api
+    envVars:
+      - key: PORT
+        value: "3000"
+      - key: SVMSCOPE_RPC_URL
+        sync: false # set your RPC endpoint in the Render dashboard

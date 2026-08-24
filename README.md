@@ -215,6 +215,13 @@ const result = await svm.preflight(unsignedTx.serialize()); // preview before si
 The server reads `HOST`, `PORT`, and `SVMSCOPE_RPC_URL` from the environment, so it
 runs unchanged locally or on any platform.
 
+**No CLI / no local Docker — deploy from GitHub in a browser:**
+[render.com](https://render.com) → **New → Blueprint** → connect this repo (it reads
+[`render.yaml`](./render.yaml)) → set `SVMSCOPE_RPC_URL` in the dashboard → deploy.
+Builds the Dockerfile on Render's builders.
+
+**Or with a CLI:**
+
 ```bash
 # Docker
 docker build -t svmscope .
