@@ -150,6 +150,16 @@ export interface ScenarioOutcome {
   asserts: AssertOutcome[];
 }
 
+/** One entry in an address's recent transaction history. */
+export interface SigInfo {
+  signature: string;
+  slot?: number;
+  /** Whether the transaction failed on-chain. */
+  err: boolean;
+  /** Unix timestamp, when reported. */
+  block_time?: number;
+}
+
 /** A self-contained, deterministic snapshot for offline replay. */
 export interface Fixture {
   signature: string;
@@ -255,6 +265,11 @@ export class Svmscope {
   /** cluster/rpc fields to merge into POST bodies. */
   private clusterBody(over?: Cluster): { cluster?: Cluster; rpc?: string } {
     return { cluster: over ?? this.cluster, rpc: this.rpc };
+  }
+
+  /** Recent transactions for an account/program (newest first) — explorer-style. */
+  signatures(address: string, cluster?: Cluster): Promise<SigInfo[]> {
+    return this.get(`/signatures/${encodeURIComponent(address)}` + this.clusterQuery(cluster));
   }
 
   /** Decode a landed transaction — CPI tree, balances, compute, IDL-decoded accounts. */

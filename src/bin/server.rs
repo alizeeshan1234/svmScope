@@ -169,6 +169,25 @@ async fn preflight_handler(
     }
 }
 
+/// GET /signatures/:address — recent transactions for an account/program (explorer-style).
+async fn signatures_handler(
+    Path(address): Path<String>,
+    Query(q): Query<ClusterQuery>,
+) -> Result<Json<Vec<svmscope::SigInfo>>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let result = tokio::task::spawn_blocking(move || {
+        let client = RpcClient::new(url);
+        svmscope::recent_signatures(&client, &address, 25)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+
+    match result {
+        Ok(sigs) => Ok(Json(sigs)),
+        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+    }
+}
+
 /// GET /replay/:signature — run the local replay on demand (analyze skips it).
 async fn replay_handler(
     Path(signature): Path<String>,
@@ -238,6 +257,7 @@ async fn main() {
         .route("/simulate", post(simulate_handler))
         .route("/simulate_suite", post(suite_handler))
         .route("/preflight", post(preflight_handler))
+        .route("/signatures/{address}", get(signatures_handler))
         .route("/replay/{signature}", get(replay_handler))
         .route("/freeze/{signature}", get(freeze_handler))
         .layer(cors);

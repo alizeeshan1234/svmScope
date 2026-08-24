@@ -119,6 +119,39 @@ fn resolve_signature(client: &RpcClient, input: &str) -> Result<String, String> 
     Ok(input.to_string())
 }
 
+/// One entry in an address's recent transaction history.
+#[derive(Serialize)]
+pub struct SigInfo {
+    pub signature: String,
+    pub slot: Option<u64>,
+    /// Whether the transaction failed on-chain.
+    pub err: bool,
+    /// Unix timestamp, when the RPC reports it.
+    pub block_time: Option<i64>,
+}
+
+/// Recent transactions that touched an account or program — what an explorer
+/// shows on an address page. Newest first.
+pub fn recent_signatures(client: &RpcClient, address: &str, limit: u64) -> Result<Vec<SigInfo>, String> {
+    let address = address.trim();
+    if Address::from_str(address).is_err() {
+        return Err(format!("not a valid address: {address}"));
+    }
+    let resp: serde_json::Value = client
+        .send(RpcRequest::GetSignaturesForAddress, json!([address, { "limit": limit }]))
+        .map_err(|e| format!("RPC error: {e}"))?;
+    let arr = resp.as_array().ok_or("unexpected RPC response")?;
+    Ok(arr
+        .iter()
+        .map(|s| SigInfo {
+            signature: s["signature"].as_str().unwrap_or_default().to_string(),
+            slot: s["slot"].as_u64(),
+            err: !s["err"].is_null(),
+            block_time: s["blockTime"].as_i64(),
+        })
+        .collect())
+}
+
 /// Fetch a transaction, decode it, and replay it — bundled into one `Analysis`.
 /// `input` may be a signature or an account/program address (resolved to its
 /// latest transaction).

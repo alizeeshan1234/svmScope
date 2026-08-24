@@ -74,6 +74,24 @@
 
   .status { color: var(--dim); font-size: 13.5px; margin: 22px auto; text-align: center; }
   .status.err { color: var(--red); }
+
+  /* address → recent transactions list */
+  .txlist { max-width: 820px; margin: 8px auto 0; }
+  .txlist h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted);
+    font-weight: 650; margin: 8px 2px 12px; }
+  .txlist h2 b { color: var(--text); }
+  .txrow { display: flex; align-items: center; gap: 12px; padding: 11px 14px; margin: 6px 0;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 11px; cursor: pointer;
+    transition: border-color .12s, background .12s; }
+  .txrow:hover { border-color: var(--accent); background: rgba(153,69,255,.05); }
+  .txrow .st { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+  .txrow .st.ok { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .txrow .st.err { background: var(--red); box-shadow: 0 0 8px var(--red); }
+  .txrow .sig { font-family: var(--mono); font-size: 12.5px; color: var(--text); flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .txrow .slot { font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+  .txrow .when { font-size: 11.5px; color: var(--dim); white-space: nowrap; }
+  .txrow .go { color: var(--accent-2); font-size: 12px; font-weight: 650; white-space: nowrap; }
   .spinner { display: inline-block; width: 13px; height: 13px; margin-right: 8px; vertical-align: -2px;
     border: 2px solid var(--line-2); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -323,6 +341,7 @@
     </div>
 
     <div id="status" class="status hidden"></div>
+    <div id="txlist" class="txlist hidden"></div>
 
     <div id="out" class="hidden">
       <div id="overview"></div>
@@ -990,10 +1009,63 @@ function wireCopy(root) {
     });
   });
 }
+// Decide what the pasted value is: a 32-byte value is an account/program address
+// (show its recent transactions), a 64-byte value is a signature (analyze it).
+function runInput() {
+  const input = $('sig').value.trim();
+  if (!input) return;
+  let len = null;
+  try { len = bs58decode(input).length; } catch { /* not base58 */ }
+  if (len === 32) return showSignatureList(input);
+  return analyze();
+}
+
+// Show an explorer-style list of an address's recent transactions to pick from.
+async function showSignatureList(address) {
+  $('go').disabled = true;
+  $('out').classList.add('hidden'); $('hero').classList.add('hidden'); $('txlist').classList.add('hidden');
+  const st = $('status'); st.className = 'status'; st.classList.remove('hidden');
+  st.innerHTML = '<span class="spinner"></span>loading recent transactions…';
+  try {
+    const res = await fetch(`/signatures/${encodeURIComponent(address)}` + clusterQ());
+    if (!res.ok) throw new Error(await res.text());
+    const sigs = await res.json();
+    st.classList.add('hidden');
+    if (!sigs.length) { st.className = 'status'; st.classList.remove('hidden'); st.textContent = 'no transactions found for ' + short(address); return; }
+    renderSignatureList(address, sigs);
+  } catch (e) {
+    st.className = 'status err'; st.classList.remove('hidden'); st.textContent = 'error: ' + e.message;
+  } finally { $('go').disabled = false; }
+}
+function timeAgo(t) {
+  if (!t) return '';
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - t));
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+function renderSignatureList(address, sigs) {
+  const box = $('txlist'); box.classList.remove('hidden');
+  box.innerHTML = `<h2>Recent transactions for <b>${esc(short(address))}</b> · ${sigs.length} shown</h2>` +
+    sigs.map(s =>
+      `<div class="txrow" data-sig="${esc(s.signature)}">
+         <span class="st ${s.err ? 'err' : 'ok'}"></span>
+         <span class="sig">${esc(s.signature)}</span>
+         ${s.slot != null ? `<span class="slot">slot ${fmt(s.slot)}</span>` : ''}
+         <span class="when">${esc(timeAgo(s.block_time))}</span>
+         <span class="go">analyze →</span>
+       </div>`).join('');
+  box.querySelectorAll('.txrow').forEach(row => row.addEventListener('click', () => {
+    $('sig').value = row.dataset.sig;
+    analyze();
+  }));
+}
+
 async function analyze() {
   const sig = $('sig').value.trim(); if (!sig) return;
   currentSig = sig; mutations = [];
-  $('go').disabled = true; $('out').classList.add('hidden'); $('hero').classList.add('hidden');
+  $('go').disabled = true; $('txlist').classList.add('hidden'); $('out').classList.add('hidden'); $('hero').classList.add('hidden');
   const st = $('status'); st.className = 'status'; st.classList.remove('hidden');
   st.innerHTML = '<span class="spinner"></span>fetching state · loading programs · replaying…';
   try {
@@ -1073,8 +1145,8 @@ function showResult(before, after, opts) {
   $('simResult').scrollIntoView({ block: 'nearest' });
 }
 
-$('go').addEventListener('click', analyze);
-$('sig').addEventListener('keydown', e => { if (e.key === 'Enter') analyze(); });
+$('go').addEventListener('click', runInput);
+$('sig').addEventListener('keydown', e => { if (e.key === 'Enter') runInput(); });
 $('acctFilter').addEventListener('input', e => filterAccounts(e.target.value));
 $('expandAll').addEventListener('click', toggleExpandAll);
 $('stageBtn').addEventListener('click', stageAll);
