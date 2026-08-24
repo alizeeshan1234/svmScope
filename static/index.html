@@ -678,6 +678,38 @@ details.advanced .adv-body { padding-top: var(--s-2); }
 .ixtag.s { color: var(--amber); border-color: rgba(251,191,36,.35); background: var(--amber-soft); }
 .ixtag.w { color: var(--cyan); border-color: rgba(34,211,238,.3); background: rgba(34,211,238,.1); }
 
+/* ---------- time travel ---------- */
+.timetravel {
+  margin-top: var(--s-5);
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--s-4) var(--s-5);
+}
+.tt-head { display: flex; align-items: baseline; gap: var(--s-3); flex-wrap: wrap; margin-bottom: var(--s-3); }
+.tt-title { font-size: 13px; font-weight: 650; }
+.tt-sub { color: var(--text-3); font-size: 12.5px; line-height: 1.5; }
+.tt-row { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+.chip {
+  appearance: none; cursor: pointer;
+  background: var(--bg-2); border: 1px solid var(--border); color: var(--text-2);
+  padding: 6px var(--s-3); border-radius: var(--r-full);
+  font-family: var(--font-sans); font-size: 12.5px; font-weight: 550;
+  transition: border-color var(--t-fast), color var(--t-fast), background var(--t-fast);
+}
+.chip:hover { color: var(--text-1); border-color: var(--border-strong); }
+.chip.on { background: var(--brand-soft); border-color: var(--brand-border); color: var(--brand-strong); }
+.tt-custom { display: inline-flex; align-items: center; gap: var(--s-2); margin-left: var(--s-2); }
+.tt-custom .finput { width: auto; }
+.tt-custom #ttAmount { width: 84px; font-family: var(--font-mono); }
+.tt-custom #ttUnit { width: auto; padding-right: var(--s-4); }
+.tt-state {
+  margin-top: var(--s-3); padding-top: var(--s-3);
+  border-top: 1px solid var(--border);
+  color: var(--text-2); font-family: var(--font-mono); font-size: 12px;
+}
+.tt-state.warped { color: var(--brand-strong); }
+
 /* ---------- explanation + account diff ---------- */
 .explain {
   display: flex; gap: var(--s-4); align-items: flex-start;
@@ -775,6 +807,36 @@ details.advanced .adv-body { padding-top: var(--s-2); }
             <select id="ixSelect" class="finput"></select>
             <div id="ixForm"></div>
           </div>
+        </div>
+
+        <!-- Time travel: warp the clock so time-gated logic can be tested now -->
+        <div class="timetravel">
+          <div class="tt-head">
+            <span class="tt-title">⏱ Time travel</span>
+            <span class="tt-sub">Warp the chain clock to test lockups, vesting cliffs, cooldowns,
+              reward accrual, auctions — anything gated on time.</span>
+          </div>
+          <div class="tt-row">
+            <button class="chip" data-tt='{}'>now</button>
+            <button class="chip" data-tt='{"epochs":1}'>+1 epoch</button>
+            <button class="chip" data-tt='{"seconds":86400}'>+1 day</button>
+            <button class="chip" data-tt='{"seconds":604800}'>+1 week</button>
+            <button class="chip" data-tt='{"seconds":2592000}'>+30 days</button>
+            <button class="chip" data-tt='{"seconds":31536000}'>+1 year</button>
+            <span class="tt-custom">
+              <input id="ttAmount" class="finput" type="number" min="0" placeholder="0" />
+              <select id="ttUnit" class="finput">
+                <option value="seconds">seconds</option>
+                <option value="minutes">minutes</option>
+                <option value="hours">hours</option>
+                <option value="days" selected>days</option>
+                <option value="epochs">epochs</option>
+                <option value="slots">slots</option>
+              </select>
+              <button class="btn ghost sm" id="ttApply">Set</button>
+            </span>
+          </div>
+          <div id="ttState" class="tt-state">Simulating at the current time.</div>
         </div>
 
         <div class="editor-actions">
@@ -1837,6 +1899,48 @@ function buildTxB64() {
   return btoa(bin);
 }
 
+// ---- time travel ----
+let timeTravel = {};   // sent as `time_travel`; {} = simulate at the current time
+
+function describeTT(tt) {
+  if (!tt || !Object.keys(tt).length) return 'Simulating at the current time.';
+  const parts = [];
+  const plural = (n, w) => `${n} ${w}${Math.abs(n) === 1 ? '' : 's'}`;
+  if (tt.epochs) parts.push(plural(tt.epochs, 'epoch'));
+  if (tt.slots) parts.push(plural(tt.slots, 'slot'));
+  if (tt.seconds) {
+    const s = tt.seconds;
+    if (s % 86400 === 0) parts.push(plural(s / 86400, 'day'));
+    else if (s % 3600 === 0) parts.push(plural(s / 3600, 'hour'));
+    else if (s % 60 === 0) parts.push(plural(s / 60, 'minute'));
+    else parts.push(plural(s, 'second'));
+  }
+  if (tt.at_unix_timestamp) parts.push(`to ${new Date(tt.at_unix_timestamp * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`);
+  if (tt.at_epoch != null) parts.push(`to epoch ${tt.at_epoch}`);
+  if (tt.at_slot != null) parts.push(`to slot ${fmt(tt.at_slot)}`);
+  const how = parts.join(' + ');
+  return `Simulating ${how.startsWith('to ') ? how : '+' + how + ' into the future'}.`;
+}
+
+function setTimeTravel(tt, chipEl) {
+  timeTravel = tt || {};
+  document.querySelectorAll('.chip[data-tt]').forEach(c => c.classList.toggle('on', c === chipEl));
+  const el = $('ttState');
+  el.textContent = describeTT(timeTravel);
+  el.classList.toggle('warped', !!Object.keys(timeTravel).length);
+}
+
+function applyCustomTT() {
+  const n = Number($('ttAmount').value);
+  if (!n) { setTimeTravel({}, null); return; }
+  const unit = $('ttUnit').value;
+  const mult = { seconds: 1, minutes: 60, hours: 3600, days: 86400 };
+  const tt = unit === 'epochs' ? { epochs: n }
+           : unit === 'slots' ? { slots: n }
+           : { seconds: n * mult[unit] };
+  setTimeTravel(tt, null);
+}
+
 async function runPreflight() {
   const btn = $('runSim'); btn.disabled = true;
   $('simOut').innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>simulating against live state…</div>';
@@ -1846,7 +1950,7 @@ async function runPreflight() {
     if (!b64) throw new Error('paste a base64 transaction first');
     const res = await api('/preflight_report', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transaction: b64, mutations: [], cluster: currentCluster() }),
+      body: JSON.stringify({ transaction: b64, mutations: [], time_travel: timeTravel, cluster: currentCluster() }),
     });
     if (!res.ok) throw new Error(await res.text());
     renderReport(await res.json(), $('simOut'));
@@ -1858,10 +1962,11 @@ async function runPreflight() {
 // Shared renderer: verdict + human explanation + account diff + logs.
 function renderReport(rep, el) {
   const r = rep.replay;
+  const when = rep.clock ? ` · <b>${esc(rep.clock)}</b>` : '';
   const head = r.success
     ? `<div class="verdict ok"><div class="ic">✅</div><div><div class="vt">This transaction would succeed</div>
-         <div class="vs">Ran against live state · ${fmt(r.compute_units)} compute units</div></div></div>`
-    : '';
+         <div class="vs">Ran against live state · ${fmt(r.compute_units)} compute units${when}</div></div></div>`
+    : (rep.clock ? `<div class="status" style="text-align:left;margin-bottom:10px">simulated at <b>${esc(rep.clock)}</b></div>` : '');
   const ex = rep.explain
     ? `<div class="explain"><div class="ic">⚠️</div><div>
          <div class="t">${esc(rep.explain.title)}</div>
@@ -1888,6 +1993,11 @@ function renderReport(rep, el) {
   el.innerHTML = head + ex + diffs + logs;
   wireCopy(el);
 }
+
+document.querySelectorAll('.chip[data-tt]').forEach(c =>
+  c.addEventListener('click', () => { $('ttAmount').value = ''; setTimeTravel(JSON.parse(c.dataset.tt), c); }));
+$('ttApply').addEventListener('click', applyCustomTT);
+$('ttAmount').addEventListener('keydown', e => { if (e.key === 'Enter') applyCustomTT(); });
 
 $('openSim').addEventListener('click', () => showSim(true));
 $('closeSim').addEventListener('click', () => showSim(false));
