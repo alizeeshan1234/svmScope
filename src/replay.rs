@@ -14,6 +14,7 @@ use solana_address::Address;
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_request::RpcRequest;
 use solana_transaction::versioned::VersionedTransaction;
+use std::collections::HashMap;
 use std::str::FromStr;
 
 const NATIVE_LOADER: &str = "NativeLoader1111111111111111111111111111111";
@@ -173,14 +174,54 @@ impl ReplayContext {
     }
 }
 
+/// The transaction's *pre-execution* state, recovered for free from its own
+/// metadata (`meta.preTokenBalances`) — no archival RPC.
+///
+/// Live account state drifts after a transaction lands, which is why replaying a
+/// swap against current state usually slips. But `getTransaction` reports the
+/// exact SPL token amount each account held *just before* the transaction ran, so
+/// we restore those — making constant-product pool reserves faithful again.
+///
+/// (Only token accounts that existed pre-transaction appear in `preTokenBalances`,
+/// so restoring them is safe — it never resurrects an account the tx creates.)
+#[derive(Default)]
+pub struct PreState {
+    /// account address -> raw SPL token amount before the transaction.
+    pub token_amounts: HashMap<String, u64>,
+}
+
+impl PreState {
+    pub fn from_meta(tx: &serde_json::Value, account_keys: &[String]) -> PreState {
+        let mut ps = PreState::default();
+        if let Some(pre) = tx["meta"]["preTokenBalances"].as_array() {
+            for e in pre {
+                let idx = e["accountIndex"].as_u64().unwrap_or(u64::MAX) as usize;
+                let amt = e["uiTokenAmount"]["amount"]
+                    .as_str()
+                    .and_then(|s| s.parse::<u64>().ok());
+                if let (Some(addr), Some(amt)) = (account_keys.get(idx), amt) {
+                    ps.token_amounts.insert(addr.clone(), amt);
+                }
+            }
+        }
+        ps
+    }
+
+    fn is_empty(&self) -> bool {
+        self.token_amounts.is_empty()
+    }
+}
+
 /// Fetch everything needed to replay `signature` (transaction + all touched
 /// accounts + program ELFs, including Address Lookup Table accounts) once.
-/// Pass the transaction's `slot` so ALT resolution matches the real world.
+/// `slot` makes ALT resolution match the real world; `pre_state` restores
+/// pre-transaction token balances so swaps replay faithfully instead of slipping.
 pub fn build_context(
     client: &RpcClient,
     signature: &str,
     account_keys: &[String],
     slot: Option<u64>,
+    pre_state: &PreState,
 ) -> ReplayContext {
     let tx = fetch_transaction(client, signature);
     let mut all_keys = account_keys.to_vec();
@@ -189,7 +230,21 @@ pub fn build_context(
             all_keys.push(l.account_key.to_string());
         }
     }
-    let loaded = fetch_loaded(client, &all_keys);
+    let mut loaded = fetch_loaded(client, &all_keys);
+
+    // Rewind token accounts to their pre-transaction balances (SPL amount @ 64).
+    if !pre_state.is_empty() {
+        for (addr, l) in loaded.iter_mut() {
+            if let Loaded::Data(acc) = l {
+                if let Some(&amt) = pre_state.token_amounts.get(&addr.to_string()) {
+                    if acc.data.len() >= 72 {
+                        acc.data[64..72].copy_from_slice(&amt.to_le_bytes());
+                    }
+                }
+            }
+        }
+    }
+
     ReplayContext { tx, loaded, slot }
 }
 
@@ -354,8 +409,9 @@ pub fn replay_transaction(
     signature: &str,
     account_keys: &[String],
     slot: Option<u64>,
+    pre_state: &PreState,
 ) -> ReplayResult {
-    build_context(client, signature, account_keys, slot).run(&[])
+    build_context(client, signature, account_keys, slot, pre_state).run(&[])
 }
 
 /// Replay the transaction after applying the given mutations.
@@ -365,8 +421,9 @@ pub fn mutate_and_replay(
     account_keys: &[String],
     mutations: &[Mutation],
     slot: Option<u64>,
+    pre_state: &PreState,
 ) -> ReplayResult {
-    build_context(client, signature, account_keys, slot).run(mutations)
+    build_context(client, signature, account_keys, slot, pre_state).run(mutations)
 }
 
 // ---------------------------------------------------------------------------
