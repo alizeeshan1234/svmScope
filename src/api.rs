@@ -43,8 +43,13 @@ impl MutationInput {
     }
 }
 
-/// A post-replay state assertion. `kind` is `"lamports"` or `"u64"` (a
-/// little-endian u64 at `offset`, e.g. an SPL token amount at offset 64).
+/// A post-replay state assertion. `kind` is one of:
+/// - `"u64"` — little-endian u64 at `offset`.
+/// - `"lamports"` — the account's lamports.
+/// - `"token_amount"` — SPL token amount (u64 @ 64); shorthand for `u64` at offset 64.
+/// - `"lamports_delta"` — change in lamports (post − pre); `value` may be negative.
+/// - `"token_delta"` — change in SPL token amount (post − pre); `value` may be negative.
+///
 /// `op` is one of `== != < <= > >=` (default `==`).
 #[derive(Deserialize)]
 pub struct AssertInput {
@@ -55,7 +60,8 @@ pub struct AssertInput {
     pub offset: usize,
     #[serde(default = "default_op")]
     pub op: String,
-    pub value: u64,
+    /// Signed so deltas can be negative; non-delta kinds require it to be ≥ 0.
+    pub value: i64,
 }
 
 fn default_kind() -> String {
@@ -76,9 +82,16 @@ impl AssertInput {
             ">=" | "ge" => CmpOp::Ge,
             other => return Err(format!("unknown assert op: {other}")),
         };
+        // Non-delta kinds compare against an unsigned value.
+        let unsigned = || -> Result<u64, String> {
+            u64::try_from(self.value).map_err(|_| format!("{} value must be ≥ 0", self.kind))
+        };
         let check = match self.kind.as_str() {
-            "lamports" => StateCheck::Lamports { op, value: self.value },
-            "u64" => StateCheck::U64At { offset: self.offset, op, value: self.value },
+            "lamports" => StateCheck::Lamports { op, value: unsigned()? },
+            "u64" => StateCheck::U64At { offset: self.offset, op, value: unsigned()? },
+            "token_amount" => StateCheck::U64At { offset: 64, op, value: unsigned()? },
+            "lamports_delta" => StateCheck::LamportsDelta { op, value: self.value as i128 },
+            "token_delta" => StateCheck::TokenDelta { op, value: self.value as i128 },
             other => return Err(format!("unknown assert kind: {other}")),
         };
         Ok(AccountAssert { address: self.address, check })

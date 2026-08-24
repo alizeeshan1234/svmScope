@@ -181,6 +181,15 @@ impl ReplayContext {
     pub fn run(&self, mutations: &[Mutation]) -> ReplayResult {
         self.run_full(mutations).0
     }
+
+    /// The pre-transaction state of an account (for delta assertions).
+    fn pre_account(&self, address: &str) -> Option<&Account> {
+        let addr = Address::from_str(address).ok()?;
+        self.loaded.iter().find_map(|(a, l)| match l {
+            Loaded::Data(acc) if *a == addr => Some(acc),
+            _ => None,
+        })
+    }
 }
 
 /// The transaction's *pre-execution* state, recovered for free from its own
@@ -622,6 +631,9 @@ pub enum CmpOp {
 
 impl CmpOp {
     fn test(self, a: u64, b: u64) -> bool {
+        self.test_i128(a as i128, b as i128)
+    }
+    fn test_i128(self, a: i128, b: i128) -> bool {
         match self {
             CmpOp::Eq => a == b,
             CmpOp::Ne => a != b,
@@ -651,6 +663,11 @@ pub enum StateCheck {
     /// The little-endian u64 at `offset` satisfies `op value`
     /// (e.g. an SPL token amount at offset 64).
     U64At { offset: usize, op: CmpOp, value: u64 },
+    /// The *change* in lamports (post - pre) satisfies `op value` (may be negative)
+    /// — e.g. "the fee vault gained ≥ N": `LamportsDelta { Ge, N }`.
+    LamportsDelta { op: CmpOp, value: i128 },
+    /// The *change* in SPL token amount (u64 @ 64, post - pre) satisfies `op value`.
+    TokenDelta { op: CmpOp, value: i128 },
 }
 
 /// A post-replay assertion targeting one account.
@@ -659,19 +676,28 @@ pub struct AccountAssert {
     pub check: StateCheck,
 }
 
+/// Read a little-endian u64 at `offset`, or 0 if out of range.
+fn read_u64_at(data: &[u8], offset: usize) -> u64 {
+    match data.get(offset..offset + 8) {
+        Some(s) => u64::from_le_bytes(s.try_into().unwrap()),
+        None => 0,
+    }
+}
+
 impl AccountAssert {
     fn describe(&self) -> String {
+        let a = short(&self.address);
         match &self.check {
-            StateCheck::Lamports { op, value } => {
-                format!("{} lamports {} {}", short(&self.address), op.symbol(), value)
-            }
-            StateCheck::U64At { offset, op, value } => {
-                format!("{} u64@{} {} {}", short(&self.address), offset, op.symbol(), value)
-            }
+            StateCheck::Lamports { op, value } => format!("{a} lamports {} {value}", op.symbol()),
+            StateCheck::U64At { offset, op, value } => format!("{a} u64@{offset} {} {value}", op.symbol()),
+            StateCheck::LamportsDelta { op, value } => format!("{a} lamports Δ {} {value}", op.symbol()),
+            StateCheck::TokenDelta { op, value } => format!("{a} token Δ {} {value}", op.symbol()),
         }
     }
 
-    fn eval(&self, svm: &LiteSVM) -> Result<bool, String> {
+    /// Evaluate against the post-replay `svm`; `ctx` supplies pre-transaction values
+    /// for the delta checks.
+    fn eval(&self, svm: &LiteSVM, ctx: &ReplayContext) -> Result<bool, String> {
         let addr = Address::from_str(&self.address).map_err(|_| format!("bad address {}", self.address))?;
         let acc = svm.get_account(&addr);
         match &self.check {
@@ -683,9 +709,17 @@ impl AccountAssert {
                 if offset + 8 > acc.data.len() {
                     return Err(format!("u64@{offset} out of range (len {})", acc.data.len()));
                 }
-                let mut b = [0u8; 8];
-                b.copy_from_slice(&acc.data[*offset..offset + 8]);
-                Ok(op.test(u64::from_le_bytes(b), *value))
+                Ok(op.test(read_u64_at(&acc.data, *offset), *value))
+            }
+            StateCheck::LamportsDelta { op, value } => {
+                let pre = ctx.pre_account(&self.address).map(|a| a.lamports).unwrap_or(0) as i128;
+                let post = acc.map(|a| a.lamports).unwrap_or(0) as i128;
+                Ok(op.test_i128(post - pre, *value))
+            }
+            StateCheck::TokenDelta { op, value } => {
+                let pre = ctx.pre_account(&self.address).map(|a| read_u64_at(&a.data, 64)).unwrap_or(0) as i128;
+                let post = acc.map(|a| read_u64_at(&a.data, 64)).unwrap_or(0) as i128;
+                Ok(op.test_i128(post - pre, *value))
             }
         }
     }
@@ -758,7 +792,7 @@ pub fn run_suite(ctx: &ReplayContext, scenarios: &[ScenarioSpec]) -> Vec<Scenari
                 .map(|a| AssertOutcome {
                     description: a.describe(),
                     // A failed eval (missing account, bad offset) counts as a failed assertion.
-                    pass: a.eval(&svm).unwrap_or(false),
+                    pass: a.eval(&svm, ctx).unwrap_or(false),
                 })
                 .collect();
 

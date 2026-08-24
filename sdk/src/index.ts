@@ -110,8 +110,15 @@ export type Mutation =
 /** A post-replay state assertion. */
 export interface Assert {
   address: string;
-  /** "u64" (little-endian at `offset`) or "lamports". Default "u64". */
-  kind?: "u64" | "lamports";
+  /**
+   * What to check (default "u64"):
+   * - `"u64"` — little-endian u64 at `offset`.
+   * - `"lamports"` — the account's lamports.
+   * - `"token_amount"` — SPL token amount (u64 @ 64).
+   * - `"lamports_delta"` — change in lamports (post − pre); `value` may be negative.
+   * - `"token_delta"` — change in SPL token amount (post − pre); `value` may be negative.
+   */
+  kind?: "u64" | "lamports" | "token_amount" | "lamports_delta" | "token_delta";
   offset?: number;
   /** Comparison operator; default "==". */
   op?: "==" | "!=" | "<" | "<=" | ">" | ">=";
