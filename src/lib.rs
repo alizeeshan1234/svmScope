@@ -484,6 +484,43 @@ fn decode_diffs(client: &RpcClient, raw: Vec<replay::RawAccountDiff>) -> Vec<Acc
         .collect()
 }
 
+/// Decode one account, optionally with a caller-supplied IDL.
+///
+/// The on-chain IDL is the happy path, but plenty of programs never publish one —
+/// including your own during development. Passing the IDL JSON (from
+/// `target/idl/<program>.json`) gives full named-field decoding anyway.
+pub fn decode_account_with(
+    client: &RpcClient,
+    address: &str,
+    user_idl: Option<&serde_json::Value>,
+) -> Result<decode::AccountInfo, String> {
+    let address = address.trim();
+    if Address::from_str(address).is_err() {
+        return Err(format!("not a valid address: {address}"));
+    }
+    let mut info = decode::describe_accounts(client, &[address.to_string()])
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("account not found: {address}"))?;
+
+    // A supplied IDL wins: it's authoritative for this program, and it beats the
+    // inferred layout we may have fallen back to.
+    if let Some(idl) = user_idl {
+        let resp: serde_json::Value = client
+            .send(RpcRequest::GetAccountInfo, json!([address, { "encoding": "base64" }]))
+            .map_err(|e| format!("RPC error: {e}"))?;
+        if let Some(b64) = resp["value"]["data"][0].as_str() {
+            use base64::Engine;
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+                if let Some(d) = idl::decode_with_idl(idl, &bytes) {
+                    info.decoded = Some(d);
+                }
+            }
+        }
+    }
+    Ok(info)
+}
+
 /// The instructions a program exposes, from its on-chain IDL — the input to the
 /// transaction builder.
 pub fn program_instructions(
@@ -491,9 +528,15 @@ pub fn program_instructions(
     program_id: &str,
 ) -> Result<Vec<idl::IdlInstruction>, String> {
     let addr = Address::from_str(program_id.trim()).map_err(|_| format!("bad program id: {program_id}"))?;
-    let idl = idl::fetch_idl_json(client, addr)
-        .ok_or_else(|| format!("no on-chain Anchor IDL published for {program_id}"))?;
+    let idl = idl::fetch_idl_json(client, addr).ok_or_else(|| {
+        format!("{program_id} publishes no on-chain Anchor IDL — paste the IDL JSON to use the builder")
+    })?;
     Ok(idl::instructions(&idl))
+}
+
+/// Instructions from a caller-supplied IDL, for programs with nothing published.
+pub fn instructions_from_idl(idl: &serde_json::Value) -> Vec<idl::IdlInstruction> {
+    idl::instructions(idl)
 }
 
 /// Pre-flight simulate an **unsigned** transaction (base64 wire bytes) against

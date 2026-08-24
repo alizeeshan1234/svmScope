@@ -162,21 +162,149 @@ pub fn decode_bytes(owner: &str, data: &[u8]) -> Option<DecodedAccount> {
     decode(owner, data)
 }
 
+const STAKE_PROGRAM: &str = "Stake11111111111111111111111111111111111111";
+const ALT_PROGRAM: &str = "AddressLookupTab1e1111111111111111111111111";
+const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
+
 fn decode(owner: &str, data: &[u8]) -> Option<DecodedAccount> {
-    if owner != SPL_TOKEN && owner != SPL_TOKEN_2022 {
-        return None;
-    }
-    match data.len() {
-        82 => Some(decode_mint(data)),   // base mint
-        165 => Some(decode_token_account(data)), // base token account
-        // Token-2022 with extensions: disambiguate by the account-type byte.
-        n if n > 165 => match data[165] {
-            1 => Some(decode_mint(data)),          // Mint (base 82 still valid)
-            2 => Some(decode_token_account(data)), // Account (base 165 still valid)
+    match owner {
+        SPL_TOKEN | SPL_TOKEN_2022 => match data.len() {
+            82 => Some(decode_mint(data)),   // base mint
+            165 => Some(decode_token_account(data)), // base token account
+            // Token-2022 with extensions: disambiguate by the account-type byte.
+            n if n > 165 => match data[165] {
+                1 => Some(decode_mint(data)),          // Mint (base 82 still valid)
+                2 => Some(decode_token_account(data)), // Account (base 165 still valid)
+                _ => None,
+            },
             _ => None,
         },
+        // Native programs never publish an IDL, so their layouts are hand-written.
+        ALT_PROGRAM => decode_lookup_table(data),
+        STAKE_PROGRAM => decode_stake(data),
+        SYSTEM_PROGRAM if data.len() == 80 => decode_nonce(data),
         _ => None,
     }
+}
+
+/// Address Lookup Table: a fixed 56-byte header, then a list of 32-byte addresses.
+fn decode_lookup_table(data: &[u8]) -> Option<DecodedAccount> {
+    if data.len() < 56 {
+        return None;
+    }
+    let authority = if data[20] == 1 && data.len() >= 56 {
+        read_pubkey(data, 22)
+    } else {
+        "none".into()
+    };
+    let addresses = (data.len() - 56) / 32;
+    Some(DecodedAccount {
+        type_name: "Address Lookup Table".into(),
+        fields: vec![
+            field("deactivationSlot", 4, "u64", 8, read_u64(data, 4).to_string(), true),
+            field("lastExtendedSlot", 12, "u64", 8, read_u64(data, 12).to_string(), true),
+            field("lastExtendedSlotStartIndex", 20, "u8", 1, data[20].to_string(), false),
+            field("authority", 22, "pubkey", 32, authority, false),
+            field("addressCount", 56, "usize", 0, addresses.to_string(), false),
+        ],
+    })
+}
+
+/// Stake account: 4-byte enum discriminant, then Meta (authorized + lockup) and,
+/// when delegated, the Stake struct.
+fn decode_stake(data: &[u8]) -> Option<DecodedAccount> {
+    if data.len() < 120 {
+        return None;
+    }
+    let state = match read_u32(data, 0) {
+        0 => "Uninitialized",
+        1 => "Initialized",
+        2 => "Stake",
+        3 => "RewardsPool",
+        _ => "unknown",
+    };
+    let mut fields = vec![
+        field("state", 0, "enum", 4, state.into(), false),
+        field("rentExemptReserve", 4, "u64", 8, read_u64(data, 4).to_string(), true),
+        field("authorizedStaker", 12, "pubkey", 32, read_pubkey(data, 12), true),
+        field("authorizedWithdrawer", 44, "pubkey", 32, read_pubkey(data, 44), true),
+        field("lockupUnixTimestamp", 76, "i64", 8, read_u64(data, 76).to_string(), true),
+        field("lockupEpoch", 84, "u64", 8, read_u64(data, 84).to_string(), true),
+        field("lockupCustodian", 92, "pubkey", 32, read_pubkey(data, 92), false),
+    ];
+    // Delegation follows Meta (124 bytes in) when the account is staked.
+    if read_u32(data, 0) == 2 && data.len() >= 196 {
+        fields.extend([
+            field("voterPubkey", 124, "pubkey", 32, read_pubkey(data, 124), true),
+            field("stake", 156, "u64", 8, read_u64(data, 156).to_string(), true),
+            field("activationEpoch", 164, "u64", 8, read_u64(data, 164).to_string(), true),
+            field("deactivationEpoch", 172, "u64", 8, read_u64(data, 172).to_string(), true),
+        ]);
+    }
+    Some(DecodedAccount { type_name: "Stake Account".into(), fields })
+}
+
+/// Durable nonce account (system-owned, exactly 80 bytes).
+fn decode_nonce(data: &[u8]) -> Option<DecodedAccount> {
+    if data.len() < 80 {
+        return None;
+    }
+    Some(DecodedAccount {
+        type_name: "Nonce Account".into(),
+        fields: vec![
+            field("version", 0, "u32", 4, read_u32(data, 0).to_string(), false),
+            field("state", 4, "u32", 4, read_u32(data, 4).to_string(), false),
+            field("authority", 8, "pubkey", 32, read_pubkey(data, 8), true),
+            field("blockhash", 40, "pubkey", 32, read_pubkey(data, 40), false),
+            field("lamportsPerSignature", 72, "u64", 8, read_u64(data, 72).to_string(), true),
+        ],
+    })
+}
+
+/// Best-effort structural inference for accounts with no schema at all.
+///
+/// Without type information we can't know field *names*, but the byte patterns
+/// are still informative: a 32-byte run that base58-decodes to a plausible key is
+/// almost certainly a pubkey, small u64s are counters/amounts, and values near
+/// the current unix time are timestamps. Everything is reported as `@offset` so
+/// it stays honest about being inferred, and stays editable so it's still useful
+/// for what-ifs.
+pub fn infer_layout(data: &[u8]) -> Option<DecodedAccount> {
+    if data.len() < 8 {
+        return None;
+    }
+    let mut fields = Vec::new();
+    let mut i = 0usize;
+    // Anchor-style accounts start with an 8-byte discriminator; show it as such.
+    fields.push(field(
+        "discriminator?",
+        0,
+        "[u8; 8]",
+        8,
+        data[0..8].iter().map(|b| format!("{b:02x}")).collect(),
+        false,
+    ));
+    i += 8;
+
+    while i + 8 <= data.len() && fields.len() < 64 {
+        // A 32-byte window that isn't mostly zeros and isn't all 0xff reads as a pubkey.
+        if i + 32 <= data.len() {
+            let w = &data[i..i + 32];
+            let zeros = w.iter().filter(|b| **b == 0).count();
+            let looks_key = zeros <= 8 && w.iter().any(|b| *b != 0xff);
+            if looks_key {
+                fields.push(field(&format!("pubkey@{i}"), i, "pubkey", 32, read_pubkey(data, i), true));
+                i += 32;
+                continue;
+            }
+        }
+        let v = read_u64(data, i);
+        // Plausible unix seconds (2020..2050) → timestamp; otherwise a number.
+        let label = if (1_577_836_800..4_102_444_800).contains(&v) { "i64 (time?)" } else { "u64" };
+        fields.push(field(&format!("u64@{i}"), i, label, 8, v.to_string(), true));
+        i += 8;
+    }
+    Some(DecodedAccount { type_name: "Inferred layout".into(), fields })
 }
 
 /// Fetch each account's on-chain state and decode any recognized layouts.
@@ -219,15 +347,18 @@ pub fn describe_accounts(client: &RpcClient, account_keys: &[String]) -> Vec<Acc
         let decoded = if executable {
             None
         } else {
-            decode(&owner, &data).or_else(|| {
-                let idl = idl_cache.entry(owner.clone()).or_insert_with(|| {
-                    std::str::FromStr::from_str(&owner)
-                        .ok()
-                        .and_then(|a| crate::idl::fetch_idl_json(client, a))
-                });
-                idl.as_ref()
-                    .and_then(|idl| crate::idl::decode_with_idl(idl, &data))
-            })
+            // Built-in layouts → the program's on-chain IDL → structural inference.
+            decode(&owner, &data)
+                .or_else(|| {
+                    let idl = idl_cache.entry(owner.clone()).or_insert_with(|| {
+                        std::str::FromStr::from_str(&owner)
+                            .ok()
+                            .and_then(|a| crate::idl::fetch_idl_json(client, a))
+                    });
+                    idl.as_ref()
+                        .and_then(|idl| crate::idl::decode_with_idl(idl, &data))
+                })
+                .or_else(|| infer_layout(&data))
         };
 
         out.push(AccountInfo {

@@ -282,6 +282,49 @@ async fn replay_report_handler(
     result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
 }
 
+/// POST body for IDL-assisted decoding / instruction listing.
+#[derive(Deserialize)]
+struct IdlRequest {
+    /// Account address (for /decode_account) or program id (for /idl_instructions).
+    #[serde(default)]
+    address: Option<String>,
+    /// The IDL JSON, e.g. the contents of target/idl/<program>.json.
+    idl: serde_json::Value,
+    #[serde(default)]
+    cluster: Option<String>,
+    #[serde(default)]
+    rpc: Option<String>,
+}
+
+/// POST /decode_account — decode an account, optionally using a supplied IDL.
+/// Lets a developer decode their own program's accounts before publishing an IDL.
+async fn decode_account_handler(
+    Json(req): Json<IdlRequest>,
+) -> Result<Json<svmscope::decode::AccountInfo>, (StatusCode, String)> {
+    let address = req
+        .address
+        .clone()
+        .ok_or((StatusCode::BAD_REQUEST, "address is required".to_string()))?;
+    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let idl = (!req.idl.is_null()).then_some(req.idl);
+
+    let result = tokio::task::spawn_blocking(move || {
+        let client = RpcClient::new(url);
+        svmscope::decode_account_with(&client, &address, idl.as_ref())
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+
+    result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
+}
+
+/// POST /idl_instructions — instructions from a supplied IDL (no on-chain publish needed).
+async fn idl_instructions_handler(
+    Json(req): Json<IdlRequest>,
+) -> Json<Vec<svmscope::idl::IdlInstruction>> {
+    Json(svmscope::instructions_from_idl(&req.idl))
+}
+
 /// GET /instructions/:program — the instructions a program exposes (from its IDL),
 /// for the transaction builder.
 async fn instructions_handler(
@@ -461,6 +504,8 @@ async fn main() {
         .route("/preflight_report", post(preflight_report_handler))
         .route("/replay_report", post(replay_report_handler))
         .route("/instructions/{program}", get(instructions_handler))
+        .route("/idl_instructions", post(idl_instructions_handler))
+        .route("/decode_account", post(decode_account_handler))
         .route("/account/{address}", get(account_handler))
         .route("/signatures/{address}", get(signatures_handler))
         .route("/replay/{signature}", get(replay_handler))
