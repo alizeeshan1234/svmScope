@@ -16,7 +16,15 @@ use svmscope::api::{MutationInput, SuiteRequest};
 use svmscope::replay::{Mutation, ReplayResult, ScenarioOutcome};
 use svmscope::Analysis;
 
-const RPC_URL: &str = "https://api.mainnet-beta.solana.com";
+const DEFAULT_RPC: &str = "https://api.mainnet-beta.solana.com";
+
+/// The RPC endpoint to use, overridable via `SVMSCOPE_RPC_URL` / `RPC_URL` so a
+/// deployment can point at its own (faster / higher-limit) RPC.
+fn rpc_url() -> String {
+    std::env::var("SVMSCOPE_RPC_URL")
+        .or_else(|_| std::env::var("RPC_URL"))
+        .unwrap_or_else(|_| DEFAULT_RPC.to_string())
+}
 
 /// POST body for /simulate.
 #[derive(Deserialize)]
@@ -37,7 +45,7 @@ async fn analyze_handler(
     // `analyze` does blocking I/O (RPC) and heavy CPU work (replay), so run it on
     // the blocking thread pool instead of stalling the async runtime.
     let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(RPC_URL.to_string());
+        let client = RpcClient::new(rpc_url());
         svmscope::analyze(&client, &signature)
     })
     .await
@@ -61,7 +69,7 @@ async fn simulate_handler(
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(RPC_URL.to_string());
+        let client = RpcClient::new(rpc_url());
         svmscope::simulate(&client, &req.signature, &mutations)
     })
     .await
@@ -89,7 +97,7 @@ async fn suite_handler(
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(RPC_URL.to_string());
+        let client = RpcClient::new(rpc_url());
         svmscope::simulate_suite(&client, &signature, scenarios)
     })
     .await
@@ -123,7 +131,7 @@ async fn preflight_handler(
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(RPC_URL.to_string());
+        let client = RpcClient::new(rpc_url());
         svmscope::simulate_preflight(&client, &req.transaction, &mutations)
     })
     .await
@@ -140,7 +148,7 @@ async fn replay_handler(
     Path(signature): Path<String>,
 ) -> Result<Json<ReplayResult>, (StatusCode, String)> {
     let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(RPC_URL.to_string());
+        let client = RpcClient::new(rpc_url());
         svmscope::run_replay(&client, &signature)
     })
     .await
@@ -157,7 +165,7 @@ async fn freeze_handler(
     Path(signature): Path<String>,
 ) -> Result<Json<svmscope::fixture::Fixture>, (StatusCode, String)> {
     let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(RPC_URL.to_string());
+        let client = RpcClient::new(rpc_url());
         svmscope::capture_fixture(&client, &signature)
     })
     .await
@@ -204,12 +212,17 @@ async fn main() {
         .route("/freeze/{signature}", get(freeze_handler))
         .layer(cors);
 
-    let addr = "127.0.0.1:3000";
-    let listener = match tokio::net::TcpListener::bind(addr).await {
+    // Host/port from the environment so it runs unchanged locally and on any
+    // platform (Fly, Render, Railway, Docker) that injects PORT and expects 0.0.0.0.
+    let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3000);
+    let addr = format!("{host}:{port}");
+
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            eprintln!("svmscope: port 3000 is already in use — is a server already running?");
-            eprintln!("  (stop it with:  lsof -ti:3000 | xargs kill )");
+            eprintln!("svmscope: {addr} is already in use — is a server already running?");
+            eprintln!("  (stop it with:  lsof -ti:{port} | xargs kill )");
             std::process::exit(1);
         }
         Err(e) => {
@@ -217,6 +230,6 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    println!("svmscope → http://{addr}   (API index: http://{addr}/api)");
+    println!("svmscope → http://{addr}   (API index: /api)");
     axum::serve(listener, app).await.unwrap();
 }

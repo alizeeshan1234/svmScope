@@ -1,0 +1,7 @@
+target/
+sdk/node_modules/
+sdk/dist/
+.git/
+*.md
+TODO.md
+fly.toml

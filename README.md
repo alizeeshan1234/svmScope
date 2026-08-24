@@ -188,6 +188,46 @@ writes the matching `suite.json`.
 
 See [VISION.md](./VISION.md) for the full architecture.
 
+## API & SDK
+
+`cargo run --bin server` exposes the engine over HTTP (CORS-enabled; `GET /api`
+lists the surface):
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /analyze/{sig}` | Decode a tx: CPI tree, balances, compute, IDL-decoded accounts. |
+| `GET /replay/{sig}` | Re-execute it locally against reconstructed pre-state. |
+| `POST /simulate` | `{ signature, mutations[] }` — replay with what-if edits. |
+| `POST /simulate_suite` | `{ signature, scenarios[] }` — scenario tests with assertions. |
+| `POST /preflight` | `{ transaction, mutations[] }` — simulate an **unsigned** tx before sending. |
+| `GET /freeze/{sig}` | Capture a deterministic, offline fixture. |
+
+A typed TypeScript client lives in [`sdk/`](./sdk) (`npm install svmscope`):
+
+```ts
+import { Svmscope } from "svmscope";
+const svm = new Svmscope("http://127.0.0.1:3000");
+const result = await svm.preflight(unsignedTx.serialize()); // preview before signing
+```
+
+## Deploy
+
+The server reads `HOST`, `PORT`, and `SVMSCOPE_RPC_URL` from the environment, so it
+runs unchanged locally or on any platform.
+
+```bash
+# Docker
+docker build -t svmscope .
+docker run -p 3000:3000 -e SVMSCOPE_RPC_URL=https://your-rpc svmscope
+
+# Fly.io (builds remotely — no local Docker needed)
+fly launch --no-deploy && fly deploy
+fly secrets set SVMSCOPE_RPC_URL=https://your-rpc   # optional, for a faster RPC
+```
+
+The public mainnet RPC is heavily rate-limited; point `SVMSCOPE_RPC_URL` at your own
+endpoint for a hosted deployment.
+
 ## Built with
 
 Rust · [`litesvm`](https://crates.io/crates/litesvm) · [`solana-client`](https://crates.io/crates/solana-client) · [`solana-transaction`](https://crates.io/crates/solana-transaction) · [`serde_json`](https://crates.io/crates/serde_json)

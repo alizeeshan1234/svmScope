@@ -1,0 +1,22 @@
+# Fly.io deployment for the svmscope API + UI.
+#   fly launch --no-deploy   (first time, to create the app)
+#   fly deploy               (build + ship)
+# Optionally point at your own RPC:
+#   fly secrets set SVMSCOPE_RPC_URL=https://your-rpc
+
+app = "svmscope"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"
