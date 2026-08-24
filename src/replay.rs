@@ -161,6 +161,10 @@ pub struct ReplayContext {
     /// Without it, LiteSVM's default slot is below recent mainnet slots, and any
     /// ALT extended more recently fails with `InvalidAddressLookupTableIndex`.
     slot: Option<u64>,
+    /// The chain's actual wall-clock time at that slot, from the RPC. Estimating
+    /// it from genesis drifts by months (slots aren't reliably 400ms), and any
+    /// program comparing against a real date would then be wrong.
+    block_time: Option<i64>,
     /// Optional clock warp applied on top of `slot` (see [`TimeTravel`]).
     time_travel: TimeTravel,
 }
@@ -294,12 +298,16 @@ impl ReplayContext {
     /// Solana's genesis (2020-03-16) plus ~400ms per slot.
     fn base_clock(&self, clock: &mut Clock) {
         let Some(slot) = self.slot else { return };
-        const GENESIS_UNIX: i64 = 1_584_368_940; // 2020-03-16, mainnet genesis
         clock.slot = slot;
         clock.epoch = slot / SLOTS_PER_EPOCH as u64;
-        clock.unix_timestamp = GENESIS_UNIX + (slot as f64 * SECS_PER_SLOT) as i64;
-        clock.epoch_start_timestamp =
-            GENESIS_UNIX + ((clock.epoch * SLOTS_PER_EPOCH as u64) as f64 * SECS_PER_SLOT) as i64;
+        // Prefer the real block time; fall back to a genesis estimate only if the
+        // RPC didn't give us one (that estimate can be months off).
+        const GENESIS_UNIX: i64 = 1_584_368_940; // 2020-03-16, mainnet genesis
+        clock.unix_timestamp = self
+            .block_time
+            .unwrap_or_else(|| GENESIS_UNIX + (slot as f64 * SECS_PER_SLOT) as i64);
+        clock.epoch_start_timestamp = clock.unix_timestamp
+            - ((slot % SLOTS_PER_EPOCH as u64) as f64 * SECS_PER_SLOT) as i64;
         clock.leader_schedule_epoch = clock.epoch + 1;
     }
 
@@ -477,6 +485,8 @@ pub fn build_context(
     slot: Option<u64>,
     pre_state: &PreState,
 ) -> ReplayContext {
+    // The transaction's real block time, so date-based logic sees the actual moment.
+    let block_time = slot.and_then(|s| client.get_block_time(s).ok());
     let tx = fetch_transaction(client, signature);
     let mut all_keys = account_keys.to_vec();
     if let Some(lookups) = tx.message.address_table_lookups() {
@@ -513,7 +523,7 @@ pub fn build_context(
         }
     }
 
-    ReplayContext { tx, loaded, slot, time_travel: TimeTravel::default() }
+    ReplayContext { tx, loaded, slot, block_time, time_travel: TimeTravel::default() }
 }
 
 fn b64_encode(bytes: &[u8]) -> String {
@@ -573,7 +583,10 @@ pub fn preflight_context(client: &RpcClient, tx: VersionedTransaction) -> Replay
     }
     let (loaded, _existing) = fetch_loaded(client, &all_keys);
     let slot = client.get_slot().ok();
-    ReplayContext { tx, loaded, slot, time_travel: TimeTravel::default() }
+    // Real wall-clock time for that slot — a pre-flight simulation should run
+    // "now", and any date-based program logic depends on this being accurate.
+    let block_time = slot.and_then(|s| client.get_block_time(s).ok());
+    ReplayContext { tx, loaded, slot, block_time, time_travel: TimeTravel::default() }
 }
 
 impl ReplayContext {
@@ -643,7 +656,7 @@ impl ReplayContext {
                 }
             }
         }
-        Ok(ReplayContext { tx, loaded, slot: fx.captured_slot, time_travel: TimeTravel::default() })
+        Ok(ReplayContext { tx, loaded, slot: fx.captured_slot, block_time: None, time_travel: TimeTravel::default() })
     }
 }
 
