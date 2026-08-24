@@ -130,6 +130,25 @@ pub fn simulate(
     Ok(replay::mutate_and_replay(client, signature, &account_keys, mutations, tx["slot"].as_u64(), &pre))
 }
 
+/// Pre-flight simulate an **unsigned** transaction (base64 wire bytes) against
+/// current on-chain state — "what will this do if I send it now?" This is the
+/// primitive a wallet or bot calls before signing. Optional what-if `mutations`
+/// let a caller preview the tx against edited state too.
+pub fn simulate_preflight(
+    client: &RpcClient,
+    tx_b64: &str,
+    mutations: &[replay::Mutation],
+) -> Result<replay::ReplayResult, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(tx_b64.trim())
+        .map_err(|e| format!("bad base64 transaction: {e}"))?;
+    let tx: solana_transaction::versioned::VersionedTransaction =
+        bincode::deserialize(&bytes).map_err(|e| format!("could not deserialize transaction: {e}"))?;
+    let ctx = replay::preflight_context(client, tx);
+    Ok(ctx.run(mutations))
+}
+
 /// Run a suite of test scenarios against one transaction. State is fetched once
 /// and every scenario replays against a fresh copy — the core of the tester.
 pub fn simulate_suite(

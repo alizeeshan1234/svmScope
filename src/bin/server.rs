@@ -101,6 +101,40 @@ async fn suite_handler(
     }
 }
 
+/// POST body for /preflight.
+#[derive(Deserialize)]
+struct PreflightRequest {
+    /// base64 wire bytes of an (unsigned) VersionedTransaction.
+    transaction: String,
+    #[serde(default)]
+    mutations: Vec<MutationInput>,
+}
+
+/// POST /preflight — simulate an unsigned transaction against current state before
+/// it's sent. The pre-flight primitive a wallet/bot calls before signing.
+async fn preflight_handler(
+    Json(req): Json<PreflightRequest>,
+) -> Result<Json<ReplayResult>, (StatusCode, String)> {
+    let mutations: Vec<Mutation> = req
+        .mutations
+        .into_iter()
+        .map(MutationInput::into_mutation)
+        .collect::<Result<_, _>>()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    let result = tokio::task::spawn_blocking(move || {
+        let client = RpcClient::new(RPC_URL.to_string());
+        svmscope::simulate_preflight(&client, &req.transaction, &mutations)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+
+    match result {
+        Ok(r) => Ok(Json(r)),
+        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+    }
+}
+
 /// GET /replay/:signature — run the local replay on demand (analyze skips it).
 async fn replay_handler(
     Path(signature): Path<String>,
@@ -147,6 +181,7 @@ async fn api_index() -> Json<serde_json::Value> {
             "GET  /replay/{signature}":   "Re-execute the transaction locally against reconstructed pre-state.",
             "POST /simulate":             "{ signature, mutations[] } — replay with what-if account mutations.",
             "POST /simulate_suite":       "{ signature, scenarios[] } — run a suite of scenarios with outcome + state assertions.",
+            "POST /preflight":            "{ transaction, mutations[] } — simulate an UNSIGNED transaction against current state before sending.",
             "GET  /freeze/{signature}":   "Capture a self-contained fixture for deterministic, offline replay."
         }
     }))
@@ -164,6 +199,7 @@ async fn main() {
         .route("/analyze/{signature}", get(analyze_handler))
         .route("/simulate", post(simulate_handler))
         .route("/simulate_suite", post(suite_handler))
+        .route("/preflight", post(preflight_handler))
         .route("/replay/{signature}", get(replay_handler))
         .route("/freeze/{signature}", get(freeze_handler))
         .layer(cors);

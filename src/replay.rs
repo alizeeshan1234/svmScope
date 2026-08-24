@@ -338,6 +338,62 @@ fn b64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+/// Resolve an (unsigned) transaction's Address Lookup Table references to concrete
+/// addresses — writable first, then readonly, the order the runtime resolves them.
+/// An ALT account stores its address list at offset 56, 32 bytes each.
+fn resolve_alt_addresses(client: &RpcClient, tx: &VersionedTransaction) -> (Vec<String>, Vec<String>) {
+    let mut writable = Vec::new();
+    let mut readonly = Vec::new();
+    if let Some(lookups) = tx.message.address_table_lookups() {
+        for l in lookups {
+            let Some(data) = fetch_account_data(client, &l.account_key.to_string()) else { continue };
+            let read = |idx: u8| -> Option<String> {
+                let off = 56 + idx as usize * 32;
+                let bytes: [u8; 32] = data.get(off..off + 32)?.try_into().ok()?;
+                Some(Address::from(bytes).to_string())
+            };
+            for &idx in &l.writable_indexes {
+                if let Some(a) = read(idx) {
+                    writable.push(a);
+                }
+            }
+            for &idx in &l.readonly_indexes {
+                if let Some(a) = read(idx) {
+                    readonly.push(a);
+                }
+            }
+        }
+    }
+    (writable, readonly)
+}
+
+/// Build a replay context for an **unsigned / pre-flight** transaction — one that
+/// hasn't been sent yet. Resolves its accounts (incl. ALTs), loads their *current*
+/// on-chain state (which, for a not-yet-sent tx, IS the pre-state — no drift, no
+/// archival), and sets the slot to the current slot so ALT resolution works.
+pub fn preflight_context(client: &RpcClient, tx: VersionedTransaction) -> ReplayContext {
+    let mut keys: Vec<String> = tx
+        .message
+        .static_account_keys()
+        .iter()
+        .map(|k| k.to_string())
+        .collect();
+    let (writable, readonly) = resolve_alt_addresses(client, &tx);
+    keys.extend(writable);
+    keys.extend(readonly);
+
+    // Also load the ALT accounts themselves so LiteSVM can resolve the lookups.
+    let mut all_keys = keys.clone();
+    if let Some(lookups) = tx.message.address_table_lookups() {
+        for l in lookups {
+            all_keys.push(l.account_key.to_string());
+        }
+    }
+    let (loaded, _existing) = fetch_loaded(client, &all_keys);
+    let slot = client.get_slot().ok();
+    ReplayContext { tx, loaded, slot }
+}
+
 impl ReplayContext {
     /// Freeze this context into a portable, self-contained [`Fixture`] — the tx
     /// wire bytes plus every account/program, so it can replay offline forever.
