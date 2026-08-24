@@ -57,7 +57,14 @@ enum Loaded {
 ///
 /// This does all the network I/O; building a fresh SVM from the result is then
 /// free, which is what lets a whole scenario suite run without re-fetching.
-fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Vec<(Address, Loaded)> {
+/// Returns the loadables plus the set of addresses that actually exist on-chain
+/// (non-null) — including programs whose ELF we couldn't resolve. The caller uses
+/// that set to tell a genuinely-closed account (safe to reconstruct) apart from a
+/// program that merely failed to load (must NOT be reconstructed as data).
+fn fetch_loaded(
+    client: &RpcClient,
+    account_keys: &[String],
+) -> (Vec<(Address, Loaded)>, HashMap<String, ()>) {
     let resp: serde_json::Value = client
         .send(
             RpcRequest::GetMultipleAccounts,
@@ -67,11 +74,13 @@ fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Vec<(Address, Lo
 
     let accounts = resp["value"].as_array().expect("value should be an array");
     let mut out: Vec<(Address, Loaded)> = Vec::new();
+    let mut existing: HashMap<String, ()> = HashMap::new();
 
     for (i, acc) in accounts.iter().enumerate() {
         if acc.is_null() {
             continue; // account doesn't exist (created during the tx, etc.)
         }
+        existing.insert(account_keys[i].clone(), ());
         let address = Address::from_str(&account_keys[i]).expect("bad account address");
         let owner = acc["owner"].as_str().unwrap();
         let executable = acc["executable"].as_bool().unwrap();
@@ -116,7 +125,7 @@ fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Vec<(Address, Lo
             }),
         ));
     }
-    out
+    (out, existing)
 }
 
 /// Build a fresh LiteSVM from already-fetched loadables (no network).
@@ -184,31 +193,94 @@ impl ReplayContext {
 ///
 /// (Only token accounts that existed pre-transaction appear in `preTokenBalances`,
 /// so restoring them is safe — it never resurrects an account the tx creates.)
+const SPL_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+/// Pre-transaction token-account details, enough to rebuild a closed one.
+struct TokenInfo {
+    mint: String,
+    owner: String, // the token authority (SPL "owner" field), not the program
+    amount: u64,
+}
+
 #[derive(Default)]
 pub struct PreState {
     /// account address -> raw SPL token amount before the transaction.
-    pub token_amounts: HashMap<String, u64>,
+    token_amounts: HashMap<String, u64>,
+    /// account address -> its lamports before the transaction.
+    lamports: HashMap<String, u64>,
+    /// token account address -> details, to reconstruct it if it's since closed.
+    token_info: HashMap<String, TokenInfo>,
 }
 
 impl PreState {
     pub fn from_meta(tx: &serde_json::Value, account_keys: &[String]) -> PreState {
         let mut ps = PreState::default();
+
+        // Pre-transaction lamports, parallel to the resolved account list.
+        if let Some(pre) = tx["meta"]["preBalances"].as_array() {
+            for (i, v) in pre.iter().enumerate() {
+                if let (Some(addr), Some(l)) = (account_keys.get(i), v.as_u64()) {
+                    ps.lamports.insert(addr.clone(), l);
+                }
+            }
+        }
+        // Pre-transaction token balances (amount + enough to rebuild the account).
         if let Some(pre) = tx["meta"]["preTokenBalances"].as_array() {
             for e in pre {
                 let idx = e["accountIndex"].as_u64().unwrap_or(u64::MAX) as usize;
                 let amt = e["uiTokenAmount"]["amount"]
                     .as_str()
                     .and_then(|s| s.parse::<u64>().ok());
-                if let (Some(addr), Some(amt)) = (account_keys.get(idx), amt) {
-                    ps.token_amounts.insert(addr.clone(), amt);
+                let (Some(addr), Some(amt)) = (account_keys.get(idx), amt) else { continue };
+                ps.token_amounts.insert(addr.clone(), amt);
+                if let (Some(mint), Some(owner)) = (e["mint"].as_str(), e["owner"].as_str()) {
+                    ps.token_info.insert(
+                        addr.clone(),
+                        TokenInfo { mint: mint.to_string(), owner: owner.to_string(), amount: amt },
+                    );
                 }
             }
         }
         ps
     }
 
+    /// Reconstruct an account that existed before the transaction but has since
+    /// been closed (so `getMultipleAccounts` returns null). Returns `None` for
+    /// accounts that never existed (the transaction creates those itself).
+    fn reconstruct(&self, address: &str) -> Option<Account> {
+        // A closed token account: rebuild the full SPL layout from meta.
+        if let Some(info) = self.token_info.get(address) {
+            let mut data = vec![0u8; 165];
+            let mint = Address::from_str(&info.mint).ok()?;
+            let owner = Address::from_str(&info.owner).ok()?;
+            data[0..32].copy_from_slice(mint.as_array());
+            data[32..64].copy_from_slice(owner.as_array());
+            data[64..72].copy_from_slice(&info.amount.to_le_bytes());
+            data[108] = 1; // AccountState::Initialized
+            return Some(Account {
+                lamports: self.lamports.get(address).copied().unwrap_or(2_039_280),
+                data,
+                owner: Address::from_str(SPL_TOKEN_PROGRAM).ok()?,
+                executable: false,
+                rent_epoch: 0,
+            });
+        }
+        // A closed system account (e.g. a fee payer that has since drained): a
+        // system-owned account with its pre-transaction lamports is faithful.
+        match self.lamports.get(address) {
+            Some(&l) if l > 0 => Some(Account {
+                lamports: l,
+                data: vec![],
+                owner: Address::default(), // system program (all-zero id)
+                executable: false,
+                rent_epoch: 0,
+            }),
+            _ => None,
+        }
+    }
+
     fn is_empty(&self) -> bool {
-        self.token_amounts.is_empty()
+        self.token_amounts.is_empty() && self.lamports.is_empty()
     }
 }
 
@@ -230,10 +302,24 @@ pub fn build_context(
             all_keys.push(l.account_key.to_string());
         }
     }
-    let mut loaded = fetch_loaded(client, &all_keys);
+    let (mut loaded, existing) = fetch_loaded(client, &all_keys);
 
-    // Rewind token accounts to their pre-transaction balances (SPL amount @ 64).
     if !pre_state.is_empty() {
+        // Reconstruct accounts that existed at tx-time but are *closed now* (null
+        // on-chain), so the transaction can load — a missing fee payer alone fails
+        // it at cu=0. Crucially we key off `existing` (what getMultipleAccounts
+        // actually returned), not what loaded: a program whose ELF failed to
+        // resolve still exists, and must not be rebuilt as a data account.
+        for key in account_keys {
+            if existing.contains_key(key) {
+                continue;
+            }
+            if let (Some(acc), Ok(addr)) = (pre_state.reconstruct(key), Address::from_str(key)) {
+                loaded.push((addr, Loaded::Data(acc)));
+            }
+        }
+
+        // Rewind still-existing token accounts to their pre-transaction balance.
         for (addr, l) in loaded.iter_mut() {
             if let Loaded::Data(acc) = l {
                 if let Some(&amt) = pre_state.token_amounts.get(&addr.to_string()) {
