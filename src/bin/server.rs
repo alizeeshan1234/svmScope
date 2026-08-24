@@ -3,7 +3,7 @@
 //! Run with `cargo run --bin server`, then open http://127.0.0.1:3000.
 
 use axum::{
-    extract::Path,
+    extract::{Path, Query},
     http::StatusCode,
     response::Html,
     routing::{get, post},
@@ -18,12 +18,25 @@ use svmscope::Analysis;
 
 const DEFAULT_RPC: &str = "https://api.mainnet-beta.solana.com";
 
-/// The RPC endpoint to use, overridable via `SVMSCOPE_RPC_URL` / `RPC_URL` so a
-/// deployment can point at its own (faster / higher-limit) RPC.
+/// The default RPC, overridable via `SVMSCOPE_RPC_URL` / `RPC_URL`, used when a
+/// request doesn't specify a cluster.
 fn rpc_url() -> String {
     std::env::var("SVMSCOPE_RPC_URL")
         .or_else(|_| std::env::var("RPC_URL"))
         .unwrap_or_else(|_| DEFAULT_RPC.to_string())
+}
+
+/// Per-request cluster selection: `?cluster=devnet` (or mainnet/testnet/localnet)
+/// or `?rpc=<url>`, so one instance serves every cluster.
+#[derive(Deserialize)]
+struct ClusterQuery {
+    cluster: Option<String>,
+    rpc: Option<String>,
+}
+
+/// Resolve a per-request RPC from a cluster/rpc pair, falling back to the env default.
+fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> String {
+    svmscope::resolve_rpc(cluster, rpc, &rpc_url())
 }
 
 /// POST body for /simulate.
@@ -31,6 +44,10 @@ fn rpc_url() -> String {
 struct SimRequest {
     signature: String,
     mutations: Vec<MutationInput>,
+    #[serde(default)]
+    cluster: Option<String>,
+    #[serde(default)]
+    rpc: Option<String>,
 }
 
 /// Serve the static frontend page.
@@ -41,11 +58,13 @@ async fn index() -> Html<&'static str> {
 /// GET /analyze/:signature — decode + replay a transaction, return JSON.
 async fn analyze_handler(
     Path(signature): Path<String>,
+    Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Analysis>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     // `analyze` does blocking I/O (RPC) and heavy CPU work (replay), so run it on
     // the blocking thread pool instead of stalling the async runtime.
     let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(rpc_url());
+        let client = RpcClient::new(url);
         svmscope::analyze(&client, &signature)
     })
     .await
@@ -68,8 +87,9 @@ async fn simulate_handler(
         .collect::<Result<_, _>>()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
+    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(rpc_url());
+        let client = RpcClient::new(url);
         svmscope::simulate(&client, &req.signature, &mutations)
     })
     .await
@@ -89,6 +109,7 @@ async fn suite_handler(
         .signature
         .clone()
         .ok_or((StatusCode::BAD_REQUEST, "signature is required".to_string()))?;
+    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let scenarios = req
         .scenarios
         .into_iter()
@@ -97,7 +118,7 @@ async fn suite_handler(
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(rpc_url());
+        let client = RpcClient::new(url);
         svmscope::simulate_suite(&client, &signature, scenarios)
     })
     .await
@@ -116,6 +137,10 @@ struct PreflightRequest {
     transaction: String,
     #[serde(default)]
     mutations: Vec<MutationInput>,
+    #[serde(default)]
+    cluster: Option<String>,
+    #[serde(default)]
+    rpc: Option<String>,
 }
 
 /// POST /preflight — simulate an unsigned transaction against current state before
@@ -130,8 +155,9 @@ async fn preflight_handler(
         .collect::<Result<_, _>>()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
+    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(rpc_url());
+        let client = RpcClient::new(url);
         svmscope::simulate_preflight(&client, &req.transaction, &mutations)
     })
     .await
@@ -146,9 +172,11 @@ async fn preflight_handler(
 /// GET /replay/:signature — run the local replay on demand (analyze skips it).
 async fn replay_handler(
     Path(signature): Path<String>,
+    Query(q): Query<ClusterQuery>,
 ) -> Result<Json<ReplayResult>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(rpc_url());
+        let client = RpcClient::new(url);
         svmscope::run_replay(&client, &signature)
     })
     .await
@@ -163,9 +191,11 @@ async fn replay_handler(
 /// GET /freeze/:signature — capture a self-contained fixture for offline replay.
 async fn freeze_handler(
     Path(signature): Path<String>,
+    Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::fixture::Fixture>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(rpc_url());
+        let client = RpcClient::new(url);
         svmscope::capture_fixture(&client, &signature)
     })
     .await

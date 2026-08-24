@@ -19,6 +19,35 @@ use serde_json::json;
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_request::RpcRequest;
 
+/// Resolve a cluster name or explicit RPC URL to an endpoint, so one instance
+/// serves every cluster. Precedence: explicit `rpc` URL > `cluster` name > `default`.
+///
+/// Clusters: `mainnet`, `devnet`, `testnet`, `localnet` (127.0.0.1:8899). A value
+/// starting with `http` in either field is used verbatim.
+pub fn resolve_rpc(cluster: Option<&str>, rpc: Option<&str>, default: &str) -> String {
+    if let Some(u) = rpc {
+        if u.starts_with("http") {
+            return u.to_string();
+        }
+    }
+    match cluster.map(|c| c.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") => default.to_string(),
+        Some("mainnet") | Some("mainnet-beta") | Some("m") => {
+            "https://api.mainnet-beta.solana.com".into()
+        }
+        Some("devnet") | Some("d") => "https://api.devnet.solana.com".into(),
+        Some("testnet") | Some("t") => "https://api.testnet.solana.com".into(),
+        Some("localnet") | Some("local") | Some("localhost") | Some("l") => {
+            "http://127.0.0.1:8899".into()
+        }
+        Some(other) if other.starts_with("http") => other.to_string(),
+        Some(other) => {
+            eprintln!("warn: unknown cluster '{other}', using default");
+            default.to_string()
+        }
+    }
+}
+
 /// The full analysis of a transaction — the payload the CLI prints and the API serves.
 #[derive(Serialize)]
 pub struct Analysis {

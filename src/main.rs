@@ -19,7 +19,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         .get(1)
         .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]\n       svmscope freeze <transaction-signature> [-o fixture.json]\n       svmscope test <scenarios.json>")?;
 
-    let client = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
+    // Cluster/RPC selection: --cluster <mainnet|devnet|testnet|localnet> or --rpc <url>.
+    let flag = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let rpc = svmscope::resolve_rpc(
+        flag("--cluster").as_deref(),
+        flag("--rpc").as_deref(),
+        "https://api.mainnet-beta.solana.com",
+    );
+    let client = RpcClient::new(rpc);
 
     // Test-runner mode: `svmscope test <scenarios.json>` runs a scenario suite
     // and exits non-zero if any assertion fails — drop it straight into CI.

@@ -53,6 +53,9 @@
     padding: 9px 13px; border-radius: 10px; font-family: var(--mono); font-size: 12.5px; transition: border-color .15s, box-shadow .15s; }
   .search input::placeholder { color: var(--muted); }
   .search input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(153,69,255,.16); }
+  .search .cluster { flex: 0 0 auto; background: var(--panel-2); border: 1px solid var(--line-2); color: var(--text);
+    padding: 9px 10px; border-radius: 10px; font-size: 12.5px; cursor: pointer; }
+  .search .cluster:focus { outline: none; border-color: var(--accent); }
   .btn { background: linear-gradient(180deg, #a457ff, #8636ef); color: #fff; border: 0; padding: 9px 18px; border-radius: 10px;
     font-weight: 650; cursor: pointer; font-size: 13.5px; flex: 0 0 auto; transition: filter .15s, transform .04s; }
   .btn:hover { filter: brightness(1.08); }
@@ -300,6 +303,12 @@
         <div><b>svmscope</b> &nbsp;<span class="tag">transaction simulator</span></div>
       </div>
       <div class="search">
+        <select id="cluster" class="cluster" title="Cluster / RPC">
+          <option value="mainnet">Mainnet</option>
+          <option value="devnet">Devnet</option>
+          <option value="testnet">Testnet</option>
+          <option value="localnet">Localnet</option>
+        </select>
         <input id="sig" placeholder="paste a Solana transaction signature…" spellcheck="false" autocomplete="off" />
         <button class="btn" id="go">Analyze</button>
       </div>
@@ -379,6 +388,11 @@ const short = (a) => a && a.length > 12 ? a.slice(0, 4) + '…' + a.slice(-4) : 
 const fmt = (n) => Number(n).toLocaleString('en-US');
 
 let analysis = null, currentSig = '', mutations = [], mutableAccounts = [];
+
+// Selected cluster — appended to GET requests and merged into POST bodies so one
+// instance serves mainnet / devnet / testnet / localnet.
+const currentCluster = () => $('cluster').value;
+const clusterQ = () => '?cluster=' + encodeURIComponent(currentCluster());
 
 // ---------------- known-program & known-mint registries ----------------
 const PROGRAMS = {
@@ -603,7 +617,7 @@ function renderReplayPanel() {
 // Fetch the baseline replay once and cache it on `analysis.replay`.
 async function ensureBaseline() {
   if (analysis.replay) return analysis.replay;
-  const res = await fetch('/replay/' + encodeURIComponent(currentSig));
+  const res = await fetch('/replay/' + encodeURIComponent(currentSig) + clusterQ());
   if (!res.ok) throw new Error(await res.text());
   analysis.replay = await res.json();
   return analysis.replay;
@@ -701,7 +715,7 @@ async function runSuite() {
       return s;
     });
     const res = await fetch('/simulate_suite', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, scenarios }) });
+      body: JSON.stringify({ signature: currentSig, scenarios, cluster: currentCluster() }) });
     if (!res.ok) throw new Error(await res.text());
     const outcomes = await res.json();
     outcomes.forEach((o, i) => {
@@ -720,7 +734,7 @@ async function freezeFixture() {
   const btn = $('freezeFixture'), old = btn.textContent;
   btn.disabled = true; btn.textContent = '❄ Freezing…';
   try {
-    const res = await fetch('/freeze/' + encodeURIComponent(currentSig));
+    const res = await fetch('/freeze/' + encodeURIComponent(currentSig) + clusterQ());
     if (!res.ok) throw new Error(await res.text());
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -983,7 +997,7 @@ async function analyze() {
   const st = $('status'); st.className = 'status'; st.classList.remove('hidden');
   st.innerHTML = '<span class="spinner"></span>fetching state · loading programs · replaying…';
   try {
-    const res = await fetch(`/analyze/${encodeURIComponent(sig)}`);
+    const res = await fetch(`/analyze/${encodeURIComponent(sig)}` + clusterQ());
     if (!res.ok) throw new Error(await res.text());
     analysis = await res.json();
     renderOverview(analysis.overview, analysis.compute);
@@ -1013,7 +1027,7 @@ async function simulate() {
     // Need the un-mutated baseline for the before/after comparison; fetch it lazily.
     const before = await ensureBaseline();
     const res = await fetch('/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m) }) });
+      body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m), cluster: currentCluster() }) });
     if (!res.ok) throw new Error(await res.text());
     showResult(before, await res.json(), { n: toSend.length });
   } catch (e) { flashSim('error: ' + e.message, true); }

@@ -154,5 +154,11 @@ pub struct SuiteRequest {
     pub signature: Option<String>,
     #[serde(default)]
     pub fixture: Option<String>,
+    /// Cluster name (mainnet/devnet/testnet/localnet) for the live-signature path.
+    #[serde(default)]
+    pub cluster: Option<String>,
+    /// Explicit RPC URL override for the live-signature path.
+    #[serde(default)]
+    pub rpc: Option<String>,
     pub scenarios: Vec<ScenarioInput>,
 }

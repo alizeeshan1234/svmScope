@@ -209,36 +209,70 @@ export class SvmscopeError extends Error {
   }
 }
 
+/** Which cluster to run against (default "mainnet"). */
+export type Cluster = "mainnet" | "devnet" | "testnet" | "localnet";
+
+export interface SvmscopeOptions {
+  /** Cluster to target; one instance serves all of them. Default "mainnet". */
+  cluster?: Cluster;
+  /** Explicit RPC URL, overrides `cluster`. */
+  rpc?: string;
+  /** Custom fetch implementation (defaults to global `fetch`). */
+  fetchImpl?: typeof fetch;
+}
+
 export class Svmscope {
+  private readonly cluster?: Cluster;
+  private readonly rpc?: string;
+  private readonly fetchImpl: typeof fetch;
+
   /**
    * @param baseUrl svmscope API base URL (default `http://127.0.0.1:3000`).
-   * @param fetchImpl optional fetch implementation (defaults to global `fetch`).
+   * @param options cluster / rpc / fetch. Per-call cluster can also be passed to
+   *   each method's last argument.
    */
   constructor(
     private readonly baseUrl: string = "http://127.0.0.1:3000",
-    private readonly fetchImpl: typeof fetch = fetch,
+    options: SvmscopeOptions = {},
   ) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.cluster = options.cluster;
+    this.rpc = options.rpc;
+    this.fetchImpl = options.fetchImpl ?? fetch;
+  }
+
+  /** Query string carrying the cluster/rpc for GET requests. */
+  private clusterQuery(over?: Cluster): string {
+    const cluster = over ?? this.cluster;
+    const params = new URLSearchParams();
+    if (cluster) params.set("cluster", cluster);
+    if (this.rpc) params.set("rpc", this.rpc);
+    const s = params.toString();
+    return s ? `?${s}` : "";
+  }
+  /** cluster/rpc fields to merge into POST bodies. */
+  private clusterBody(over?: Cluster): { cluster?: Cluster; rpc?: string } {
+    return { cluster: over ?? this.cluster, rpc: this.rpc };
   }
 
   /** Decode a landed transaction — CPI tree, balances, compute, IDL-decoded accounts. */
-  analyze(signature: string): Promise<Analysis> {
-    return this.get(`/analyze/${encodeURIComponent(signature)}`);
+  analyze(signature: string, cluster?: Cluster): Promise<Analysis> {
+    return this.get(`/analyze/${encodeURIComponent(signature)}` + this.clusterQuery(cluster));
   }
 
   /** Re-execute a landed transaction locally against reconstructed pre-state. */
-  replay(signature: string): Promise<ReplayResult> {
-    return this.get(`/replay/${encodeURIComponent(signature)}`);
+  replay(signature: string, cluster?: Cluster): Promise<ReplayResult> {
+    return this.get(`/replay/${encodeURIComponent(signature)}` + this.clusterQuery(cluster));
   }
 
   /** Replay a landed transaction with what-if account mutations. */
-  simulate(signature: string, mutations: Mutation[]): Promise<ReplayResult> {
-    return this.post("/simulate", { signature, mutations });
+  simulate(signature: string, mutations: Mutation[], cluster?: Cluster): Promise<ReplayResult> {
+    return this.post("/simulate", { signature, mutations, ...this.clusterBody(cluster) });
   }
 
   /** Run a suite of test scenarios (outcome + state assertions) against a transaction. */
-  runSuite(signature: string, scenarios: Scenario[]): Promise<ScenarioOutcome[]> {
-    return this.post("/simulate_suite", { signature, scenarios });
+  runSuite(signature: string, scenarios: Scenario[], cluster?: Cluster): Promise<ScenarioOutcome[]> {
+    return this.post("/simulate_suite", { signature, scenarios, ...this.clusterBody(cluster) });
   }
 
   /**
@@ -252,14 +286,15 @@ export class Svmscope {
   preflight(
     transaction: string | Uint8Array,
     mutations: Mutation[] = [],
+    cluster?: Cluster,
   ): Promise<ReplayResult> {
     const b64 = typeof transaction === "string" ? transaction : toBase64(transaction);
-    return this.post("/preflight", { transaction: b64, mutations });
+    return this.post("/preflight", { transaction: b64, mutations, ...this.clusterBody(cluster) });
   }
 
   /** Capture a self-contained fixture for deterministic, offline replay. */
-  freeze(signature: string): Promise<Fixture> {
-    return this.get(`/freeze/${encodeURIComponent(signature)}`);
+  freeze(signature: string, cluster?: Cluster): Promise<Fixture> {
+    return this.get(`/freeze/${encodeURIComponent(signature)}` + this.clusterQuery(cluster));
   }
 
   // --- internals ---

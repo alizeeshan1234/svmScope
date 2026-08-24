@@ -202,6 +202,11 @@ lists the surface):
 | `POST /preflight` | `{ transaction, mutations[] }` — simulate an **unsigned** tx before sending. |
 | `GET /freeze/{sig}` | Capture a deterministic, offline fixture. |
 
+**Clusters:** every endpoint takes an optional cluster — `?cluster=devnet` (or
+`mainnet` / `testnet` / `localnet`) on GETs, a `cluster` field on POSTs, or
+`?rpc=<url>` for a custom endpoint — so one instance serves them all. The UI has a
+cluster dropdown; the CLI takes `--cluster <name>` / `--rpc <url>`.
+
 A typed TypeScript client lives in [`sdk/`](./sdk) (`npm install svmscope`):
 
 ```ts
