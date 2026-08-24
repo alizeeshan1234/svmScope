@@ -1,0 +1,27 @@
+# Keeps the hosted demo awake.
+#
+# Render's free tier spins a service down after ~15 minutes without traffic, and
+# the next request then pays a ~50s cold start. Pinging the lightweight /api
+# endpoint on a schedule keeps it warm at no cost (Actions minutes are free for
+# public repos).
+name: keep demo awake
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes
+  workflow_dispatch:          # allow a manual ping
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping the demo API
+        run: |
+          for i in 1 2 3; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 \
+              https://svmscope.onrender.com/api || echo 000)
+            echo "attempt $i → HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 20
+          done
+          echo "demo did not respond OK (it may be redeploying)"
