@@ -92,6 +92,20 @@
   .txrow .slot { font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; }
   .txrow .when { font-size: 11.5px; color: var(--dim); white-space: nowrap; }
   .txrow .go { color: var(--accent-2); font-size: 12px; font-weight: 650; white-space: nowrap; }
+  .acct-ov { background: linear-gradient(180deg, var(--panel), var(--bg-2)); border: 1px solid var(--line);
+    border-radius: 14px; padding: 18px 20px; margin-bottom: 18px; }
+  .acct-ov .ov-tag { display: inline-block; background: rgba(153,69,255,.16); color: #c79bff;
+    border: 1px solid rgba(153,69,255,.3); padding: 2px 9px; border-radius: 7px; font-size: 11px; font-weight: 650; }
+  .acct-ov .ov-name { font-size: 20px; font-weight: 750; margin: 8px 0 14px; }
+  .acct-ov .ov-sub { color: var(--dim); font-size: 13px; }
+  .acct-ov .ov-row { display: flex; justify-content: space-between; gap: 16px; padding: 8px 0;
+    border-top: 1px solid rgba(28,31,42,.6); font-size: 13px; }
+  .acct-ov .ov-row:first-of-type { border-top: 0; }
+  .acct-ov .ovk { color: var(--dim); }
+  .acct-ov .ovoff { color: var(--muted); font-family: var(--mono); font-size: 10.5px; }
+  .acct-ov .ovv { color: var(--text); font-family: var(--mono); font-size: 12.5px; text-align: right; }
+  .acct-ov .ov-fields-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .8px;
+    color: var(--muted); margin: 14px 0 2px; font-weight: 600; }
   .spinner { display: inline-block; width: 13px; height: 13px; margin-right: 8px; vertical-align: -2px;
     border: 2px solid var(--line-2); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -1016,23 +1030,24 @@ function runInput() {
   if (!input) return;
   let len = null;
   try { len = bs58decode(input).length; } catch { /* not base58 */ }
-  if (len === 32) return showSignatureList(input);
+  if (len === 32) return showAddress(input);
   return analyze();
 }
 
-// Show an explorer-style list of an address's recent transactions to pick from.
-async function showSignatureList(address) {
+// Show an explorer-style address page: the account/program overview + its recent
+// transactions to pick from.
+async function showAddress(address) {
   $('go').disabled = true;
   $('out').classList.add('hidden'); $('hero').classList.add('hidden'); $('txlist').classList.add('hidden');
   const st = $('status'); st.className = 'status'; st.classList.remove('hidden');
-  st.innerHTML = '<span class="spinner"></span>loading recent transactions…';
+  st.innerHTML = '<span class="spinner"></span>loading account…';
   try {
-    const res = await fetch(`/signatures/${encodeURIComponent(address)}` + clusterQ());
-    if (!res.ok) throw new Error(await res.text());
-    const sigs = await res.json();
+    const [account, sigs] = await Promise.all([
+      fetch(`/account/${encodeURIComponent(address)}` + clusterQ()).then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); }),
+      fetch(`/signatures/${encodeURIComponent(address)}` + clusterQ()).then(r => r.ok ? r.json() : []),
+    ]);
     st.classList.add('hidden');
-    if (!sigs.length) { st.className = 'status'; st.classList.remove('hidden'); st.textContent = 'no transactions found for ' + short(address); return; }
-    renderSignatureList(address, sigs);
+    renderAddressPage(address, account, sigs);
   } catch (e) {
     st.className = 'status err'; st.classList.remove('hidden'); st.textContent = 'error: ' + e.message;
   } finally { $('go').disabled = false; }
@@ -1045,21 +1060,61 @@ function timeAgo(t) {
   if (s < 86400) return Math.floor(s / 3600) + 'h ago';
   return Math.floor(s / 86400) + 'd ago';
 }
-function renderSignatureList(address, sigs) {
+function ovRow(k, v) { return `<div class="ov-row"><span class="ovk">${esc(k)}</span><span class="ovv">${v}</span></div>`; }
+
+function renderAddressPage(address, a, sigs) {
   const box = $('txlist'); box.classList.remove('hidden');
-  box.innerHTML = `<h2>Recent transactions for <b>${esc(short(address))}</b> · ${sigs.length} shown</h2>` +
-    sigs.map(s =>
-      `<div class="txrow" data-sig="${esc(s.signature)}">
-         <span class="st ${s.err ? 'err' : 'ok'}"></span>
-         <span class="sig">${esc(s.signature)}</span>
-         ${s.slot != null ? `<span class="slot">slot ${fmt(s.slot)}</span>` : ''}
-         <span class="when">${esc(timeAgo(s.block_time))}</span>
-         <span class="go">analyze →</span>
-       </div>`).join('');
+  let header;
+  if (!a || !a.exists) {
+    header = `<div class="acct-ov"><div class="ov-name">Account not found</div>
+      <div class="ov-sub">${esc(short(address))} doesn't exist on this cluster.</div></div>`;
+  } else if (a.executable) {
+    const p = a.program || {};
+    const rows = [
+      ovRow('Address', copyPill(a.address, a.address)),
+      ovRow('Balance', fmtSol(a.lamports)),
+      ovRow('Executable', 'Yes'),
+      p.program_data ? ovRow('Program Data', copyPill(p.program_data)) : '',
+      ovRow('Upgradeable', p.upgradeable ? 'Yes' : 'No (immutable)'),
+      p.upgrade_authority ? ovRow('Upgrade Authority', copyPill(p.upgrade_authority)) : '',
+      p.last_deployed_slot != null ? ovRow('Last Deployed Slot', fmt(p.last_deployed_slot)) : '',
+    ].join('');
+    header = `<div class="acct-ov">
+      <div class="ov-tag">${a.idl_name ? 'Program · IDL' : 'Program'}</div>
+      <div class="ov-name">${esc(a.idl_name || short(address))}</div>${rows}</div>`;
+  } else {
+    const rows = [
+      ovRow('Address', copyPill(a.address, a.address)),
+      ovRow('Owner', progPill(a.owner)),
+      ovRow('Balance', fmtSol(a.lamports)),
+      ovRow('Data size', a.data_len + ' bytes'),
+    ].join('');
+    const fields = a.decoded ? a.decoded.fields.map(f =>
+      `<div class="ov-row"><span class="ovk">${esc(f.name)} <span class="ovoff">${esc(f.type)}</span></span>` +
+      `<span class="ovv" style="word-break:break-all">${esc(f.value)}</span></div>`).join('') : '';
+    header = `<div class="acct-ov">
+      <div class="ov-tag">${esc(a.decoded ? a.decoded.type_name : 'Account')}</div>
+      <div class="ov-name">${esc(short(address))}</div>${rows}
+      ${fields ? `<div class="ov-fields-label">decoded fields</div>${fields}` : ''}</div>`;
+  }
+
+  const list = sigs.length
+    ? `<h2>Recent transactions · ${sigs.length}</h2>` + sigs.map(s =>
+        `<div class="txrow" data-sig="${esc(s.signature)}">
+           <span class="st ${s.err ? 'err' : 'ok'}"></span>
+           <span class="sig">${esc(s.signature)}</span>
+           ${s.slot != null ? `<span class="slot">slot ${fmt(s.slot)}</span>` : ''}
+           <span class="when">${esc(timeAgo(s.block_time))}</span>
+           <span class="go">analyze →</span>
+         </div>`).join('')
+    : '<div class="empty" style="padding:10px 2px">no transactions</div>';
+
+  box.innerHTML = header + list;
   box.querySelectorAll('.txrow').forEach(row => row.addEventListener('click', () => {
     $('sig').value = row.dataset.sig;
     analyze();
   }));
+  wireCopy(box);
 }
 
 async function analyze() {

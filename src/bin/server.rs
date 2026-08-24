@@ -169,6 +169,25 @@ async fn preflight_handler(
     }
 }
 
+/// GET /account/:address — explorer-style overview of an account or program.
+async fn account_handler(
+    Path(address): Path<String>,
+    Query(q): Query<ClusterQuery>,
+) -> Result<Json<svmscope::AccountOverview>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let result = tokio::task::spawn_blocking(move || {
+        let client = RpcClient::new(url);
+        svmscope::account_overview(&client, &address)
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+
+    match result {
+        Ok(ov) => Ok(Json(ov)),
+        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+    }
+}
+
 /// GET /signatures/:address — recent transactions for an account/program (explorer-style).
 async fn signatures_handler(
     Path(address): Path<String>,
@@ -257,6 +276,7 @@ async fn main() {
         .route("/simulate", post(simulate_handler))
         .route("/simulate_suite", post(suite_handler))
         .route("/preflight", post(preflight_handler))
+        .route("/account/{address}", get(account_handler))
         .route("/signatures/{address}", get(signatures_handler))
         .route("/replay/{signature}", get(replay_handler))
         .route("/freeze/{signature}", get(freeze_handler))

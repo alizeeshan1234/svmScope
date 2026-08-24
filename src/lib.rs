@@ -119,6 +119,122 @@ fn resolve_signature(client: &RpcClient, input: &str) -> Result<String, String> 
     Ok(input.to_string())
 }
 
+/// An account/program's on-chain overview — what an explorer's address page shows.
+#[derive(Serialize)]
+pub struct AccountOverview {
+    pub address: String,
+    pub exists: bool,
+    pub owner: String,
+    pub lamports: u64,
+    pub executable: bool,
+    pub data_len: usize,
+    /// Program deployment details, when the address is an executable program.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program: Option<ProgramInfo>,
+    /// The program's name from its on-chain Anchor IDL, if published.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idl_name: Option<String>,
+    /// Decoded fields for a recognized data account (SPL or IDL).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decoded: Option<decode::DecodedAccount>,
+}
+
+#[derive(Serialize)]
+pub struct ProgramInfo {
+    pub program_data: String,
+    pub upgradeable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upgrade_authority: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_deployed_slot: Option<u64>,
+}
+
+/// Fetch an account's raw state: (owner, lamports, executable, data). None if it
+/// doesn't exist.
+fn get_account_raw(client: &RpcClient, address: &str) -> Option<(String, u64, bool, Vec<u8>)> {
+    use base64::Engine;
+    let resp: serde_json::Value = client
+        .send(RpcRequest::GetAccountInfo, json!([address, { "encoding": "base64" }]))
+        .ok()?;
+    let v = &resp["value"];
+    if v.is_null() {
+        return None;
+    }
+    let owner = v["owner"].as_str()?.to_string();
+    let lamports = v["lamports"].as_u64()?;
+    let executable = v["executable"].as_bool().unwrap_or(false);
+    let data = v["data"][0]
+        .as_str()
+        .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+        .unwrap_or_default();
+    Some((owner, lamports, executable, data))
+}
+
+/// Program deployment details from the (upgradeable) loader accounts.
+fn program_info(client: &RpcClient, program_data_bytes: &[u8], owner: &str) -> Option<ProgramInfo> {
+    const UPGRADEABLE: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
+    const LOADER_V2: &str = "BPFLoader2111111111111111111111111111111111";
+
+    if owner == UPGRADEABLE && program_data_bytes.len() >= 36 {
+        // Program account: [0..4]=variant, [4..36]=programdata address.
+        let pd_bytes: [u8; 32] = program_data_bytes[4..36].try_into().ok()?;
+        let pd_addr = Address::from(pd_bytes).to_string();
+        if let Some((_, _, _, pd)) = get_account_raw(client, &pd_addr) {
+            // ProgramData: [0..4]=variant, [4..12]=slot, [12]=Option tag, [13..45]=authority.
+            let slot = pd.get(4..12).map(|s| u64::from_le_bytes(s.try_into().unwrap()));
+            let (upgradeable, authority) = if pd.len() >= 45 && pd[12] == 1 {
+                let a: [u8; 32] = pd[13..45].try_into().unwrap();
+                (true, Some(Address::from(a).to_string()))
+            } else {
+                (false, None)
+            };
+            return Some(ProgramInfo { program_data: pd_addr, upgradeable, upgrade_authority: authority, last_deployed_slot: slot });
+        }
+        return Some(ProgramInfo { program_data: pd_addr, upgradeable: true, upgrade_authority: None, last_deployed_slot: None });
+    }
+    if owner == LOADER_V2 {
+        return Some(ProgramInfo { program_data: String::new(), upgradeable: false, upgrade_authority: None, last_deployed_slot: None });
+    }
+    None
+}
+
+/// An explorer-style overview of any account or program address.
+pub fn account_overview(client: &RpcClient, address: &str) -> Result<AccountOverview, String> {
+    let address = address.trim();
+    if Address::from_str(address).is_err() {
+        return Err(format!("not a valid address: {address}"));
+    }
+    let Some((owner, lamports, executable, data)) = get_account_raw(client, address) else {
+        return Ok(AccountOverview {
+            address: address.to_string(), exists: false, owner: String::new(),
+            lamports: 0, executable: false, data_len: 0, program: None, idl_name: None, decoded: None,
+        });
+    };
+
+    let mut ov = AccountOverview {
+        address: address.to_string(), exists: true, owner: owner.clone(),
+        lamports, executable, data_len: data.len(), program: None, idl_name: None, decoded: None,
+    };
+
+    if executable {
+        ov.program = program_info(client, &data, &owner);
+        ov.idl_name = Address::from_str(address).ok().and_then(|a| idl::fetch_idl_json(client, a)).and_then(|idl| {
+            idl.get("metadata")
+                .and_then(|m| m.get("name"))
+                .or_else(|| idl.get("name"))
+                .and_then(|n| n.as_str())
+                .map(String::from)
+        });
+    } else {
+        // Reuse the decoder for recognized data accounts (SPL / IDL).
+        ov.decoded = decode::describe_accounts(client, &[address.to_string()])
+            .into_iter()
+            .next()
+            .and_then(|a| a.decoded);
+    }
+    Ok(ov)
+}
+
 /// One entry in an address's recent transaction history.
 #[derive(Serialize)]
 pub struct SigInfo {
