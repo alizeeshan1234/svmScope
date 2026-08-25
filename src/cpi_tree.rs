@@ -8,6 +8,14 @@ pub struct CpiEntry {
     pub index: usize,
     pub program: String,
     pub stack_height: u64,
+    /// Decoded instruction name (e.g. "Route V2"), filled in by `analyze` where an
+    /// IDL or a known native layout lets us name it. `None` = couldn't decode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Raw instruction data, kept only so `analyze` can decode the name; never
+    /// serialized to the client.
+    #[serde(skip)]
+    pub data: Vec<u8>,
 }
 
 /// Build the CPI call tree as a flat list; nesting is carried by `stack_height`
@@ -25,13 +33,19 @@ pub fn build_cpi_tree(tx: &Value) -> Vec<CpiEntry> {
         account_keys.get(i).cloned()
     };
 
+    // Instruction data is base58 in `json` encoding; keep the raw bytes so the
+    // caller can decode an instruction name from them.
+    let data_of = |ix: &Value| -> Vec<u8> {
+        ix["data"].as_str().and_then(|s| bs58::decode(s).into_vec().ok()).unwrap_or_default()
+    };
+
     let mut entries: Vec<CpiEntry> = Vec::new();
 
     for (index, ix) in instructions.iter().enumerate() {
         let Some(program) = program_at(ix) else { continue };
 
         // Top-level instruction.
-        entries.push(CpiEntry { index, program, stack_height: 1 });
+        entries.push(CpiEntry { index, program, stack_height: 1, name: None, data: data_of(ix) });
 
         // No inner group just means this instruction made no CPIs — that's normal.
         let my_group = tx["meta"]["innerInstructions"]
@@ -46,7 +60,7 @@ pub fn build_cpi_tree(tx: &Value) -> Vec<CpiEntry> {
                 // Old transactions (pre-v1.14.6 meta) report no stackHeight; a
                 // direct CPI (depth 2) is the faithful default there.
                 let stack_height = inner["stackHeight"].as_u64().unwrap_or(2);
-                entries.push(CpiEntry { index, program, stack_height });
+                entries.push(CpiEntry { index, program, stack_height, name: None, data: data_of(inner) });
             }
         }
     }

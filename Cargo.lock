@@ -6161,6 +6161,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "bincode",
+ "bs58",
  "clap",
  "flate2",
  "litesvm",

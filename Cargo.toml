@@ -9,6 +9,7 @@ axum = "0.8.9"
 tower-http = { version = "0.6", features = ["cors"] }
 base64 = "0.23.1"
 bincode = "=1.3.3"
+bs58 = "0.5"
 clap = { version = "4", features = ["derive"] }
 flate2 = "1.1.9"
 litesvm = "0.15.2"

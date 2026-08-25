@@ -586,6 +586,16 @@ body::after {
 .ov-stat .l { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); }
 .ov-stat .v { font-size: 15px; font-weight: 600; font-family: var(--font-mono); font-variant-numeric: tabular-nums; margin-top: 2px; }
 .ov-progs { display: flex; gap: var(--s-2); flex-wrap: wrap; padding: 0 var(--s-6) var(--s-5); }
+/* secondary metadata strip (fee payer, version, timestamp, blockhash…) */
+.ov-meta {
+  display: flex; flex-wrap: wrap; gap: var(--s-4) var(--s-8);
+  padding: var(--s-4) var(--s-6);
+  border-top: 1px solid var(--border);
+  background: rgba(255,255,255,.014);
+}
+.ov-m { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ov-m .l { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); }
+.ov-m .v { font-size: 12.5px; color: var(--text-2); font-family: var(--font-mono); }
 
 /* ---------- program chips / address pills ---------- */
 .prog { display: inline-flex; align-items: center; gap: var(--s-2); min-width: 0; }
@@ -614,6 +624,11 @@ body::after {
 .tnode .rail { color: var(--border-strong); font-family: var(--font-mono); font-size: 12px; white-space: pre; flex: 0 0 auto; }
 .tnode .ix { color: var(--brand-strong); font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; flex: 0 0 auto; width: 24px; }
 .tnode .depth { font-size: 10.5px; color: var(--text-3); font-family: var(--font-mono); margin-left: auto; }
+.tnode .ixname {
+  font-size: 11.5px; font-weight: 600; color: var(--brand-strong);
+  background: var(--brand-soft); border: 1px solid var(--brand-border);
+  border-radius: 6px; padding: 1px 8px; white-space: nowrap;
+}
 
 /* ---------- data rows (compute, balances, tokens) ---------- */
 .rows { display: flex; flex-direction: column; }
@@ -631,6 +646,8 @@ body::after {
 .amt { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
 .amt.pos { color: var(--green); }
 .amt.neg { color: var(--red); }
+.amt-col { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+.post-bal { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 11px; color: var(--text-3); white-space: nowrap; }
 .tok-sym { font-weight: 650; font-size: 13px; }
 .tok-meta { color: var(--text-3); font-size: 11px; font-family: var(--font-mono); margin-top: 2px; }
 .sub-owner { color: var(--text-2); font-size: 12px; }
@@ -1411,6 +1428,17 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const short = (a) => a && a.length > 12 ? a.slice(0, 4) + '…' + a.slice(-4) : (a || '');
 const fmt = (n) => Number(n).toLocaleString('en-US');
+// Unix seconds → "Aug 25, 2026 · 16:20 UTC" (matches how explorers show block time).
+function fmtUtc(sec) {
+  const d = new Date(sec * 1000);
+  const s = d.toLocaleString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC',
+  });
+  // "Aug 25, 2026, 16:20" → "Aug 25, 2026 · 16:20 UTC" (split date from time only).
+  const i = s.lastIndexOf(', ');
+  return (i < 0 ? s : s.slice(0, i) + ' · ' + s.slice(i + 2)) + ' UTC';
+}
 
 let analysis = null, currentSig = '', mutations = [], mutableAccounts = [];
 
@@ -1570,6 +1598,18 @@ function renderOverview(o, compute) {
   ];
   if (o.slot != null) stats.push(['Slot', fmt(o.slot)]);
   const progs = o.top_programs.map(progPill).join('');
+
+  // A secondary detail strip — the metadata a block explorer surfaces.
+  const meta = [];
+  if (o.fee_payer) meta.push(['Fee payer', copyPill(o.fee_payer, short(o.fee_payer))]);
+  if (o.version) meta.push(['Version', esc(o.version)]);
+  if (o.account_count) meta.push(['Accounts', fmt(o.account_count)]);
+  if (o.block_time != null) meta.push(['Timestamp', esc(fmtUtc(o.block_time))]);
+  if (o.recent_blockhash) meta.push(['Blockhash', copyPill(o.recent_blockhash, short(o.recent_blockhash))]);
+  const metaRow = meta.length
+    ? `<div class="ov-meta">${meta.map(([l, v]) => `<div class="ov-m"><span class="l">${l}</span><span class="v">${v}</span></div>`).join('')}</div>`
+    : '';
+
   $('overview').innerHTML = `
     <div class="overview">
       <div class="ov-top">
@@ -1585,8 +1625,10 @@ function renderOverview(o, compute) {
           ${stats.map(([l, v]) => `<div class="ov-stat"><div class="l">${l}</div><div class="v">${esc(v)}</div></div>`).join('')}
         </div>
       </div>
+      ${metaRow}
       <div class="ov-progs">${progs}</div>
     </div>`;
+  wireCopy($('overview'));
 }
 
 function renderTree(entries) {
@@ -1595,7 +1637,10 @@ function renderTree(entries) {
     const depth = Math.max(1, e.stack_height);
     const rail = depth > 1 ? '│   '.repeat(depth - 2) + '└── ' : '';
     const ix = depth === 1 ? `<span class="ix">#${e.index}</span>` : `<span class="ix"></span>`;
-    return `<div class="tnode">${ix}<span class="rail">${rail}</span>${progChip(e.program)}` +
+    // The decoded instruction name — "Route V2", "Swap V2", "Transfer" — is what
+    // turns a wall of program ids into a readable call trace.
+    const nm = e.name ? `<span class="ixname">${esc(e.name)}</span>` : '';
+    return `<div class="tnode">${ix}<span class="rail">${rail}</span>${progChip(e.program)}${nm}` +
            (depth > 1 ? `<span class="depth">depth ${depth}</span>` : '') + `</div>`;
   }).join('');
 }
@@ -1616,8 +1661,9 @@ function renderDiffs(changes) {
   if (!changes.length) { $('diffs').innerHTML = '<div class="empty">no SOL balance changes</div>'; return; }
   $('diffs').innerHTML = changes.map(c => {
     const cls = c.delta >= 0 ? 'pos' : 'neg', sign = c.delta >= 0 ? '+' : '−';
+    const post = c.post != null ? `<div class="post-bal">${fmtSol(c.post)}</div>` : '';
     return `<div class="row"><div class="grow">${copyPill(c.address)}</div>` +
-           `<div class="amt ${cls}">${sign}${fmtSol(Math.abs(c.delta))}</div></div>`;
+           `<div class="amt-col"><div class="amt ${cls}">${sign}${fmtSol(Math.abs(c.delta))}</div>${post}</div></div>`;
   }).join('');
 }
 

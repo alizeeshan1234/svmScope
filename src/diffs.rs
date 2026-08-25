@@ -6,7 +6,9 @@ use serde_json::Value;
 #[derive(serde::Serialize)]
 pub struct BalanceChange {
     pub address: String,
-    pub delta: i64
+    pub delta: i64,
+    /// Post-transaction lamport balance (what an explorer shows alongside the change).
+    pub post: u64,
 }
 
 /// A change in an SPL token account's balance, in raw base units (client
@@ -108,6 +110,7 @@ pub fn account_diffs(tx: &Value) -> Vec<BalanceChange> {
             balance_change.push(BalanceChange {
                 address: account_keys[i].clone(),
                 delta,
+                post: post_balance,
             });
         }
     }

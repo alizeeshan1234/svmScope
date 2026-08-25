@@ -12,6 +12,7 @@ pub mod diffs;
 pub mod replay;
 pub mod utils;
 pub mod idl;
+pub mod ixname;
 
 use serde::Serialize;
 use serde_json::json;
@@ -82,21 +83,45 @@ pub struct Overview {
     pub slot: Option<u64>,
     /// On-chain compute units consumed, if reported.
     pub compute_units: Option<u64>,
+    /// The account that paid the fee (the first signer).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fee_payer: Option<String>,
+    /// Transaction version — "legacy" or "v0".
+    pub version: String,
+    /// Block time (unix seconds), when the RPC reports it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_time: Option<i64>,
+    /// The recent blockhash the transaction was signed against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent_blockhash: Option<String>,
+    /// Number of accounts the transaction touched (static + lookup-table loaded).
+    pub account_count: usize,
     /// Top-level programs invoked, in order (the instruction programs).
     pub top_programs: Vec<String>,
 }
 
-fn build_overview(tx: &serde_json::Value, cpi_tree: &[cpi_tree::CpiEntry]) -> Overview {
+fn build_overview(tx: &serde_json::Value, cpi_tree: &[cpi_tree::CpiEntry], account_count: usize) -> Overview {
     let top_programs = cpi_tree
         .iter()
         .filter(|e| e.stack_height == 1)
         .map(|e| e.program.clone())
         .collect();
+    // `version` is a number (0) for v0, or the string "legacy".
+    let version = match &tx["version"] {
+        serde_json::Value::Number(n) => format!("v{n}"),
+        serde_json::Value::String(s) => s.clone(),
+        _ => "legacy".to_string(),
+    };
     Overview {
         success: tx["meta"]["err"].is_null(),
         fee: tx["meta"]["fee"].as_u64().unwrap_or(0),
         slot: tx["slot"].as_u64(),
         compute_units: tx["meta"]["computeUnitsConsumed"].as_u64(),
+        fee_payer: tx["transaction"]["message"]["accountKeys"][0].as_str().map(String::from),
+        version,
+        block_time: tx["blockTime"].as_i64(),
+        recent_blockhash: tx["transaction"]["message"]["recentBlockhash"].as_str().map(String::from),
+        account_count,
         top_programs,
     }
 }
@@ -288,10 +313,17 @@ pub fn analyze(client: &RpcClient, input: &str) -> Result<Analysis, String> {
 
     let account_keys = utils::resolve_account_keys(&tx);
 
-    let cpi_tree = cpi_tree::build_cpi_tree(&tx);
+    let mut cpi_tree = cpi_tree::build_cpi_tree(&tx);
+    // Name each instruction where we can — native layouts always, Anchor programs
+    // when they publish an IDL. One IDL fetch per distinct program, cached.
+    let mut idl_cache: std::collections::HashMap<String, Option<serde_json::Value>> =
+        std::collections::HashMap::new();
+    for e in &mut cpi_tree {
+        e.name = ixname::decode(client, &mut idl_cache, &e.program, &e.data);
+    }
     Ok(Analysis {
         signature,
-        overview: build_overview(&tx, &cpi_tree),
+        overview: build_overview(&tx, &cpi_tree, account_keys.len()),
         cpi_tree,
         balance_change: diffs::account_diffs(&tx),
         token_change: diffs::token_diffs(&tx),
