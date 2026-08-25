@@ -168,6 +168,12 @@ body::before {
 }
 .search .cluster:hover { border-color: var(--border-strong); color: var(--text-1); }
 .search .cluster:focus { outline: none; border-color: var(--brand-border); box-shadow: var(--ring); }
+.search .customrpc {
+  flex: 0 1 220px; min-width: 0;
+  font-family: var(--font-mono); font-size: 12px; color: var(--text-1);
+}
+.search .customrpc::placeholder { color: var(--text-3); }
+@media (max-width: 720px) { .search .customrpc { display: none; } }
 
 /* ---------- buttons ---------- */
 .btn {
@@ -1113,7 +1119,9 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
           <option value="devnet">Devnet</option>
           <option value="testnet">Testnet</option>
           <option value="localnet">Localnet</option>
+          <option value="custom">Custom RPC…</option>
         </select>
+        <input id="customRpc" class="cluster customrpc hidden" placeholder="https://your-rpc…" spellcheck="false" autocomplete="off" title="Custom RPC endpoint" />
         <!-- Global clock: everything on the page simulates at this point in time -->
         <div class="clockctl">
           <button class="cluster clockbtn" id="clockBtn" title="Simulate at a different point in time">
@@ -1415,9 +1423,21 @@ const API = (new URLSearchParams(location.search).get('api')
 const api = (path, init) => fetch(API + path, init);
 
 // Selected cluster — appended to GET requests and merged into POST bodies so one
-// instance serves mainnet / devnet / testnet / localnet.
+// instance serves mainnet / devnet / testnet / localnet / a custom RPC endpoint.
 const currentCluster = () => $('cluster').value;
-const clusterQ = () => '?cluster=' + encodeURIComponent(currentCluster());
+// Request params for the current selection: a named cluster, or {rpc:<url>} when
+// "Custom RPC…" is chosen (the backend prefers an explicit rpc over a cluster).
+function clusterParams() {
+  if ($('cluster').value === 'custom') {
+    const url = ($('customRpc').value || '').trim();
+    return url ? { rpc: url } : {}; // empty custom → backend default (mainnet)
+  }
+  return { cluster: $('cluster').value };
+}
+const clusterQ = () => {
+  const q = new URLSearchParams(clusterParams()).toString();
+  return q ? '?' + q : '';
+};
 
 // ---------------- known-program & known-mint registries ----------------
 const PROGRAMS = {
@@ -1681,7 +1701,7 @@ function renderReplayPanel() {
     $('replay').innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>replaying at the selected time…</div>';
     api('/replay_report', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, mutations: [], time_travel: timeTravel, cluster: currentCluster() }),
+      body: JSON.stringify({ signature: currentSig, mutations: [], time_travel: timeTravel, ...clusterParams() }),
     })
       .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
       .then(rep => renderReport(rep, $('replay')))
@@ -1802,7 +1822,7 @@ async function runSuite() {
       return s;
     });
     const res = await api('/simulate_suite', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, scenarios, time_travel: timeTravel, cluster: currentCluster() }) });
+      body: JSON.stringify({ signature: currentSig, scenarios, time_travel: timeTravel, ...clusterParams() }) });
     if (!res.ok) throw new Error(await res.text());
     const outcomes = await res.json();
     outcomes.forEach((o, i) => {
@@ -2224,7 +2244,7 @@ async function simulate() {
     // Need the un-mutated baseline for the before/after comparison; fetch it lazily.
     const before = await ensureBaseline();
     const res = await api('/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m), time_travel: timeTravel, cluster: currentCluster() }) });
+      body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m), time_travel: timeTravel, ...clusterParams() }) });
     if (!res.ok) throw new Error(await res.text());
     showResult(before, await res.json(), { n: toSend.length });
   } catch (e) { flashSim('error: ' + e.message, true); }
@@ -2629,7 +2649,7 @@ async function runPreflight() {
     if (!b64) throw new Error('paste a base64 transaction first');
     const res = await api('/preflight_report', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transaction: b64, mutations: [], time_travel: timeTravel, cluster: currentCluster() }),
+      body: JSON.stringify({ transaction: b64, mutations: [], time_travel: timeTravel, ...clusterParams() }),
     });
     if (!res.ok) throw new Error(await res.text());
     renderReport(await res.json(), $('simOut'));
@@ -2809,6 +2829,7 @@ document.querySelectorAll('.ex-chip[data-ex]').forEach(c => c.addEventListener('
   if (exBusy) return;
   exBusy = true;
   $('cluster').value = 'mainnet';
+  $('customRpc').classList.add('hidden');
   // Immediate feedback: the engine can cold-start ~10s, so never leave the click
   // looking dead. Show the landing spinner right away.
   const chips = document.querySelectorAll('.ex-chip');
@@ -2836,6 +2857,14 @@ document.addEventListener('keydown', e => {
   e.preventDefault();
   (!$('hero').classList.contains('hidden') ? $('heroSig') : $('sig')).focus();
 });
+// Reveal the custom-RPC input only when "Custom RPC…" is selected.
+$('cluster').addEventListener('change', () => {
+  const custom = $('cluster').value === 'custom';
+  $('customRpc').classList.toggle('hidden', !custom);
+  if (custom) $('customRpc').focus();
+});
+// Re-run the current view when the custom endpoint changes (Enter or blur).
+$('customRpc').addEventListener('keydown', e => { if (e.key === 'Enter' && currentSig) runInput(); });
 $('acctFilter').addEventListener('input', e => filterAccounts(e.target.value));
 $('expandAll').addEventListener('click', toggleExpandAll);
 $('stageBtn').addEventListener('click', stageAll);

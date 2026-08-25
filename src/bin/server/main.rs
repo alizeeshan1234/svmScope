@@ -31,19 +31,28 @@ fn rpc_url() -> String {
         .unwrap_or_else(|_| DEFAULT_RPC.to_string())
 }
 
+/// Read an env var only if it holds an http(s) URL.
+fn env_http(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| v.starts_with("http"))
+}
+
 /// A per-cluster RPC override, so a deployment can use its own (faster, higher
 /// rate-limit) endpoint for each cluster:
 ///   SVMSCOPE_RPC_URL_MAINNET / _DEVNET / _TESTNET
-/// Falls back to the generic default for mainnet, and the public endpoints
-/// otherwise (handled by resolve_rpc).
+///
+/// Mainnet also falls back to the generic `SVMSCOPE_RPC_URL` / `RPC_URL`, because
+/// the UI always tags its requests `cluster=mainnet` — so setting that single var
+/// to a paid endpoint "just works" for the traffic that actually flows, instead of
+/// being silently ignored in favour of the public node.
 fn cluster_env_rpc(cluster: Option<&str>) -> Option<String> {
-    let key = match cluster.map(|c| c.trim().to_ascii_lowercase()).as_deref() {
-        Some("devnet") | Some("d") => "SVMSCOPE_RPC_URL_DEVNET",
-        Some("testnet") | Some("t") => "SVMSCOPE_RPC_URL_TESTNET",
-        Some("mainnet") | Some("mainnet-beta") | Some("m") => "SVMSCOPE_RPC_URL_MAINNET",
-        _ => return None,
-    };
-    std::env::var(key).ok().filter(|v| v.starts_with("http"))
+    match cluster.map(|c| c.trim().to_ascii_lowercase()).as_deref() {
+        Some("devnet") | Some("d") => env_http("SVMSCOPE_RPC_URL_DEVNET"),
+        Some("testnet") | Some("t") => env_http("SVMSCOPE_RPC_URL_TESTNET"),
+        Some("mainnet") | Some("mainnet-beta") | Some("m") => env_http("SVMSCOPE_RPC_URL_MAINNET")
+            .or_else(|| env_http("SVMSCOPE_RPC_URL"))
+            .or_else(|| env_http("RPC_URL")),
+        _ => None,
+    }
 }
 
 /// Per-request cluster selection: `?cluster=devnet` (or mainnet/testnet/localnet)
