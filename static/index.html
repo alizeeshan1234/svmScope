@@ -225,13 +225,24 @@ main { max-width: 1080px; margin: 0 auto; padding: var(--s-6) var(--s-6) 96px; }
   letter-spacing: -0.025em; line-height: 0.99;
   max-width: 980px;
 }
-.hero h1 .h1-line { display: block; animation: fade-up .6s var(--ease) both; }
-.hero h1 .h1-line:nth-child(2) { animation-delay: .08s; }
-.hero h1 .h1-line:nth-child(3) { animation-delay: .16s; }
-.hero h1 .grad {
-  background: linear-gradient(95deg, var(--brand-strong), var(--cyan));
-  -webkit-background-clip: text; background-clip: text; color: transparent;
+/* cinematic line-mask reveal */
+.hero h1 .h1-line { display: block; overflow: hidden; padding-bottom: .08em; margin-bottom: -.08em; }
+.hero h1 .h1-inner {
+  display: block;
+  transform: translateY(118%);
+  animation: rise 1s cubic-bezier(.19, 1, .22, 1) forwards;
 }
+.hero h1 .h1-line:nth-child(1) .h1-inner { animation-delay: .05s; }
+.hero h1 .h1-line:nth-child(2) .h1-inner { animation-delay: .16s; }
+.hero h1 .h1-line:nth-child(3) .h1-inner { animation-delay: .27s; }
+@keyframes rise { to { transform: translateY(0); } }
+.hero h1 .grad {
+  background: linear-gradient(95deg, var(--brand-strong), var(--cyan), #ec4899, var(--brand-strong));
+  background-size: 280% 100%;
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: shimmer 7s linear infinite;
+}
+@keyframes shimmer { to { background-position: 280% 0; } }
 /* the italic-serif counterpoint word — lowercase against the caps */
 .hero h1 .serif {
   font-family: var(--font-serif); font-style: italic; font-weight: 400;
@@ -268,6 +279,100 @@ body::after {
   40% { transform: translate(-3%,8%); } 50% { transform: translate(-8%,4%); }
   60% { transform: translate(8%,0); } 70% { transform: translate(0,6%); }
   80% { transform: translate(3%,10%); } 90% { transform: translate(-6%,3%); }
+}
+
+/* drifting aurora blobs — the page breathes */
+.aurora { position: fixed; inset: 0; z-index: -2; overflow: hidden; pointer-events: none; }
+.aurora b {
+  position: absolute; display: block; border-radius: 50%;
+  filter: blur(90px); will-change: transform;
+}
+.aurora .a1 {
+  width: 640px; height: 640px; left: -12%; top: -22%;
+  background: radial-gradient(circle, rgba(153,69,255,.20), transparent 62%);
+  animation: drift1 26s ease-in-out infinite alternate;
+}
+.aurora .a2 {
+  width: 560px; height: 560px; right: -10%; top: -14%;
+  background: radial-gradient(circle, rgba(34,211,238,.12), transparent 62%);
+  animation: drift2 32s ease-in-out infinite alternate;
+}
+.aurora .a3 {
+  width: 480px; height: 480px; left: 38%; top: 30%;
+  background: radial-gradient(circle, rgba(236,72,153,.08), transparent 62%);
+  animation: drift3 38s ease-in-out infinite alternate;
+}
+@keyframes drift1 { to { transform: translate(14vw, 12vh) scale(1.15); } }
+@keyframes drift2 { to { transform: translate(-12vw, 16vh) scale(0.9); } }
+@keyframes drift3 { to { transform: translate(-10vw, -14vh) scale(1.2); } }
+
+/* cursor spotlight — a soft beam that follows the pointer */
+#spot {
+  position: fixed; left: 0; top: 0; z-index: -1;
+  width: 860px; height: 860px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(153,69,255,.085), rgba(34,211,238,.03) 45%, transparent 65%);
+  pointer-events: none;
+  will-change: transform;
+}
+
+/* the self-typing replay terminal */
+.term-shell { width: min(780px, 100%); margin-top: var(--s-10); perspective: 1100px; }
+.term {
+  text-align: left;
+  border-radius: var(--r-lg);
+  border: 1px solid transparent;
+  background:
+    linear-gradient(rgba(10,11,16,.92), rgba(10,11,16,.92)) padding-box,
+    linear-gradient(160deg, rgba(153,69,255,.45), rgba(255,255,255,.08) 38%, rgba(34,211,238,.35)) border-box;
+  box-shadow: var(--shadow-3), 0 0 80px -30px rgba(153,69,255,.55);
+  overflow: hidden;
+  transition: transform .25s var(--ease);
+  will-change: transform;
+}
+.term-bar {
+  display: flex; align-items: center; gap: var(--s-2);
+  padding: 10px var(--s-4);
+  border-bottom: 1px solid var(--border);
+  background: rgba(255,255,255,.025);
+}
+.term-bar .td { width: 11px; height: 11px; border-radius: var(--r-full); }
+.term-bar .td:nth-child(1) { background: #ff5f57; }
+.term-bar .td:nth-child(2) { background: #febc2e; }
+.term-bar .td:nth-child(3) { background: #28c840; }
+.term-bar .tt {
+  flex: 1; text-align: center;
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-3);
+}
+.term-body {
+  padding: var(--s-4) var(--s-5) var(--s-5);
+  font-family: var(--font-mono); font-size: 12.5px; line-height: 1.9;
+  min-height: 244px;
+  color: var(--text-2);
+}
+.term-body .t-line { white-space: pre-wrap; word-break: break-all; }
+.term-body .t-p { color: var(--green); font-weight: 600; }
+.term-body .t-ok { color: var(--green); font-weight: 600; }
+.term-body .t-bad { color: var(--red); font-weight: 600; }
+.term-body .t-br { color: var(--brand-strong); font-weight: 600; }
+.term-body .t-cy { color: var(--cyan); }
+.term-body .t-dim { color: var(--text-3); }
+.term-body b { color: var(--text-1); font-weight: 600; }
+.caret {
+  display: inline-block; width: 7px; height: 15px; vertical-align: -2px;
+  background: var(--brand-strong);
+  animation: blink 1.05s steps(1) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* scroll-in reveals */
+.reveal { opacity: 0; transform: translateY(26px); transition: opacity .8s var(--ease), transform .8s var(--ease); }
+.reveal.in { opacity: 1; transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .aurora b, .hero h1 .grad, .caret, .ticker-track, body::after { animation: none !important; }
+  .hero h1 .h1-inner { animation-duration: 0.01s; }
+  #spot { display: none; }
+  .reveal { opacity: 1; transform: none; transition: none; }
 }
 
 /* full-bleed replay ticker — real output, endlessly scrolling */
@@ -983,6 +1088,8 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 </style>
 </head>
 <body>
+  <div class="aurora" aria-hidden="true"><b class="a1"></b><b class="a2"></b><b class="a3"></b></div>
+  <div id="spot" aria-hidden="true"></div>
   <div class="topbar">
     <div class="topbar-inner">
       <div class="logo" id="brand" title="Home">
@@ -1050,9 +1157,9 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
     <div id="hero" class="hero">
       <div class="eyebrow"><span class="bkt">[</span><span class="pulse"></span> the Solana transaction simulation layer <span class="bkt">]</span></div>
       <h1>
-        <span class="h1-line">Decode, replay</span>
-        <span class="h1-line">&amp; <span class="serif grad">mutate</span> any</span>
-        <span class="h1-line"><span class="hollow">transaction</span></span>
+        <span class="h1-line"><span class="h1-inner">Decode, replay</span></span>
+        <span class="h1-line"><span class="h1-inner">&amp; <span class="serif grad">mutate</span> any</span></span>
+        <span class="h1-line"><span class="h1-inner"><span class="hollow">transaction</span></span></span>
       </h1>
       <p>Reconstruct the exact state a Solana transaction ran against, re-execute the real
          programs locally, then rewrite an account's fields to ask <span class="serif">“what if?”</span></p>
@@ -1077,7 +1184,17 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 
       <div class="hint">press <kbd>/</kbd> to search anytime</div>
 
-      <div class="ticker" aria-hidden="true">
+      <div class="term-shell reveal">
+        <div class="term" id="termTilt">
+          <div class="term-bar" aria-hidden="true">
+            <span class="td"></span><span class="td"></span><span class="td"></span>
+            <span class="tt">replay — svmscope</span>
+          </div>
+          <div class="term-body" id="termBody" aria-hidden="true"></div>
+        </div>
+      </div>
+
+      <div class="ticker reveal" aria-hidden="true">
         <div class="ticker-track">
           <span class="ti"><b class="br">Program JUP6…TaV4</b> invoke [1]</span><span class="sep">◆</span>
           <span class="ti">consumed <b>178,113</b> of 200,000 CU</span><span class="sep">◆</span>
@@ -1103,7 +1220,7 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
       </div>
 
       <div class="features">
-        <div class="feature">
+        <div class="feature reveal">
           <div class="fi" aria-hidden="true">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <path d="M6 4v10a3 3 0 0 0 3 3h9"/><circle cx="6" cy="4" r="1.6" fill="currentColor" stroke="none"/>
@@ -1113,7 +1230,7 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
           <h3>Decode</h3>
           <p>The full cross-program call tree, balance flows and compute per program — lookup tables resolved, accounts named via on-chain IDLs.</p>
         </div>
-        <div class="feature f-green">
+        <div class="feature reveal f-green">
           <div class="fi" aria-hidden="true">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M4 5v14l16-7z" fill="currentColor" stroke="none"/>
@@ -1122,7 +1239,7 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
           <h3>Replay locally</h3>
           <p>Rebuilds the world the transaction ran in — every account and program binary — and re-executes the real code in an embedded SVM.</p>
         </div>
-        <div class="feature f-cyan">
+        <div class="feature reveal f-cyan">
           <div class="fi" aria-hidden="true">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <path d="M4 8h10M18 8h2M4 16h2M10 16h10"/><circle cx="16" cy="8" r="2.2"/><circle cx="7" cy="16" r="2.2"/>
@@ -1131,7 +1248,7 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
           <h3>Ask “what if?”</h3>
           <p>Rewrite a pool reserve, an oracle price, any account's bytes — then replay and diff to see what would have happened instead.</p>
         </div>
-        <div class="feature f-amber">
+        <div class="feature reveal f-amber">
           <div class="fi" aria-hidden="true">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
               <circle cx="12" cy="12" r="8.2"/><path d="M12 7.5V12l3 2.4"/>
@@ -1142,7 +1259,7 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
         </div>
       </div>
 
-      <div class="hero-cta">
+      <div class="hero-cta reveal">
         <button class="btn ghost" id="openSim">⚡ Simulate a transaction before sending it</button>
       </div>
     </div>
@@ -2578,6 +2695,89 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
   $('tabPaste').classList.toggle('hidden', t.dataset.tab !== 'paste');
   $('tabBuild').classList.toggle('hidden', t.dataset.tab !== 'build');
 }));
+
+// ---------- landing theatrics: spotlight, typing terminal, tilt, reveals ----------
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// Cursor spotlight — lerped so it glides, not snaps.
+if (!reduceMotion && matchMedia('(pointer: fine)').matches) {
+  const spot = $('spot');
+  let tx = innerWidth / 2, ty = innerHeight * 0.3, x = tx, y = ty;
+  addEventListener('pointermove', e => { tx = e.clientX; ty = e.clientY; }, { passive: true });
+  (function glide() {
+    x += (tx - x) * 0.07; y += (ty - y) * 0.07;
+    spot.style.transform = `translate(${x - 430}px, ${y - 430}px)`;
+    requestAnimationFrame(glide);
+  })();
+} else { $('spot').remove(); }
+
+// The terminal types the product's whole pitch on loop:
+// replay fails honestly → mutate reality → success → warp time.
+const termScript = [
+  { cmd: 'svmscope 5Q32pWmaGsNBRU18s…Y8aZtUG9' },
+  { out: '<span class="t-br">#3 JUP6…TaV4</span> <span class="t-dim">Jupiter Aggregator v6</span>' },
+  { out: '<span class="t-dim">   └─</span> BiSo…Uypi <span class="t-dim">└─</span> Toke…Q5DA' },
+  { out: '<span class="t-dim">-- replay --</span> loaded <b>22 accounts</b> + <b>6 program ELFs</b> into the SVM' },
+  { out: 'REPLAY: <span class="t-bad">failed ✗</span>  Custom(6024) — <span class="t-bad">SlippageExceeded</span>' },
+  { pause: 1100 },
+  { cmd: 'svmscope 5Q32pWma… --mutate pool.reserve:+2%' },
+  { out: 'MUTATED REPLAY: <span class="t-ok">success ✓</span>  <span class="t-dim">178,113 CU</span>' },
+  { pause: 900 },
+  { cmd: 'svmscope test suite.json' },
+  { out: '<span class="t-cy">⏱ clock warped +30 days</span> — vesting claim: <span class="t-ok">PASS</span>' },
+  { out: '<span class="t-ok">6/6 scenarios passed</span> <span class="t-dim">— deterministic, offline</span>' },
+  { pause: 3400 },
+];
+(async function termLoop() {
+  const body = $('termBody');
+  if (!body) return;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const caret = '<span class="caret"></span>';
+  for (;;) {
+    body.innerHTML = '';
+    for (const step of termScript) {
+      if (step.pause) { await sleep(reduceMotion ? 60 : step.pause); continue; }
+      const line = document.createElement('div');
+      line.className = 't-line';
+      body.appendChild(line);
+      if (step.cmd) {
+        for (let i = 0; i <= step.cmd.length; i++) {
+          line.innerHTML = '<span class="t-p">$ </span>' + esc(step.cmd.slice(0, i)) + caret;
+          await sleep(reduceMotion ? 0 : 26);
+        }
+        line.innerHTML = '<span class="t-p">$ </span>' + esc(step.cmd);
+        await sleep(reduceMotion ? 0 : 300);
+      } else {
+        line.innerHTML = step.out;
+        await sleep(reduceMotion ? 0 : 170);
+      }
+    }
+  }
+})();
+
+// 3D tilt on the terminal, following the pointer.
+const tiltEl = $('termTilt');
+if (tiltEl && !reduceMotion && matchMedia('(pointer: fine)').matches) {
+  tiltEl.addEventListener('pointermove', e => {
+    const r = tiltEl.getBoundingClientRect();
+    const px = (e.clientX - r.left) / r.width - 0.5;
+    const py = (e.clientY - r.top) / r.height - 0.5;
+    tiltEl.style.transform = `rotateX(${(-py * 5).toFixed(2)}deg) rotateY(${(px * 7).toFixed(2)}deg)`;
+  });
+  tiltEl.addEventListener('pointerleave', () => { tiltEl.style.transform = ''; });
+}
+
+// Scroll-in reveals, staggered for siblings.
+const io = new IntersectionObserver(entries => {
+  entries.forEach((en, i) => {
+    if (en.isIntersecting) {
+      en.target.style.transitionDelay = `${(i % 4) * 70}ms`;
+      en.target.classList.add('in');
+      io.unobserve(en.target);
+    }
+  });
+}, { threshold: 0.12 });
+document.querySelectorAll('.reveal').forEach(el => io.observe(el));
 
 $('go').addEventListener('click', runInput);
 $('sig').addEventListener('keydown', e => { if (e.key === 'Enter') runInput(); });
