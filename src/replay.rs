@@ -21,12 +21,17 @@ const NATIVE_LOADER: &str = "NativeLoader1111111111111111111111111111111";
 const BPF_LOADER_2: &str = "BPFLoader2111111111111111111111111111111111";
 const BPF_LOADER_UPGRADEABLE: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, Default)]
 pub struct ReplayResult {
     pub success: bool,
     pub error: Option<String>,
+    /// The failure resolved to its human name via the program's IDL, e.g.
+    /// "SlippageToleranceExceeded" for a bare `Custom(6001)`. Filled in by the
+    /// library layer (which has RPC access); `None` when unresolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_name: Option<String>,
     pub logs: Vec<String>,
-    pub compute_units: u64
+    pub compute_units: u64,
 }
 
 fn b64_decode(s: &str) -> Vec<u8> {
@@ -742,15 +747,16 @@ fn to_replay_result(result: TransactionResult) -> ReplayResult {
     match result {
         Ok(meta) => ReplayResult {
             success: true,
-            error: None,
             logs: meta.logs,
             compute_units: meta.compute_units_consumed,
+            ..Default::default()
         },
         Err(failed) => ReplayResult {
             success: false,
             error: Some(format!("{:?}", failed.err)),
             logs: failed.meta.logs,
             compute_units: failed.meta.compute_units_consumed,
+            ..Default::default()
         },
     }
 }
@@ -758,7 +764,7 @@ fn to_replay_result(result: TransactionResult) -> ReplayResult {
 /// A replay that never ran because state couldn't be reconstructed (RPC error,
 /// missing transaction) — reported as a failed result instead of a panic.
 fn failed_result(error: String) -> ReplayResult {
-    ReplayResult { success: false, error: Some(error), logs: vec![], compute_units: 0 }
+    ReplayResult { success: false, error: Some(error), ..Default::default() }
 }
 
 /// Replay the transaction against the reconstructed state.
@@ -981,7 +987,7 @@ impl ReplayContext {
         for m in mutations {
             if let Err(e) = apply_mutation(&mut svm, m) {
                 return (
-                    ReplayResult { success: false, error: Some(e), logs: vec![], compute_units: 0 },
+                    ReplayResult { success: false, error: Some(e), ..Default::default() },
                     svm,
                 );
             }

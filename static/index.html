@@ -1860,7 +1860,9 @@ async function ensureBaseline() {
 // a replay reverted without having to know each program's error codes.
 function driftHint(r) {
   if (r.success) return '';
-  const blob = (r.error || '') + ' ' + (r.logs || []).join(' ');
+  // Include the IDL-resolved error name (e.g. "SlippageToleranceExceeded") so a
+  // bare Custom(6001) is still recognised as slippage.
+  const blob = (r.error || '') + ' ' + (r.error_name || '') + ' ' + (r.logs || []).join(' ');
   const table = [
     [/AccountOwnedByWrongProgram|owned by a different program/i, 'an account this transaction needs has since been closed or reallocated, so it is now owned by a different program'],
     [/AccountNotFound|no longer exists|InsufficientFunds|insufficient funds|insufficient lamports/i, 'an account the transaction needs no longer holds the state (or lamports) it did when this landed'],
@@ -1877,7 +1879,9 @@ function renderReplay(r) {
   const note = hint
     ? `<div class="drift-inline">This looks like <b>state drift</b>, not a bug: ${hint}. It succeeded on-chain — replaying against <i>current</i> state can differ. <b>❄ Freeze fixture</b> to pin the state, or try a recent / simpler transaction.</div>`
     : '';
-  const err = r.error ? `<div class="err-box">${esc(r.error)}</div>` : '';
+  // Lead the error box with the resolved name where we have one.
+  const errText = r.error ? (r.error_name ? `${r.error_name} — ${r.error}` : r.error) : '';
+  const err = errText ? `<div class="err-box">${esc(errText)}</div>` : '';
   const logs = r.logs && r.logs.length ? `<div class="logs">${renderLogs(r.logs)}</div>` : '';
   return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}`;
 }

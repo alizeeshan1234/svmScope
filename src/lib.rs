@@ -356,7 +356,19 @@ pub fn run_replay(client: &RpcClient, signature: &str) -> Result<replay::ReplayR
     }
     let account_keys = utils::resolve_account_keys(&tx);
     let pre = replay::PreState::from_meta(&tx, &account_keys);
-    Ok(replay::replay_transaction(client, signature, &account_keys, tx["slot"].as_u64(), &pre))
+    let mut r = replay::replay_transaction(client, signature, &account_keys, tx["slot"].as_u64(), &pre);
+    resolve_error_name(client, &mut r);
+    Ok(r)
+}
+
+/// Resolve a failed replay's bare error (`Custom(6001)`) to its human name from
+/// the program's IDL (e.g. "SlippageToleranceExceeded"), so callers — and the UI's
+/// drift hint — can reason about *what* failed, not just a numeric code.
+fn resolve_error_name(client: &RpcClient, r: &mut replay::ReplayResult) {
+    if r.success || r.error_name.is_some() {
+        return;
+    }
+    r.error_name = explain_error(client, r).map(|e| e.title);
 }
 
 /// Replay a transaction after applying what-if mutations (optionally with the
@@ -382,7 +394,9 @@ pub fn simulate(
     let pre = replay::PreState::from_meta(&tx, &account_keys);
     let mut ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
     ctx.set_time_travel(time_travel);
-    Ok(ctx.run(mutations))
+    let mut r = ctx.run(mutations);
+    resolve_error_name(client, &mut r);
+    Ok(r)
 }
 
 /// A simulation result enriched with what a developer actually needs: a
