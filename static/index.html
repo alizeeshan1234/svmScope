@@ -1006,7 +1006,8 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 .cp-grid .chip { width: 100%; padding: 6px 4px; font-size: 11.5px; text-align: center; }
 .cp-custom { display: flex; gap: var(--s-2); margin-top: var(--s-3); }
 .cp-custom .finput { padding: 7px var(--s-2); font-size: 12.5px; }
-.cp-custom #ttAmount { width: 70px; font-family: var(--font-mono); }
+.cp-custom #ttAmount { flex: 0 0 96px; width: 96px; min-width: 0; font-family: var(--font-mono); }
+.cp-custom #ttUnit { flex: 1 1 auto; min-width: 0; }
 .cp-state {
   margin-top: var(--s-3); padding-top: var(--s-3); border-top: 1px solid var(--border);
   color: var(--text-2); font-family: var(--font-mono); font-size: 11.5px; line-height: 1.5;
@@ -1482,9 +1483,11 @@ const toHex = (arr) => arr.map(b => b.toString(16).padStart(2, '0')).join('');
 function encodeField(field, val) {
   val = val.trim();
   switch (field.type) {
-    case 'u64': { const v = BigInt(val); if (v < 0n || v > 0xffffffffffffffffn) throw new Error(field.name + ': out of u64 range');
+    case 'u64': {
+      if (!/^\d+$/.test(val)) throw new Error(field.name + ': must be a whole number');
+      const v = BigInt(val); if (v > 0xffffffffffffffffn) throw new Error(field.name + ': out of u64 range');
       let hex = '', x = v; for (let i = 0; i < 8; i++) { hex += (x & 0xffn).toString(16).padStart(2, '0'); x >>= 8n; } return hex; }
-    case 'u8': { const v = Number(val); if (!Number.isInteger(v) || v < 0 || v > 255) throw new Error(field.name + ': must be 0–255'); return v.toString(16).padStart(2, '0'); }
+    case 'u8': { if (!/^\d+$/.test(val)) throw new Error(field.name + ': must be a whole number'); const v = Number(val); if (v > 255) throw new Error(field.name + ': must be 0–255'); return v.toString(16).padStart(2, '0'); }
     case 'bool': { const t = /^(1|true|yes)$/i.test(val), f = /^(0|false|no)$/i.test(val); if (!t && !f) throw new Error(field.name + ': must be true/false'); return t ? '01' : '00'; }
     case 'pubkey': { const bytes = bs58decode(val); if (bytes.length !== 32) throw new Error(field.name + ': not a 32-byte pubkey'); return toHex(bytes); }
     default: throw new Error(field.name + ': not editable');
@@ -2081,8 +2084,13 @@ function runInput() {
   if (!input) return;
   let len = null;
   try { len = bs58decode(input).length; } catch { /* not base58 */ }
-  if (len === 32) return showAddress(input);
-  return analyze();
+  if (len === 32) return showAddress(input);   // account / program address
+  if (len === 64) return analyze();            // transaction signature
+  // Anything else never reaches the RPC — a friendly nudge instead of a raw
+  // "-32602 WrongSize" bubbling up from the backend.
+  $('hero').classList.add('hidden'); $('out').classList.add('hidden'); $('txlist').classList.add('hidden');
+  const st = $('status'); st.className = 'status err'; st.classList.remove('hidden');
+  st.textContent = "That doesn't look like a Solana signature or address — paste a full transaction signature (~88 chars) or an account / program address (~44 chars).";
 }
 
 // Show an explorer-style address page: the account/program overview + its recent
@@ -2546,7 +2554,10 @@ function describeTT(tt) {
   if (tt.at_epoch != null) parts.push(`to epoch ${tt.at_epoch}`);
   if (tt.at_slot != null) parts.push(`to slot ${fmt(tt.at_slot)}`);
   const how = parts.join(' + ');
-  return `Simulating ${how.startsWith('to ') ? how : '+' + how + ' into the future'}.`;
+  if (how.startsWith('to ')) return `Simulating ${how}.`;
+  // Negative offsets travel to the past; the sign lives in the number, so read it.
+  const back = /(^|\s)-/.test(how);
+  return `Simulating ${how.replace('-', '')} ${back ? 'into the past' : 'into the future'}.`;
 }
 
 function setTimeTravel(tt, chipEl) {
@@ -2575,23 +2586,26 @@ function setTimeTravel(tt, chipEl) {
   if (typeof onClockChanged === 'function') onClockChanged();
 }
 
-/** Compact label for the header button, e.g. "+30d" or "+1 epoch". */
+/** Compact label for the header button, e.g. "+30d" or "−5d" or "+1 epoch". */
 function shortTT(tt) {
-  if (tt.epochs) return `+${tt.epochs} epoch${tt.epochs === 1 ? '' : 's'}`;
-  if (tt.slots) return `+${fmt(tt.slots)} slots`;
+  const sign = n => (n < 0 ? '−' : '+'); // real minus glyph, never "+-"
+  if (tt.epochs) return `${sign(tt.epochs)}${Math.abs(tt.epochs)} epoch${Math.abs(tt.epochs) === 1 ? '' : 's'}`;
+  if (tt.slots) return `${sign(tt.slots)}${fmt(Math.abs(tt.slots))} slots`;
   if (tt.seconds) {
-    const s = tt.seconds;
-    if (s % 31536000 === 0) return `+${s / 31536000}y`;
-    if (s % 86400 === 0) return `+${s / 86400}d`;
-    if (s % 3600 === 0) return `+${s / 3600}h`;
-    return `+${Math.round(s / 60)}m`;
+    const a = Math.abs(tt.seconds), sg = sign(tt.seconds);
+    if (a % 31536000 === 0) return `${sg}${a / 31536000}y`;
+    if (a % 86400 === 0) return `${sg}${a / 86400}d`;
+    if (a % 3600 === 0) return `${sg}${a / 3600}h`;
+    return `${sg}${Math.round(a / 60)}m`;
   }
   if (tt.at_unix_timestamp) return new Date(tt.at_unix_timestamp * 1000).toISOString().slice(0, 10);
   return 'shifted';
 }
 
 function applyCustomTT() {
-  const n = Number($('ttAmount').value);
+  // Time travel is forward-only (vesting cliffs, cooldowns, auctions all lie
+  // ahead); a stray minus sign just means "that many into the future".
+  const n = Math.abs(Number($('ttAmount').value));
   if (!n) { setTimeTravel({}, null); return; }
   const unit = $('ttUnit').value;
   const mult = { minutes: 60, hours: 3600, days: 86400 };
@@ -2667,13 +2681,19 @@ $('clockBtn').addEventListener('click', e => { e.stopPropagation(); $('clockPop'
 document.addEventListener('click', e => {
   if (!e.target.closest('.clockctl')) $('clockPop').classList.add('hidden');
 });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') $('clockPop').classList.add('hidden');
+});
 
 $('openSim').addEventListener('click', () => showSim(true));
 $('navSim').addEventListener('click', () => showSim(true));
 $('navAnalyze').addEventListener('click', () => showSim(false));
 $('brand').addEventListener('click', () => {
+  // Logo is always "home" — return to the landing hero regardless of state.
   showSim(false);
-  if (!analysis) { $('hero').classList.remove('hidden'); $('out').classList.add('hidden'); $('txlist').classList.add('hidden'); }
+  $('status').classList.add('hidden');
+  $('out').classList.add('hidden'); $('txlist').classList.add('hidden');
+  $('hero').classList.remove('hidden');
 });
 $('closeSim').addEventListener('click', () => showSim(false));
 $('runSim').addEventListener('click', runPreflight);
@@ -2784,14 +2804,28 @@ $('sig').addEventListener('keydown', e => { if (e.key === 'Enter') runInput(); }
 // Hero search proxies to the topbar input, so there's exactly one analyze path.
 $('heroGo').addEventListener('click', () => { $('sig').value = $('heroSig').value.trim(); runInput(); });
 $('heroSig').addEventListener('keydown', e => { if (e.key === 'Enter') $('heroGo').click(); });
+let exBusy = false;
 document.querySelectorAll('.ex-chip[data-ex]').forEach(c => c.addEventListener('click', async () => {
+  if (exBusy) return;
+  exBusy = true;
   $('cluster').value = 'mainnet';
-  // Jump straight into a dissection: grab the program's freshest transaction.
+  // Immediate feedback: the engine can cold-start ~10s, so never leave the click
+  // looking dead. Show the landing spinner right away.
+  const chips = document.querySelectorAll('.ex-chip');
+  chips.forEach(x => x.disabled = true);
+  $('hero').classList.add('hidden'); $('out').classList.add('hidden'); $('txlist').classList.add('hidden');
+  const st = $('status'); st.className = 'status'; st.classList.remove('hidden');
+  st.innerHTML = '<span class="spinner"></span>finding a recent transaction to dissect…';
   try {
+    // Pick the program's freshest transaction that actually SUCCEEDED on-chain —
+    // a failed or empty pick makes a confusing demo.
     const res = await api('/signatures/' + c.dataset.ex + clusterQ());
     const sigs = res.ok ? await res.json() : [];
-    $('sig').value = sigs[0]?.signature || c.dataset.ex;
+    const pick = sigs.find(s => !s.err) || sigs[0];
+    $('sig').value = pick?.signature || c.dataset.ex;
   } catch { $('sig').value = c.dataset.ex; }
+  chips.forEach(x => x.disabled = false);
+  exBusy = false;
   runInput();
 }));
 // "/" focuses whichever search is on screen.
