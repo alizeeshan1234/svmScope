@@ -1480,6 +1480,11 @@ const API = (new URLSearchParams(location.search).get('api')
              || '').replace(/\/$/, '');
 const api = (path, init) => fetch(API + path, init);
 
+// Prewarm the engine on page load. The free host sleeps after ~15 min idle; kicking
+// off a cheap /api ping the instant someone lands means the container is already
+// waking while they read the hero, so it's ready by the time they paste a signature.
+try { fetch(API + '/api', { mode: 'cors', cache: 'no-store' }).catch(() => {}); } catch {}
+
 // Selected cluster — appended to GET requests and merged into POST bodies so one
 // instance serves mainnet / devnet / testnet / localnet / a custom RPC endpoint.
 const currentCluster = () => $('cluster').value;

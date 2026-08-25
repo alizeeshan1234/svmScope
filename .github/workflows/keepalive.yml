@@ -8,7 +8,10 @@ name: keep demo awake
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes
+    # Every 5 minutes. NOTE: GitHub throttles scheduled crons heavily (often to
+    # 20-50 min under load), so this is only a backup — set up an external uptime
+    # monitor (UptimeRobot / cron-job.org) at 5 min for reliable keep-warm.
+    - cron: "*/5 * * * *"
   workflow_dispatch:          # allow a manual ping
 
 jobs:
