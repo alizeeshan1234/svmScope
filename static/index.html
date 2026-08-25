@@ -691,6 +691,14 @@ body::after {
 }
 .drift-note b { color: var(--text-1); }
 .drift-note code { font-family: var(--font-mono); font-size: 11.5px; color: var(--amber); }
+.drift-inline {
+  margin: var(--s-3) 0 0;
+  padding: 9px var(--s-3);
+  border-radius: var(--r-sm);
+  background: var(--amber-soft); border: 1px solid rgba(251,191,36,.24);
+  color: var(--text-2); font-size: 12px; line-height: 1.55;
+}
+.drift-inline b { color: var(--text-1); }
 
 /* ---------- badges / replay ---------- */
 .badge {
@@ -1848,12 +1856,30 @@ async function ensureBaseline() {
   analysis.replay = await res.json();
   return analysis.replay;
 }
+// Recognise the classic state-drift failure signatures, so a developer sees *why*
+// a replay reverted without having to know each program's error codes.
+function driftHint(r) {
+  if (r.success) return '';
+  const blob = (r.error || '') + ' ' + (r.logs || []).join(' ');
+  const table = [
+    [/AccountOwnedByWrongProgram|owned by a different program/i, 'an account this transaction needs has since been closed or reallocated, so it is now owned by a different program'],
+    [/AccountNotFound|no longer exists|InsufficientFunds|insufficient funds|insufficient lamports/i, 'an account the transaction needs no longer holds the state (or lamports) it did when this landed'],
+    [/InvalidTimestamp|Timestamp should be/i, 'an oracle / clock check — the account state is newer than the transaction'],
+    [/slippage|SlippageToleranceExceeded|ExceededSlippage/i, 'the pool price has moved since this landed, so the swap slips (common on 0-slippage swaps)'],
+  ];
+  for (const [re, why] of table) if (re.test(blob)) return why;
+  return '';
+}
 function renderReplay(r) {
   const badge = r.success ? `<span class="badge ok"><span class="b-dot"></span>replay success</span>`
                           : `<span class="badge fail"><span class="b-dot"></span>replay failed</span>`;
+  const hint = driftHint(r);
+  const note = hint
+    ? `<div class="drift-inline">This looks like <b>state drift</b>, not a bug: ${hint}. It succeeded on-chain — replaying against <i>current</i> state can differ. <b>❄ Freeze fixture</b> to pin the state, or try a recent / simpler transaction.</div>`
+    : '';
   const err = r.error ? `<div class="err-box">${esc(r.error)}</div>` : '';
   const logs = r.logs && r.logs.length ? `<div class="logs">${renderLogs(r.logs)}</div>` : '';
-  return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${err}${logs}`;
+  return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}`;
 }
 
 // ---------------- one-click what-if scenarios ----------------
