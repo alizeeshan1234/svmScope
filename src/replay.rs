@@ -480,16 +480,23 @@ impl PreState {
 
 /// Fetch everything needed to replay `signature` (transaction + all touched
 /// accounts + program ELFs, including Address Lookup Table accounts) once.
-/// `slot` makes ALT resolution match the real world; `pre_state` restores
-/// pre-transaction token balances so swaps replay faithfully instead of slipping.
+/// `pre_state` restores pre-transaction token balances so swaps replay faithfully
+/// instead of slipping. (`_tx_slot` is the transaction's original slot, kept for
+/// the signature's sake but no longer used to set the clock — see below.)
 pub fn build_context(
     client: &RpcClient,
     signature: &str,
     account_keys: &[String],
-    slot: Option<u64>,
+    _tx_slot: Option<u64>,
     pre_state: &PreState,
 ) -> Result<ReplayContext, String> {
-    // The transaction's real block time, so date-based logic sees the actual moment.
+    // Replay runs against CURRENT account state — an RPC returns today's accounts,
+    // not the tx-time snapshot. Anchoring the clock to the transaction's ORIGINAL
+    // slot then contradicts that state: a program that checks the clock against an
+    // account's (now newer) last-updated timestamp reverts with InvalidTimestamp
+    // (e.g. Orca's oracle check). So we anchor the clock to NOW, consistent with the
+    // accounts we actually loaded, and let time travel warp forward from there.
+    let slot = client.get_slot().ok().or(_tx_slot);
     let block_time = slot.and_then(|s| client.get_block_time(s).ok());
     let tx = fetch_transaction(client, signature)?;
     let mut all_keys = account_keys.to_vec();

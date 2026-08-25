@@ -682,6 +682,15 @@ body::after {
 .tok-meta { color: var(--text-3); font-size: 11px; font-family: var(--font-mono); margin-top: 2px; }
 .sub-owner { color: var(--text-2); font-size: 12px; }
 .empty { color: var(--text-3); font-size: 13px; font-style: italic; padding: var(--s-2) 2px; }
+.drift-note {
+  margin-bottom: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r-md);
+  background: var(--amber-soft); border: 1px solid rgba(251,191,36,.28);
+  color: var(--text-2); font-size: 12.5px; line-height: 1.6;
+}
+.drift-note b { color: var(--text-1); }
+.drift-note code { font-family: var(--font-mono); font-size: 11.5px; color: var(--amber); }
 
 /* ---------- badges / replay ---------- */
 .badge {
@@ -1850,7 +1859,7 @@ function renderReplay(r) {
 // ---------------- one-click what-if scenarios ----------------
 function u64ToLeHex(bi) { let x = bi & 0xffffffffffffffffn, h = ''; for (let i = 0; i < 8; i++) { h += (x & 0xffn).toString(16).padStart(2, '0'); x >>= 8n; } return h; }
 
-let suiteRows = [], rowSeq = 0;
+let suiteRows = [], rowSeq = 0, suiteDrift = '';
 const rowById = (id) => suiteRows.find(r => String(r.id) === String(id));
 const makeRow = (name, muts, expect, changeText, contains = '') =>
   ({ id: ++rowSeq, name, muts, expect, changeText, contains, status: null, got: '', actual: null, _open: false });
@@ -1859,6 +1868,7 @@ const makeRow = (name, muts, expect, changeText, contains = '') =>
 // a developer of this kind of program would want to have covered.
 function buildSuite() {
   suiteRows = [];
+  suiteDrift = '';
   suiteRows.push(makeRow('Baseline — transaction unchanged', [], analysis.overview.success ? 'success' : 'any', 'no changes'));
 
   const toks = mutableAccounts
@@ -1892,7 +1902,7 @@ function buildSuite() {
 function renderSuite() {
   if (!suiteRows.length) { $('suite').innerHTML = '<div class="empty">No scenarios yet — add one from the advanced editor below.</div>'; $('suiteSummary').textContent = ''; return; }
   $('suiteSummary').textContent = suiteRows.length + ' scenarios';
-  $('suite').innerHTML = suiteRows.map(r => {
+  $('suite').innerHTML = suiteDrift + suiteRows.map(r => {
     const st = r.status === 'pass' ? '✅' : r.status === 'fail' ? '❌' : '<span class="pend">•</span>';
     const contains = r.expect === 'revert'
       ? `<input class="contains" data-id="${r.id}" placeholder="error has…" value="${esc(r.contains)}" spellcheck="false" title="optional: require the error/logs to contain this text" />` : '';
@@ -1942,6 +1952,20 @@ async function runSuite() {
     const passed = outcomes.filter(o => o.pass).length;
     el.className = 'suite-result ' + (passed === outcomes.length ? 'pass' : 'fail');
     el.textContent = `${passed} / ${outcomes.length} passed`;
+    // If the *unmodified* transaction reverts on replay, the whole suite is
+    // dominated by state drift, not by the mutations — say so plainly instead of
+    // showing a wall of unexplained red.
+    const baseIdx = suiteRows.findIndex(r => !(r.muts && r.muts.length));
+    const base = baseIdx >= 0 ? outcomes[baseIdx] : null;
+    suiteDrift = (base && base.actual && !base.actual.success)
+      ? `<div class="drift-note">
+           <b>The unmodified transaction reverts on local replay</b> — its on-chain state has moved
+           since it landed (<code>${esc(friendlyReason(base.actual))}</code>). This is expected for
+           older or complex transactions like swaps, where current pool prices differ from the slot
+           it ran in. The what-if assertions below are only meaningful once the baseline replays
+           cleanly — <b>❄ Freeze fixture</b> to pin the state, or try a <b>recent / simpler</b> transaction.
+         </div>`
+      : '';
     renderSuite();
   } catch (e) { el.className = 'suite-result fail'; el.textContent = 'error: ' + e.message; }
   finally { btn.disabled = false; }
