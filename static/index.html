@@ -1913,20 +1913,41 @@ function buildSuite() {
     .sort((p, q) => (q.amt > p.amt ? 1 : q.amt < p.amt ? -1 : 0));
   const nm = (t) => t.known ? `${t.sym} account ${short(t.a.address)}` : `token account ${short(t.a.address)}`;
 
-  toks.slice(0, 2).forEach(t => suiteRows.push(makeRow(
+  // The tx's own token flows decide the expectation: emptying an account the tx
+  // *draws from* must revert; an account that only receives shrugs it off.
+  const deltaOf = (addr) => {
+    const c = (analysis.token_change || []).find(ch => ch.address === addr);
+    return c ? BigInt(c.delta_raw) : null;
+  };
+  const isSource = (t) => { const d = deltaOf(t.a.address); return d !== null && d < 0n; };
+  // Prefer source accounts for the "empty it" scenarios — they make the point.
+  const emptyTargets = toks.slice().sort((p, q) =>
+    (isSource(q) - isSource(p)) || (q.amt > p.amt ? 1 : q.amt < p.amt ? -1 : 0));
+  emptyTargets.slice(0, 2).forEach(t => suiteRows.push(makeRow(
     `Empty ${nm(t)}`, [{ kind: 'data', address: t.a.address, offset: 64, bytes_hex: '0000000000000000' }],
-    'revert', `token amount ${fmtToken(t.amt.toString(), t.dec)} → 0`)));
+    isSource(t) ? 'revert' : 'success',
+    `token amount ${fmtToken(t.amt.toString(), t.dec)} → 0` + (isSource(t) ? '' : ' (receive-only — should be harmless)'))));
   if (toks.length) {
-    const t = toks[0];
-    suiteRows.push(makeRow(`Freeze ${nm(t)}`,
-      [{ kind: 'data', address: t.a.address, offset: 108, bytes_hex: '02' }], 'revert', `account state → 2 (frozen)`));
-    suiteRows.push(makeRow(`Double ${nm(t)}`,
-      [{ kind: 'data', address: t.a.address, offset: 64, bytes_hex: u64ToLeHex(t.amt * 2n) }], 'success', `token amount → 2×`));
+    // Freeze an account the tx actually moves tokens through — the token program
+    // rejects transfers both into and out of a frozen account.
+    const moved = toks.find(t => { const d = deltaOf(t.a.address); return d !== null && d !== 0n; }) || toks[0];
+    suiteRows.push(makeRow(`Freeze ${nm(moved)}`,
+      [{ kind: 'data', address: moved.a.address, offset: 108, bytes_hex: '02' }], 'revert', `account state → 2 (frozen)`));
+    // Doubling a pool vault shifts the quote (slippage!), so only double a token
+    // account the fee payer owns — extra balance in the user's wallet is harmless.
+    const ownerOf = (t) => (t.a.decoded.fields.find(f => f.name === 'owner') || {}).value;
+    const userTok = toks.find(t => ownerOf(t) === analysis.overview.fee_payer);
+    if (userTok) suiteRows.push(makeRow(`Double ${nm(userTok)}`,
+      [{ kind: 'data', address: userTok.a.address, offset: 64, bytes_hex: u64ToLeHex(userTok.amt * 2n) }], 'success', `token amount → 2×`));
   }
+  // Drain the fee payer — it always has to cover the fee, so this must revert.
+  // Fall back to the largest system-owned wallet if the payer isn't mutable here.
   const wallets = mutableAccounts.filter(a => a.owner === SYSTEM_PROGRAM).sort((p, q) => q.lamports - p.lamports);
-  if (wallets.length && wallets[0].lamports > 0) {
-    suiteRows.push(makeRow('Drain the largest SOL wallet',
-      [{ kind: 'lamports', address: wallets[0].address, lamports: 0 }], 'revert', `${short(wallets[0].address)} → 0 SOL`));
+  const payer = wallets.find(w => w.address === analysis.overview.fee_payer);
+  const drain = payer || wallets[0];
+  if (drain && drain.lamports > 0) {
+    suiteRows.push(makeRow(payer ? 'Drain the fee payer wallet' : 'Drain the largest SOL wallet',
+      [{ kind: 'lamports', address: drain.address, lamports: 0 }], 'revert', `${short(drain.address)} → 0 SOL`));
   }
 }
 function renderSuite() {
