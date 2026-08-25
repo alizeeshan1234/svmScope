@@ -6,7 +6,7 @@
 <title>svmscope</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
 <style>
 /* ============================================================
    svmscope — design system
@@ -42,6 +42,8 @@
   /* type */
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-display: "Space Grotesk", "Inter", sans-serif;
+  --font-serif: "Instrument Serif", Georgia, serif;
   /* radii */
   --r-sm: 8px;
   --r-md: 10px;
@@ -77,12 +79,15 @@ body {
   text-rendering: optimizeLegibility;
   font-feature-settings: "cv11", "ss01";
 }
-/* single, quiet ambient glow — no noise */
+/* quiet two-tone aurora — brand left, cyan right */
 body::before {
   content: "";
-  position: fixed; inset: 0 0 auto 0; height: 60vh;
+  position: fixed; inset: 0 0 auto 0; height: 70vh;
   z-index: -1; pointer-events: none;
-  background: radial-gradient(56% 100% at 50% -30%, rgba(153,69,255,.10), transparent 70%);
+  background:
+    radial-gradient(42% 60% at 20% -12%, rgba(153,69,255,.14), transparent 70%),
+    radial-gradient(36% 52% at 80% -14%, rgba(34,211,238,.07), transparent 70%),
+    radial-gradient(60% 100% at 50% -30%, rgba(153,69,255,.07), transparent 70%);
 }
 ::selection { background: rgba(153,69,255,.30); }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -120,7 +125,7 @@ body::before {
   background: linear-gradient(135deg, #a964ff, #7b2ff2);
   box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 2px 8px rgba(123,47,242,.45);
 }
-.logo b { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
+.logo b { font-family: var(--font-display); font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
 .logo .tag { color: var(--text-3); font-size: 13px; }
 
 .logo { cursor: pointer; }
@@ -172,12 +177,12 @@ body::before {
   border-radius: var(--r-md);
   font-family: var(--font-sans); font-size: 13.5px; font-weight: 600; letter-spacing: -0.006em;
   color: #fff;
-  background: var(--brand);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.18), var(--shadow-1);
-  transition: background var(--t-fast), transform var(--t-fast) var(--ease), box-shadow var(--t-fast);
+  background: linear-gradient(180deg, #ab68ff, #7f24f5);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.22), var(--shadow-1), 0 0 20px -8px rgba(153,69,255,.55);
+  transition: background var(--t-fast), transform var(--t-fast) var(--ease), box-shadow var(--t-fast), filter var(--t-fast);
   flex: 0 0 auto;
 }
-.btn:hover { background: var(--brand-strong); transform: translateY(-1px); box-shadow: inset 0 1px 0 rgba(255,255,255,.18), var(--shadow-2); }
+.btn:hover { filter: brightness(1.12); transform: translateY(-1px); box-shadow: inset 0 1px 0 rgba(255,255,255,.22), var(--shadow-2), 0 0 26px -8px rgba(153,69,255,.7); }
 .btn:active { transform: none; }
 .btn:focus-visible { outline: none; box-shadow: var(--ring); }
 .btn:disabled { opacity: .45; cursor: default; transform: none; box-shadow: none; }
@@ -185,7 +190,7 @@ body::before {
   background: transparent; color: var(--text-2);
   border: 1px solid var(--border); box-shadow: none; font-weight: 550;
 }
-.btn.ghost:hover { color: var(--text-1); border-color: var(--border-strong); background: var(--bg-2); transform: none; box-shadow: none; }
+.btn.ghost:hover { color: var(--text-1); border-color: var(--border-strong); background: var(--bg-2); transform: none; box-shadow: none; filter: none; }
 .btn.sm { padding: 6px var(--s-3); font-size: 12.5px; border-radius: var(--r-sm); }
 
 /* ---------- layout ---------- */
@@ -193,47 +198,221 @@ main { max-width: 1080px; margin: 0 auto; padding: var(--s-6) var(--s-6) 96px; }
 
 /* ---------- hero (landing) ---------- */
 .hero {
-  min-height: calc(100vh - 160px);
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  display: flex; flex-direction: column; align-items: center;
   text-align: center;
-  padding: var(--s-10) 0;
+  padding: clamp(40px, 9vh, 96px) 0 var(--s-10);
   animation: fade-up .5s var(--ease) both;
 }
 .hero .eyebrow {
-  display: inline-flex; align-items: center; gap: var(--s-2);
+  display: inline-flex; align-items: center; gap: var(--s-3);
   margin-bottom: var(--s-6);
-  padding: 6px 14px;
-  border-radius: var(--r-full);
-  font-size: 12.5px; font-weight: 500; color: var(--text-2);
-  background: var(--bg-1);
-  border: 1px solid var(--border);
+  font-family: var(--font-mono); font-size: 11px; font-weight: 500;
+  text-transform: uppercase; letter-spacing: .22em;
+  color: var(--text-3);
 }
+.hero .eyebrow .bkt { color: var(--brand-strong); }
 .hero .eyebrow .pulse {
   width: 6px; height: 6px; border-radius: var(--r-full);
   background: var(--green);
   animation: pulse-dot 2.6s ease-out infinite;
 }
 .hero h1 {
-  margin: 0 0 var(--s-4);
-  font-size: clamp(32px, 5vw, 46px);
-  font-weight: 700; letter-spacing: -0.03em; line-height: 1.12;
-  max-width: 720px;
+  margin: 0 0 var(--s-5);
+  font-family: var(--font-display);
+  font-size: clamp(46px, 7.6vw, 96px);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: -0.025em; line-height: 0.99;
+  max-width: 980px;
 }
+.hero h1 .h1-line { display: block; animation: fade-up .6s var(--ease) both; }
+.hero h1 .h1-line:nth-child(2) { animation-delay: .08s; }
+.hero h1 .h1-line:nth-child(3) { animation-delay: .16s; }
 .hero h1 .grad {
   background: linear-gradient(95deg, var(--brand-strong), var(--cyan));
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
+/* the italic-serif counterpoint word — lowercase against the caps */
+.hero h1 .serif {
+  font-family: var(--font-serif); font-style: italic; font-weight: 400;
+  text-transform: lowercase;
+  letter-spacing: -0.01em;
+  padding-right: 0.06em; /* italic overhang */
+}
+/* hollow outlined word, filled on hover */
+.hero h1 .hollow {
+  color: transparent;
+  -webkit-text-stroke: 1.5px rgba(242,244,249,.85);
+  transition: color var(--t-med) var(--ease);
+}
+.hero h1 .hollow:hover { color: var(--text-1); }
 .hero p {
-  margin: 0; max-width: 540px;
+  margin: 0; max-width: 560px;
   color: var(--text-2);
   font-size: 15.5px; line-height: 1.65;
+  animation: fade-up .6s var(--ease) .22s both;
 }
+.hero p .serif { font-family: var(--font-serif); font-style: italic; font-size: 1.12em; color: var(--text-1); }
+
+/* film grain over everything, barely-there */
+body::after {
+  content: ""; position: fixed; inset: -50%;
+  z-index: 9999; pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='240' height='240' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+  opacity: .035;
+  animation: grain 9s steps(10) infinite;
+}
+@keyframes grain {
+  0%,100% { transform: translate(0,0); } 10% { transform: translate(-3%,-6%); }
+  20% { transform: translate(-8%,3%); } 30% { transform: translate(4%,-8%); }
+  40% { transform: translate(-3%,8%); } 50% { transform: translate(-8%,4%); }
+  60% { transform: translate(8%,0); } 70% { transform: translate(0,6%); }
+  80% { transform: translate(3%,10%); } 90% { transform: translate(-6%,3%); }
+}
+
+/* full-bleed replay ticker — real output, endlessly scrolling */
+.ticker {
+  width: 100vw; margin: var(--s-10) calc(50% - 50vw) 0;
+  border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+  background: rgba(8,9,13,.6);
+  overflow: hidden; white-space: nowrap;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+}
+.ticker:hover .ticker-track { animation-play-state: paused; }
+.ticker-track {
+  display: inline-flex; align-items: center;
+  padding: 11px 0;
+  animation: ticker 46s linear infinite;
+  will-change: transform;
+}
+@keyframes ticker { to { transform: translateX(-50%); } }
+.ticker .ti {
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .02em;
+  color: var(--text-3);
+  padding: 0 var(--s-5);
+}
+.ticker .ti b { color: var(--text-2); font-weight: 500; }
+.ticker .ti .ok { color: var(--green); }
+.ticker .ti .bad { color: var(--red); }
+.ticker .ti .br { color: var(--brand-strong); }
+.ticker .ti .cy { color: var(--cyan); }
+.ticker .sep { color: var(--border-strong); font-size: 9px; }
 .hero .hint { margin-top: var(--s-8); color: var(--text-3); font-size: 13px; }
 .hero .hint kbd {
   font-family: var(--font-mono); font-size: 11.5px; color: var(--text-2);
   background: var(--bg-1); border: 1px solid var(--border); border-bottom-width: 2px;
   border-radius: 6px; padding: 2px 7px; margin: 0 2px;
 }
+
+/* faint blueprint grid behind the headline, fading out radially */
+.hero { position: relative; }
+.hero::before {
+  content: ""; position: absolute; inset: -24px -80px auto; height: 560px;
+  z-index: -1; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: radial-gradient(58% 62% at 50% 34%, #000 0%, transparent 74%);
+  mask-image: radial-gradient(58% 62% at 50% 34%, #000 0%, transparent 74%);
+}
+
+/* the hero's own search — the main way in */
+.hero-search {
+  margin-top: var(--s-8);
+  width: min(720px, 100%);
+  display: flex; gap: var(--s-2); align-items: center;
+  padding: 7px 7px 7px var(--s-4);
+  border-radius: 16px;
+  border: 1px solid transparent;
+  background:
+    linear-gradient(var(--bg-1), var(--bg-1)) padding-box,
+    linear-gradient(120deg, rgba(153,69,255,.55), rgba(34,211,238,.30) 50%, rgba(153,69,255,.55)) border-box;
+  box-shadow: var(--shadow-3), 0 0 54px -20px rgba(153,69,255,.5);
+  transition: box-shadow var(--t-med) var(--ease);
+}
+.hero-search:focus-within { box-shadow: var(--shadow-3), 0 0 64px -16px rgba(153,69,255,.65); }
+.hero-search .hs-icon { color: var(--text-3); flex: 0 0 auto; display: grid; place-items: center; }
+.hero-search input {
+  flex: 1; min-width: 0;
+  background: transparent; border: 0;
+  color: var(--text-1);
+  font-family: var(--font-mono); font-size: 13px;
+  padding: 10px 4px;
+}
+.hero-search input::placeholder { color: var(--text-3); }
+.hero-search input:focus { outline: none; }
+
+/* one-click live examples */
+.examples {
+  margin-top: var(--s-5);
+  display: flex; gap: var(--s-2); flex-wrap: wrap; justify-content: center; align-items: center;
+}
+.examples .lbl { color: var(--text-3); font-size: 12.5px; margin-right: 2px; }
+.ex-chip {
+  appearance: none; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 7px;
+  background: var(--bg-1); border: 1px solid var(--border);
+  color: var(--text-2);
+  border-radius: var(--r-full); padding: 6px 13px;
+  font-family: var(--font-sans); font-size: 12.5px; font-weight: 550;
+  transition: color var(--t-fast), border-color var(--t-fast), background var(--t-fast), transform var(--t-fast) var(--ease);
+}
+.ex-chip:hover { color: var(--text-1); border-color: var(--brand-border); background: var(--brand-soft); transform: translateY(-1px); }
+.ex-chip .dot { width: 6px; height: 6px; border-radius: var(--r-full); flex: 0 0 auto; }
+
+/* what-it-does grid */
+.features {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--s-4);
+  width: 100%; max-width: 1032px;
+  margin-top: var(--s-10);
+  text-align: left;
+}
+@media (max-width: 960px) { .features { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .features { grid-template-columns: 1fr; } }
+.feature {
+  position: relative; overflow: hidden;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: var(--s-5);
+  transition: transform var(--t-med) var(--ease), border-color var(--t-med), box-shadow var(--t-med);
+}
+.feature::after {
+  content: ""; position: absolute; inset: 0 0 auto; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--fx, rgba(153,69,255,.5)), transparent);
+  opacity: 0; transition: opacity var(--t-med);
+}
+.feature:hover { transform: translateY(-2px); border-color: var(--border-strong); box-shadow: var(--shadow-2); }
+.feature:hover::after { opacity: 1; }
+.feature .fi {
+  width: 34px; height: 34px; border-radius: 9px;
+  display: grid; place-items: center;
+  margin-bottom: var(--s-3);
+  color: var(--fc, var(--brand-strong));
+  background: var(--fb, var(--brand-soft));
+  box-shadow: inset 0 0 0 1px var(--fr, var(--brand-border));
+}
+.feature h3 { margin: 0 0 5px; font-size: 14px; font-weight: 650; letter-spacing: -0.01em; }
+.feature p { margin: 0; color: var(--text-2); font-size: 12.5px; line-height: 1.6; }
+.feature.f-green { --fc: var(--green); --fb: var(--green-soft); --fr: rgba(52,211,153,.3); --fx: rgba(52,211,153,.45); }
+.feature.f-cyan  { --fc: var(--cyan);  --fb: rgba(34,211,238,.10); --fr: rgba(34,211,238,.3); --fx: rgba(34,211,238,.45); }
+.feature.f-amber { --fc: var(--amber); --fb: var(--amber-soft); --fr: rgba(251,191,36,.3); --fx: rgba(251,191,36,.45); }
+
+/* footer */
+.foot {
+  max-width: 1080px; margin: 0 auto;
+  padding: var(--s-5) var(--s-6);
+  border-top: 1px solid var(--border);
+  display: flex; align-items: center; gap: var(--s-4); flex-wrap: wrap;
+  color: var(--text-3); font-size: 12.5px;
+}
+.foot .sep { color: var(--border-strong); }
+.foot a { color: var(--text-2); text-decoration: none; transition: color var(--t-fast); }
+.foot a:hover { color: var(--text-1); }
+.foot .spacer { flex: 1; }
 
 /* ---------- status line ---------- */
 .status { color: var(--text-2); font-size: 13.5px; margin: var(--s-6) auto; text-align: center; }
@@ -807,7 +986,13 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
   <div class="topbar">
     <div class="topbar-inner">
       <div class="logo" id="brand" title="Home">
-        <div class="mark">◎</div>
+        <div class="mark" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="6.4" stroke="#fff" stroke-width="2"/>
+            <circle cx="12" cy="12" r="2.1" fill="#fff"/>
+            <path d="M12 1.6v3.6M12 18.8v3.6M1.6 12h3.6M18.8 12h3.6" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </div>
         <div><b>svmscope</b></div>
       </div>
       <nav class="nav">
@@ -863,11 +1048,100 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
   <main>
     <div id="clockBanner" class="clockbanner hidden"></div>
     <div id="hero" class="hero">
-      <div class="eyebrow"><span class="pulse"></span> The Solana transaction simulation layer</div>
-      <h1>Decode, replay &amp; <span class="grad">mutate</span> any transaction</h1>
+      <div class="eyebrow"><span class="bkt">[</span><span class="pulse"></span> the Solana transaction simulation layer <span class="bkt">]</span></div>
+      <h1>
+        <span class="h1-line">Decode, replay</span>
+        <span class="h1-line">&amp; <span class="serif grad">mutate</span> any</span>
+        <span class="h1-line"><span class="hollow">transaction</span></span>
+      </h1>
       <p>Reconstruct the exact state a Solana transaction ran against, re-execute the real
-         programs locally, then rewrite an account's fields to ask <em>“what if?”</em></p>
-      <div class="hint">Paste a <kbd>signature</kbd> or a <kbd>program&nbsp;/&nbsp;account address</kbd> above to begin</div>
+         programs locally, then rewrite an account's fields to ask <span class="serif">“what if?”</span></p>
+
+      <div class="hero-search">
+        <span class="hs-icon" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+            <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/>
+            <path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </span>
+        <input id="heroSig" placeholder="paste a transaction signature — or a program / account address" spellcheck="false" autocomplete="off" />
+        <button class="btn" id="heroGo">Analyze</button>
+      </div>
+
+      <div class="examples">
+        <span class="lbl">or dissect a live one:</span>
+        <button class="ex-chip" data-ex="JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"><span class="dot" style="background:#fb923c"></span>Jupiter swap</button>
+        <button class="ex-chip" data-ex="pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"><span class="dot" style="background:#34d399"></span>Pump AMM</button>
+        <button class="ex-chip" data-ex="whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"><span class="dot" style="background:#22d3ee"></span>Orca Whirlpool</button>
+      </div>
+
+      <div class="hint">press <kbd>/</kbd> to search anytime</div>
+
+      <div class="ticker" aria-hidden="true">
+        <div class="ticker-track">
+          <span class="ti"><b class="br">Program JUP6…TaV4</b> invoke [1]</span><span class="sep">◆</span>
+          <span class="ti">consumed <b>178,113</b> of 200,000 CU</span><span class="sep">◆</span>
+          <span class="ti">REPLAY: <b class="ok">success ✓</b></span><span class="sep">◆</span>
+          <span class="ti"><b>22 accounts</b> + <b>6 program ELFs</b> reconstructed</span><span class="sep">◆</span>
+          <span class="ti"><b class="cy">pool.reserve</b> → 0</span><span class="sep">◆</span>
+          <span class="ti"><b class="bad">Error: SlippageExceeded</b></span><span class="sep">◆</span>
+          <span class="ti">clock warped <b class="cy">+30 days</b></span><span class="sep">◆</span>
+          <span class="ti">claim: <b class="bad">fails now</b> · <b class="ok">works after the cliff</b></span><span class="sep">◆</span>
+          <span class="ti">PDAs derived <b>in your browser</b></span><span class="sep">◆</span>
+          <span class="ti">MUTATED REPLAY: <b class="ok">success ✓</b></span><span class="sep">◆</span>
+          <span class="ti"><b class="br">Program JUP6…TaV4</b> invoke [1]</span><span class="sep">◆</span>
+          <span class="ti">consumed <b>178,113</b> of 200,000 CU</span><span class="sep">◆</span>
+          <span class="ti">REPLAY: <b class="ok">success ✓</b></span><span class="sep">◆</span>
+          <span class="ti"><b>22 accounts</b> + <b>6 program ELFs</b> reconstructed</span><span class="sep">◆</span>
+          <span class="ti"><b class="cy">pool.reserve</b> → 0</span><span class="sep">◆</span>
+          <span class="ti"><b class="bad">Error: SlippageExceeded</b></span><span class="sep">◆</span>
+          <span class="ti">clock warped <b class="cy">+30 days</b></span><span class="sep">◆</span>
+          <span class="ti">claim: <b class="bad">fails now</b> · <b class="ok">works after the cliff</b></span><span class="sep">◆</span>
+          <span class="ti">PDAs derived <b>in your browser</b></span><span class="sep">◆</span>
+          <span class="ti">MUTATED REPLAY: <b class="ok">success ✓</b></span><span class="sep">◆</span>
+        </div>
+      </div>
+
+      <div class="features">
+        <div class="feature">
+          <div class="fi" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <path d="M6 4v10a3 3 0 0 0 3 3h9"/><circle cx="6" cy="4" r="1.6" fill="currentColor" stroke="none"/>
+              <circle cx="19" cy="17" r="1.6" fill="currentColor" stroke="none"/><path d="M6 9h7"/><circle cx="14.5" cy="9" r="1.6" fill="currentColor" stroke="none"/>
+            </svg>
+          </div>
+          <h3>Decode</h3>
+          <p>The full cross-program call tree, balance flows and compute per program — lookup tables resolved, accounts named via on-chain IDLs.</p>
+        </div>
+        <div class="feature f-green">
+          <div class="fi" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 5v14l16-7z" fill="currentColor" stroke="none"/>
+            </svg>
+          </div>
+          <h3>Replay locally</h3>
+          <p>Rebuilds the world the transaction ran in — every account and program binary — and re-executes the real code in an embedded SVM.</p>
+        </div>
+        <div class="feature f-cyan">
+          <div class="fi" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <path d="M4 8h10M18 8h2M4 16h2M10 16h10"/><circle cx="16" cy="8" r="2.2"/><circle cx="7" cy="16" r="2.2"/>
+            </svg>
+          </div>
+          <h3>Ask “what if?”</h3>
+          <p>Rewrite a pool reserve, an oracle price, any account's bytes — then replay and diff to see what would have happened instead.</p>
+        </div>
+        <div class="feature f-amber">
+          <div class="fi" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <circle cx="12" cy="12" r="8.2"/><path d="M12 7.5V12l3 2.4"/>
+            </svg>
+          </div>
+          <h3>Time travel</h3>
+          <p>Warp the clock a day, an epoch, a year — and watch vesting cliffs, cooldowns and auctions play out without waiting.</p>
+        </div>
+      </div>
+
       <div class="hero-cta">
         <button class="btn ghost" id="openSim">⚡ Simulate a transaction before sending it</button>
       </div>
@@ -992,6 +1266,16 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
       </div>
     </div>
   </main>
+
+  <footer class="foot">
+    <span><b style="color:var(--text-2)">svmscope</b> — decode · replay · mutate</span>
+    <span class="spacer"></span>
+    <a href="https://github.com/alizeeshan1234/svmScope" target="_blank" rel="noopener">GitHub</a>
+    <span class="sep">·</span>
+    <a href="/api" target="_blank" rel="noopener">API</a>
+    <span class="sep">·</span>
+    <span>runs on <a href="https://github.com/LiteSVM/litesvm" target="_blank" rel="noopener">LiteSVM</a></span>
+  </footer>
 
 <!-- Optional: sets window.SVMSCOPE_API when the frontend is hosted apart from the
      engine (Vercel). Absent when the Rust server serves this page itself. -->
@@ -1398,7 +1682,7 @@ async function runSuite() {
       return s;
     });
     const res = await api('/simulate_suite', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, scenarios, cluster: currentCluster() }) });
+      body: JSON.stringify({ signature: currentSig, scenarios, time_travel: timeTravel, cluster: currentCluster() }) });
     if (!res.ok) throw new Error(await res.text());
     const outcomes = await res.json();
     outcomes.forEach((o, i) => {
@@ -1815,7 +2099,7 @@ async function simulate() {
     // Need the un-mutated baseline for the before/after comparison; fetch it lazily.
     const before = await ensureBaseline();
     const res = await api('/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m), cluster: currentCluster() }) });
+      body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m), time_travel: timeTravel, cluster: currentCluster() }) });
     if (!res.ok) throw new Error(await res.text());
     showResult(before, await res.json(), { n: toSend.length });
   } catch (e) { flashSim('error: ' + e.message, true); }
@@ -2297,6 +2581,27 @@ document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () =>
 
 $('go').addEventListener('click', runInput);
 $('sig').addEventListener('keydown', e => { if (e.key === 'Enter') runInput(); });
+// Hero search proxies to the topbar input, so there's exactly one analyze path.
+$('heroGo').addEventListener('click', () => { $('sig').value = $('heroSig').value.trim(); runInput(); });
+$('heroSig').addEventListener('keydown', e => { if (e.key === 'Enter') $('heroGo').click(); });
+document.querySelectorAll('.ex-chip[data-ex]').forEach(c => c.addEventListener('click', async () => {
+  $('cluster').value = 'mainnet';
+  // Jump straight into a dissection: grab the program's freshest transaction.
+  try {
+    const res = await api('/signatures/' + c.dataset.ex + clusterQ());
+    const sigs = res.ok ? await res.json() : [];
+    $('sig').value = sigs[0]?.signature || c.dataset.ex;
+  } catch { $('sig').value = c.dataset.ex; }
+  runInput();
+}));
+// "/" focuses whichever search is on screen.
+document.addEventListener('keydown', e => {
+  if (e.key !== '/' || e.metaKey || e.ctrlKey) return;
+  const el = document.activeElement;
+  if (el && /INPUT|SELECT|TEXTAREA/.test(el.tagName)) return;
+  e.preventDefault();
+  (!$('hero').classList.contains('hidden') ? $('heroSig') : $('sig')).focus();
+});
 $('acctFilter').addEventListener('input', e => filterAccounts(e.target.value));
 $('expandAll').addEventListener('click', toggleExpandAll);
 $('stageBtn').addEventListener('click', stageAll);
