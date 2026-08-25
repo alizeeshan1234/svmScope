@@ -176,6 +176,10 @@ pub struct ReplayContext {
     block_time: Option<i64>,
     /// Optional clock warp applied on top of `slot` (see [`TimeTravel`]).
     time_travel: TimeTravel,
+    /// IDLs by owner program, used to resolve named-field assertions
+    /// (`assert pool.reserveA`) against accounts the built-in decoders don't
+    /// recognize. Populated by the library layer, which has RPC access.
+    idls: HashMap<String, serde_json::Value>,
 }
 
 /// An account that the transaction changed, with raw before/after bytes. The
@@ -380,6 +384,34 @@ impl ReplayContext {
             _ => None,
         })
     }
+
+    /// The owner program of an account's pre-state — which IDL a named-field
+    /// assertion on it would need.
+    pub fn pre_owner(&self, address: &str) -> Option<String> {
+        self.pre_account(address).map(|a| a.owner.to_string())
+    }
+
+    /// Register a program's IDL for named-field assertion resolution.
+    pub fn add_idl(&mut self, owner: String, idl: serde_json::Value) {
+        self.idls.insert(owner, idl);
+    }
+
+    /// Decode an account's pre-state into named fields: built-in layouts (SPL
+    /// token & friends) first, then the owner program's registered IDL. The
+    /// pre-state layout is authoritative for both sides of a delta — an assert
+    /// shouldn't silently change meaning because the tx rewrote the account.
+    fn decode_pre(&self, address: &str) -> Result<(crate::decode::DecodedAccount, &Account), String> {
+        let pre = self
+            .pre_account(address)
+            .ok_or_else(|| format!("no pre-state for {address}"))?;
+        let owner = pre.owner.to_string();
+        crate::decode::decode_bytes(&owner, &pre.data)
+            .or_else(|| self.idls.get(&owner).and_then(|i| crate::idl::decode_with_idl(i, &pre.data)))
+            .map(|dec| (dec, pre))
+            .ok_or_else(|| {
+                format!("can't decode {address} into named fields (no known layout, and no IDL for its program {owner})")
+            })
+    }
 }
 
 /// The transaction's *pre-execution* state, recovered for free from its own
@@ -539,7 +571,7 @@ pub fn build_context(
         }
     }
 
-    Ok(ReplayContext { tx, loaded, slot, block_time, time_travel: TimeTravel::default() })
+    Ok(ReplayContext { tx, loaded, slot, block_time, time_travel: TimeTravel::default(), idls: HashMap::new() })
 }
 
 fn b64_encode(bytes: &[u8]) -> String {
@@ -605,7 +637,7 @@ pub fn preflight_context(
     // Real wall-clock time for that slot — a pre-flight simulation should run
     // "now", and any date-based program logic depends on this being accurate.
     let block_time = slot.and_then(|s| client.get_block_time(s).ok());
-    Ok(ReplayContext { tx, loaded, slot, block_time, time_travel: TimeTravel::default() })
+    Ok(ReplayContext { tx, loaded, slot, block_time, time_travel: TimeTravel::default(), idls: HashMap::new() })
 }
 
 impl ReplayContext {
@@ -675,7 +707,7 @@ impl ReplayContext {
                 }
             }
         }
-        Ok(ReplayContext { tx, loaded, slot: fx.captured_slot, block_time: None, time_travel: TimeTravel::default() })
+        Ok(ReplayContext { tx, loaded, slot: fx.captured_slot, block_time: None, time_travel: TimeTravel::default(), idls: HashMap::new() })
     }
 }
 
@@ -838,7 +870,7 @@ impl Expect {
 }
 
 /// A comparison operator for numeric state assertions.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum CmpOp {
     Eq,
     Ne,
@@ -876,6 +908,7 @@ impl CmpOp {
 
 /// A check on an account's state *after* the transaction replays. This is what
 /// makes a scenario a real test — asserting on resulting state, not just pass/fail.
+#[derive(Debug)]
 pub enum StateCheck {
     /// The account's lamports satisfy `op value`.
     Lamports { op: CmpOp, value: u64 },
@@ -887,9 +920,17 @@ pub enum StateCheck {
     LamportsDelta { op: CmpOp, value: i128 },
     /// The *change* in SPL token amount (u64 @ 64, post - pre) satisfies `op value`.
     TokenDelta { op: CmpOp, value: i128 },
+    /// A named field of the account's decoded layout satisfies `op value` —
+    /// `pool.reserveA >= 1_000` instead of `u64@72`. The name resolves against
+    /// the pre-state layout (built-in decoders, then the owner program's IDL);
+    /// matched by exact name or by final dot-segment.
+    Field { name: String, op: CmpOp, value: i128 },
+    /// The *change* in a named field (post - pre) satisfies `op value`.
+    FieldDelta { name: String, op: CmpOp, value: i128 },
 }
 
 /// A post-replay assertion targeting one account.
+#[derive(Debug)]
 pub struct AccountAssert {
     pub address: String,
     pub check: StateCheck,
@@ -903,6 +944,66 @@ fn read_u64_at(data: &[u8], offset: usize) -> u64 {
     }
 }
 
+/// Find a field in a decoded layout by exact name, or — so `pool.reserveA`
+/// works when the field is just `reserveA` — by its final dot-segment. An
+/// ambiguous short name (several fields end in it) is an error naming the
+/// candidates, not a silent first-match.
+pub(crate) fn find_field<'a>(
+    dec: &'a crate::decode::DecodedAccount,
+    name: &'a str,
+) -> Result<&'a crate::decode::Field, String> {
+    if let Some(f) = dec.fields.iter().find(|f| f.name == name) {
+        return Ok(f);
+    }
+    let last = name.rsplit('.').next().unwrap_or(name);
+    let hits: Vec<&crate::decode::Field> = dec
+        .fields
+        .iter()
+        .filter(|f| f.name.rsplit('.').next().unwrap_or(&f.name) == last)
+        .collect();
+    match hits.len() {
+        1 => Ok(hits[0]),
+        0 => {
+            let avail: Vec<&str> =
+                dec.fields.iter().map(|f| f.name.as_str()).take(12).collect();
+            Err(format!(
+                "no field \"{name}\" on this {} (fields: {})",
+                dec.type_name,
+                avail.join(", ")
+            ))
+        }
+        _ => {
+            let names: Vec<&str> = hits.iter().map(|f| f.name.as_str()).collect();
+            Err(format!("\"{name}\" is ambiguous here — use one of: {}", names.join(", ")))
+        }
+    }
+}
+
+/// Read a named integer field's bytes as a number. Unsigned ints zero-extend,
+/// signed ints sign-extend, bool reads as 0/1; anything else (pubkey, string,
+/// 128-bit ints) can't be compared numerically and says so.
+pub(crate) fn read_field_int(
+    data: &[u8],
+    f: &crate::decode::Field,
+) -> Result<i128, String> {
+    let bytes = data
+        .get(f.offset..f.offset + f.size)
+        .ok_or_else(|| format!("{} @{} out of range (len {})", f.name, f.offset, data.len()))?;
+    let le = |b: &[u8]| -> u128 {
+        b.iter().rev().fold(0u128, |acc, &x| (acc << 8) | x as u128)
+    };
+    match (f.ty.as_str(), f.size) {
+        ("bool", _) => Ok((bytes[0] != 0) as i128),
+        ("u8" | "u16" | "u32" | "u64", _) => Ok(le(bytes) as i128),
+        ("i8" | "i16" | "i32" | "i64", n) => {
+            let raw = le(bytes);
+            let shift = 128 - 8 * n as u32;
+            Ok(((raw as i128) << shift) >> shift) // sign-extend from n bytes
+        }
+        (ty, _) => Err(format!("{} is a {ty} — only integer/bool fields can be asserted", f.name)),
+    }
+}
+
 impl AccountAssert {
     fn describe(&self) -> String {
         let a = short(&self.address);
@@ -911,6 +1012,8 @@ impl AccountAssert {
             StateCheck::U64At { offset, op, value } => format!("{a} u64@{offset} {} {value}", op.symbol()),
             StateCheck::LamportsDelta { op, value } => format!("{a} lamports Δ {} {value}", op.symbol()),
             StateCheck::TokenDelta { op, value } => format!("{a} token Δ {} {value}", op.symbol()),
+            StateCheck::Field { name, op, value } => format!("{a} {name} {} {value}", op.symbol()),
+            StateCheck::FieldDelta { name, op, value } => format!("{a} {name} Δ {} {value}", op.symbol()),
         }
     }
 
@@ -939,6 +1042,19 @@ impl AccountAssert {
                 let pre = ctx.pre_account(&self.address).map(|a| read_u64_at(&a.data, 64)).unwrap_or(0) as i128;
                 let post = acc.map(|a| read_u64_at(&a.data, 64)).unwrap_or(0) as i128;
                 Ok(op.test_i128(post - pre, *value))
+            }
+            StateCheck::Field { name, op, value } => {
+                let (dec, _) = ctx.decode_pre(&self.address)?;
+                let f = find_field(&dec, name)?;
+                let acc = acc.ok_or_else(|| format!("account not found: {}", self.address))?;
+                Ok(op.test_i128(read_field_int(&acc.data, f)?, *value))
+            }
+            StateCheck::FieldDelta { name, op, value } => {
+                let (dec, pre) = ctx.decode_pre(&self.address)?;
+                let f = find_field(&dec, name)?;
+                let acc = acc.ok_or_else(|| format!("account not found: {}", self.address))?;
+                let delta = read_field_int(&acc.data, f)? - read_field_int(&pre.data, f)?;
+                Ok(op.test_i128(delta, *value))
             }
         }
     }
@@ -1008,10 +1124,11 @@ pub fn run_suite(ctx: &ReplayContext, scenarios: &[ScenarioSpec]) -> Vec<Scenari
             let asserts: Vec<AssertOutcome> = s
                 .asserts
                 .iter()
-                .map(|a| AssertOutcome {
-                    description: a.describe(),
-                    // A failed eval (missing account, bad offset) counts as a failed assertion.
-                    pass: a.eval(&svm, ctx).unwrap_or(false),
+                .map(|a| match a.eval(&svm, ctx) {
+                    Ok(pass) => AssertOutcome { description: a.describe(), pass },
+                    // A failed eval (missing account, unknown field, bad offset)
+                    // is a failed assertion — and the description says why.
+                    Err(e) => AssertOutcome { description: format!("{} — {e}", a.describe()), pass: false },
                 })
                 .collect();
 
@@ -1030,6 +1147,51 @@ pub fn run_suite(ctx: &ReplayContext, scenarios: &[ScenarioSpec]) -> Vec<Scenari
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real SPL token account layout (165 bytes) with amount 1234 @ offset 64,
+    /// decoded through the same path named-field assertions use.
+    fn token_decoded() -> (crate::decode::DecodedAccount, Vec<u8>) {
+        let mut data = vec![0u8; 165];
+        data[64..72].copy_from_slice(&1234u64.to_le_bytes());
+        let dec = crate::decode::decode_bytes("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", &data)
+            .expect("token account decodes");
+        (dec, data)
+    }
+
+    #[test]
+    fn field_resolves_by_name_and_dot_segment() {
+        let (dec, data) = token_decoded();
+        let f = find_field(&dec, "amount").unwrap();
+        assert_eq!(f.offset, 64);
+        assert_eq!(read_field_int(&data, f).unwrap(), 1234);
+        // `vault.amount` reaches the same field by its final dot-segment.
+        assert_eq!(find_field(&dec, "vault.amount").unwrap().offset, 64);
+    }
+
+    #[test]
+    fn unknown_field_errors_and_lists_candidates() {
+        let (dec, _) = token_decoded();
+        let e = find_field(&dec, "reserveA").unwrap_err();
+        assert!(e.contains("no field \"reserveA\""), "{e}");
+        assert!(e.contains("amount"), "should list available fields: {e}");
+    }
+
+    #[test]
+    fn non_integer_field_refuses_comparison() {
+        let (dec, data) = token_decoded();
+        let owner = find_field(&dec, "owner").unwrap();
+        assert!(read_field_int(&data, owner).unwrap_err().contains("pubkey"));
+    }
+
+    #[test]
+    fn signed_fields_sign_extend() {
+        let f = crate::decode::Field {
+            name: "start_ts".into(), offset: 0, ty: "i64".into(), size: 8,
+            value: String::new(), editable: true, note: None,
+        };
+        assert_eq!(read_field_int(&(-42i64).to_le_bytes(), &f).unwrap(), -42);
+        assert_eq!(read_field_int(&7i64.to_le_bytes(), &f).unwrap(), 7);
+    }
 
     #[test]
     fn chrono_like_formats_utc() {

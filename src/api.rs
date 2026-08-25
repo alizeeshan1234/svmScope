@@ -49,6 +49,10 @@ impl MutationInput {
 /// - `"token_amount"` — SPL token amount (u64 @ 64); shorthand for `u64` at offset 64.
 /// - `"lamports_delta"` — change in lamports (post − pre); `value` may be negative.
 /// - `"token_delta"` — change in SPL token amount (post − pre); `value` may be negative.
+/// - `"field"` — the named `field` of the account's decoded layout (SPL layouts,
+///   or the owner program's IDL), e.g. `"field":"pool.reserveA"`. Matched by
+///   exact name or final dot-segment; integer/bool fields only, signed included.
+/// - `"field_delta"` — change in the named `field` (post − pre); may be negative.
 ///
 /// `op` is one of `== != < <= > >=` (default `==`).
 #[derive(Deserialize)]
@@ -58,6 +62,9 @@ pub struct AssertInput {
     pub kind: String,
     #[serde(default)]
     pub offset: usize,
+    /// Field name for the `field` / `field_delta` kinds.
+    #[serde(default)]
+    pub field: Option<String>,
     #[serde(default = "default_op")]
     pub op: String,
     /// Signed so deltas can be negative; non-delta kinds require it to be ≥ 0.
@@ -86,12 +93,21 @@ impl AssertInput {
         let unsigned = || -> Result<u64, String> {
             u64::try_from(self.value).map_err(|_| format!("{} value must be ≥ 0", self.kind))
         };
+        // Field kinds compare signed (an i64 timestamp is a legitimate target).
+        let field = || -> Result<String, String> {
+            match &self.field {
+                Some(f) if !f.trim().is_empty() => Ok(f.trim().to_string()),
+                _ => Err(format!("assert kind \"{}\" needs a \"field\" name", self.kind)),
+            }
+        };
         let check = match self.kind.as_str() {
             "lamports" => StateCheck::Lamports { op, value: unsigned()? },
             "u64" => StateCheck::U64At { offset: self.offset, op, value: unsigned()? },
             "token_amount" => StateCheck::U64At { offset: 64, op, value: unsigned()? },
             "lamports_delta" => StateCheck::LamportsDelta { op, value: self.value as i128 },
             "token_delta" => StateCheck::TokenDelta { op, value: self.value as i128 },
+            "field" => StateCheck::Field { name: field()?, op, value: self.value as i128 },
+            "field_delta" => StateCheck::FieldDelta { name: field()?, op, value: self.value as i128 },
             other => return Err(format!("unknown assert kind: {other}")),
         };
         Ok(AccountAssert { address: self.address, check })
@@ -197,6 +213,35 @@ mod tests {
             StateCheck::TokenDelta { op: CmpOp::Lt, value: -3 } => {}
             _ => panic!("expected TokenDelta < -3"),
         }
+    }
+
+    #[test]
+    fn field_asserts_resolve_and_allow_negatives() {
+        let a: AssertInput = serde_json::from_str(
+            r#"{"address":"X","kind":"field","field":"pool.reserveA","op":">=","value":1000}"#,
+        )
+        .unwrap();
+        match a.into_assert().unwrap().check {
+            StateCheck::Field { name, op: CmpOp::Ge, value: 1000 } => assert_eq!(name, "pool.reserveA"),
+            _ => panic!("expected Field >= 1000"),
+        }
+
+        // Deltas — and signed fields like i64 timestamps — may go negative.
+        let d: AssertInput = serde_json::from_str(
+            r#"{"address":"X","kind":"field_delta","field":"reserveA","value":-500}"#,
+        )
+        .unwrap();
+        match d.into_assert().unwrap().check {
+            StateCheck::FieldDelta { name, op: CmpOp::Eq, value: -500 } => assert_eq!(name, "reserveA"),
+            _ => panic!("expected FieldDelta == -500"),
+        }
+    }
+
+    #[test]
+    fn field_assert_requires_a_field_name() {
+        let a: AssertInput =
+            serde_json::from_str(r#"{"address":"X","kind":"field","value":1}"#).unwrap();
+        assert!(a.into_assert().unwrap_err().contains("field"));
     }
 
     #[test]

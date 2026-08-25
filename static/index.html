@@ -2054,7 +2054,8 @@ function exportSuite() {
   const box = $('exportBox'); box.classList.remove('hidden');
   box.innerHTML = `<pre>${esc(json)}</pre>
     <div class="cmd">1. click <b>❄ Freeze fixture</b> to save <b>fixture.json</b><br>
-       2. save this as <b>suite.json</b> beside it (add <code>"asserts"</code> to check resulting balances)<br>
+       2. save this as <b>suite.json</b> beside it — add <code>"asserts"</code> to check resulting state, by name:
+          <code>{"kind":"field","field":"amount","op":"&gt;=","value":1000}</code><br>
        3. run in CI: <b>svmscope test suite.json</b> — deterministic, offline, exits non-zero on any failure</div>
     <button class="btn ghost sm" id="copyExport" style="margin-top:10px">Copy JSON</button>`;
   $('copyExport').addEventListener('click', async () => { try { await navigator.clipboard.writeText(json); } catch {} $('copyExport').textContent = 'Copied ✓'; });

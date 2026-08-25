@@ -1,8 +1,8 @@
 # svmscope — Next build plan
 
-> **Status:** #1 (IDL decoding), #2 (delta assertions — named-field `assert
-> pool.reserveA` still open), and #3 (HTML reports) have shipped. #4 (agent/MCP
-> packaging) is the remaining item.
+> **Status:** #1 (IDL decoding), #2 (delta assertions AND named-field
+> `assert pool.reserveA` — both shipped), and #3 (HTML reports) have shipped.
+> #4 (agent/MCP packaging) is the remaining item.
 
 Four features, validated by what Solana devs are actually doing on X (Aug 2026):
 fast LiteSVM simulation on real account state, security auditors writing LiteSVM

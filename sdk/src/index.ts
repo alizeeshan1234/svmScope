@@ -119,9 +119,15 @@ export interface Assert {
    * - `"token_amount"` — SPL token amount (u64 @ 64).
    * - `"lamports_delta"` — change in lamports (post − pre); `value` may be negative.
    * - `"token_delta"` — change in SPL token amount (post − pre); `value` may be negative.
+   * - `"field"` — the named `field` of the account's decoded layout (SPL layouts,
+   *   or the owner program's IDL), e.g. `field: "pool.reserveA"` — no offsets.
+   *   Matched by exact name or final dot-segment; integer/bool fields only.
+   * - `"field_delta"` — change in the named `field` (post − pre); may be negative.
    */
-  kind?: "u64" | "lamports" | "token_amount" | "lamports_delta" | "token_delta";
+  kind?: "u64" | "lamports" | "token_amount" | "lamports_delta" | "token_delta" | "field" | "field_delta";
   offset?: number;
+  /** Field name for the `field` / `field_delta` kinds. */
+  field?: string;
   /** Comparison operator; default "==". */
   op?: "==" | "!=" | "<" | "<=" | ">" | ">=";
   value: number;

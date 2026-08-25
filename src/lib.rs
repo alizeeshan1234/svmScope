@@ -702,6 +702,22 @@ pub fn simulate_suite(
     let pre = replay::PreState::from_meta(&tx, &account_keys);
     let mut ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
     ctx.set_time_travel(time_travel);
+
+    // Named-field asserts resolve against the owner program's IDL, and this is
+    // the layer with RPC access — fetch one IDL per distinct owner up front.
+    // (The fixture path can't do this; there, built-in layouts still resolve.)
+    let owners: std::collections::HashSet<String> = scenarios
+        .iter()
+        .flat_map(|s| &s.asserts)
+        .filter(|a| matches!(a.check, replay::StateCheck::Field { .. } | replay::StateCheck::FieldDelta { .. }))
+        .filter_map(|a| ctx.pre_owner(&a.address))
+        .collect();
+    for owner in owners {
+        if let Some(idl) = Address::from_str(&owner).ok().and_then(|a| idl::fetch_idl_json(client, a)) {
+            ctx.add_idl(owner, idl);
+        }
+    }
+
     Ok(replay::run_suite(&ctx, &scenarios))
 }
 

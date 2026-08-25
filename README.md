@@ -130,7 +130,7 @@ optionally asserts on **resulting state** after replay:
       "name": "baseline swap succeeds and moves the reserve",
       "expect": "success",
       "asserts": [
-        { "address": "<POOL_RESERVE>", "kind": "u64", "offset": 64, "op": "!=", "value": 894205215695071 }
+        { "address": "<POOL_RESERVE>", "kind": "field", "field": "amount", "op": "!=", "value": 894205215695071 }
       ]
     },
     {
@@ -152,7 +152,7 @@ $ cargo run -- test suite.json
 svmscope test — fixture 4RHX…SoJWt (16 accounts, 5 programs, 2 scenarios) [deterministic, offline]
 
   PASS  baseline swap succeeds and moves the reserve  (expect: succeeds; got: succeeded)
-          ✓ assert Cb3N…zXYo u64@64 != 894205215695071
+          ✓ assert Cb3N…zXYo amount != 894205215695071
   PASS  draining the pool reserve reverts  (expect: reverts; got: reverted (Custom(6004)))
           ✓ assert Cb3N…zXYo u64@64 == 0
 
@@ -187,11 +187,11 @@ writes the matching `suite.json`.
 - [x] IDL-aware account decoding (named fields on Anchor program accounts, on-chain or pasted IDL)
 - [x] **Instruction decoding** — named instructions + decoded arguments + named accounts, from the on-chain IDL (Anchor) or known native layouts, at every depth of the call tree
 - [x] Richer assertions (`token_amount`, `lamports_delta`, `token_delta`)
+- [x] **Named-field assertions** — `{"kind":"field","field":"pool.reserveA"}` instead of `u64@64`, resolved through SPL layouts or the program's IDL (`field_delta` for changes)
 - [x] **Time travel** — warp the clock (slots/epochs/seconds or absolute) for replays, what-ifs, and suites
 - [x] Any cluster or **custom RPC** endpoint, per request
 - [ ] Anchor event decoding (`emit!` events from the program logs)
 - [ ] Archival state so fixtures capture pre-transaction state at the exact slot
-- [ ] Named-field assertions (`pool.reserve_a == N` instead of `u64@64`)
 - [ ] Cross-account invariants (token conservation, solvency)
 
 See [VISION.md](./VISION.md) for the full architecture.

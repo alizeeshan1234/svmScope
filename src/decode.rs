@@ -26,7 +26,7 @@ pub struct DecodedAccount {
 }
 
 /// One field within a decoded account.
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Field {
     pub name: String,
     pub offset: usize,
