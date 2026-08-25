@@ -4,12 +4,14 @@ TypeScript client for **svmscope** — the Solana transaction simulation layer.
 Decode, replay, mutate, assert, and **pre-flight simulate** any transaction against
 the real on-chain programs, from one dependency.
 
+Not yet published to npm — the client is a single zero-dependency file, so vendor it:
+
 ```bash
-npm install svmscope
+curl -o src/svmscope.ts https://raw.githubusercontent.com/alizeeshan1234/svmScope/master/sdk/src/index.ts
 ```
 
 ```ts
-import { Svmscope } from "svmscope";
+import { Svmscope } from "./svmscope";
 
 const svm = new Svmscope("http://127.0.0.1:3000"); // your svmscope API URL
 ```
@@ -52,7 +54,7 @@ console.log(replay.success ? "ok" : replay.error);
 ## Ask "what if?"
 
 ```ts
-import { setTokenAmount } from "svmscope";
+import { setTokenAmount } from "./svmscope";
 
 // What if this pool reserve were empty?
 const after = await svm.simulate(signature, [setTokenAmount(poolReserve, 0)]);
@@ -80,7 +82,7 @@ console.log(`${passed}/${outcomes.length} passed`);
 ## Mutation helpers
 
 ```ts
-import { setLamports, setTokenAmount, patchU64, patchBytes } from "svmscope";
+import { setLamports, setTokenAmount, patchU64, patchBytes } from "./svmscope";
 
 setLamports(address, 0);              // zero an account's SOL
 setTokenAmount(tokenAccount, 1_000n); // SPL amount (u64 @ 64)
@@ -94,8 +96,8 @@ patchBytes(address, 0, "01");         // raw bytes
 | --- | --- |
 | `analyze(signature)` | Decode a landed tx (CPI tree, balances, compute, IDL accounts). |
 | `replay(signature)` | Re-execute it locally against reconstructed pre-state. |
-| `simulate(signature, mutations)` | Replay with what-if account mutations. |
-| `runSuite(signature, scenarios)` | Run a scenario suite with outcome + state assertions. |
+| `simulate(signature, mutations, { timeTravel? })` | Replay with what-if account mutations, optionally with the clock warped. |
+| `runSuite(signature, scenarios, { timeTravel? })` | Run a scenario suite with outcome + state assertions. |
 | `preflight(tx, mutations?)` | Simulate an **unsigned** tx before sending. |
 | `freeze(signature)` | Capture a deterministic, offline fixture. |
 

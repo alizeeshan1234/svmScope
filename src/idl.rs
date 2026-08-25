@@ -226,16 +226,10 @@ impl Kind {
     }
 }
 
-/// Resolve an IDL field `type` to a fixed-size [`Kind`], or `None` if it's a
-/// variable-length type (`vec`/`string`/`option`) or something we don't yet
-/// handle (`defined`/`array`) — the walker stops at the first `None`.
-///
-/// TODO(you):
-///   - `{"array": [<inner>, N]}` → resolve inner, size = N * inner.size (fixed
-///     arrays keep stable offsets, so this is worth adding early).
-///   - `{"defined": {"name": ...}}` → look the type up in `idl["types"]` and, if
-///     all its fields are fixed, inline them (dotted names) / sum their sizes.
-///   - everything else (`vec`, `string`, `option`) stays `None` = stop.
+/// Resolve an IDL field `type` to a fixed-size [`Kind`]: scalars and fixed
+/// `{"array": [inner, N]}` types resolve; anything variable-length or composite
+/// (`vec`/`string`/`option`/`defined` — the last is inlined by the walker itself)
+/// returns `None`, which tells the caller offsets are no longer trustworthy.
 fn resolve_fixed(ty: &Value) -> Option<Kind> {
     // String scalars: "u64", "pubkey", "bool", …
     if let Some(s) = ty.as_str() {
@@ -255,10 +249,9 @@ fn resolve_fixed(ty: &Value) -> Option<Kind> {
             _ => None,
         };
     }
-    // Object types ({"array"|"defined"|"vec"|"option": …}) — see TODO above.
-
+    // Fixed arrays keep stable offsets; every other object type stops the walk.
     if let Some(arr) = ty.get("array").and_then(|a| a.as_array()) {
-        let inner = resolve_fixed(arr.get(0)?)?;
+        let inner = resolve_fixed(arr.first()?)?;
         let count = arr.get(1)?.as_u64()?;
         return Some(Kind::Bytes(inner.size() * count as usize));
     }

@@ -1,4 +1,4 @@
-//! Prints the lamport balance change for every account a transaction touched.
+//! Balance changes (SOL and SPL tokens) for every account a transaction touched.
 
 use crate::utils::resolve_account_keys;
 use serde_json::Value;
@@ -90,32 +90,76 @@ pub fn token_diffs(tx: &Value) -> Vec<TokenChange> {
     out
 }
 
-/// Print the lamport balance change for every account that changed.
+/// The lamport balance change for every account that changed.
 pub fn account_diffs(tx: &Value) -> Vec<BalanceChange> {
-    let pre = tx["meta"]["preBalances"]
-        .as_array()
-        .expect("preBalances should be an array");
-
-    let post = tx["meta"]["postBalances"]
-        .as_array()
-        .expect("postBalances should be an array");
-
+    let empty = vec![];
+    let pre = tx["meta"]["preBalances"].as_array().unwrap_or(&empty);
+    let post = tx["meta"]["postBalances"].as_array().unwrap_or(&empty);
     let account_keys = resolve_account_keys(tx);
 
     let mut balance_change: Vec<BalanceChange> = Vec::new();
 
-    for i in 0..pre.len() {
-        let pre_balance = pre[i].as_u64().expect("preBalance should be u64");
-        let post_balance = post[i].as_u64().expect("postBalance should be u64");
+    for i in 0..pre.len().min(post.len()).min(account_keys.len()) {
+        let pre_balance = pre[i].as_u64().unwrap_or(0);
+        let post_balance = post[i].as_u64().unwrap_or(0);
         let delta = post_balance as i64 - pre_balance as i64;
 
         if delta != 0 {
             balance_change.push(BalanceChange {
                 address: account_keys[i].clone(),
-                delta: delta
+                delta,
             });
         }
     }
 
     balance_change
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tx() -> Value {
+        json!({
+            "transaction": { "message": { "accountKeys": ["A", "B", "C"] } },
+            "meta": {
+                "preBalances":  [100, 50, 5],
+                "postBalances": [90, 50, 15],
+                "preTokenBalances": [
+                    { "accountIndex": 1, "mint": "M", "owner": "O",
+                      "uiTokenAmount": { "amount": "1000", "decimals": 6 } },
+                    { "accountIndex": 2, "mint": "M", "owner": "O2",
+                      "uiTokenAmount": { "amount": "7", "decimals": 6 } }
+                ],
+                "postTokenBalances": [
+                    { "accountIndex": 1, "mint": "M", "owner": "O",
+                      "uiTokenAmount": { "amount": "400", "decimals": 6 } }
+                ]
+            }
+        })
+    }
+
+    #[test]
+    fn lamport_deltas_skip_unchanged_accounts() {
+        let d = account_diffs(&tx());
+        assert_eq!(d.len(), 2);
+        assert_eq!((d[0].address.as_str(), d[0].delta), ("A", -10));
+        assert_eq!((d[1].address.as_str(), d[1].delta), ("C", 10));
+    }
+
+    #[test]
+    fn token_deltas_include_drained_accounts() {
+        let d = token_diffs(&tx());
+        assert_eq!(d.len(), 2);
+        assert_eq!((d[0].address.as_str(), d[0].delta_raw.as_str()), ("B", "-600"));
+        // Present pre but not post: fully drained, delta is the whole balance.
+        assert_eq!((d[1].address.as_str(), d[1].delta_raw.as_str(), d[1].post_raw.as_str()), ("C", "-7", "0"));
+    }
+
+    #[test]
+    fn tolerates_missing_meta() {
+        assert!(account_diffs(&json!({})).is_empty());
+        assert!(token_diffs(&json!({})).is_empty());
+    }
 }

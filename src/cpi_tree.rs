@@ -13,50 +13,94 @@ pub struct CpiEntry {
 /// Build the CPI call tree as a flat list; nesting is carried by `stack_height`
 /// (1 = top-level instruction, 2 = a CPI, 3 = a nested CPI, ...).
 pub fn build_cpi_tree(tx: &Value) -> Vec<CpiEntry> {
+    let empty = vec![];
     let instructions = tx["transaction"]["message"]["instructions"]
         .as_array()
-        .expect("instructions should be an array");
+        .unwrap_or(&empty);
 
     // Full account list, including accounts loaded from Address Lookup Tables.
     let account_keys = resolve_account_keys(tx);
+    let program_at = |ix: &Value| -> Option<String> {
+        let i = ix["programIdIndex"].as_u64()? as usize;
+        account_keys.get(i).cloned()
+    };
 
     let mut entries: Vec<CpiEntry> = Vec::new();
 
     for (index, ix) in instructions.iter().enumerate() {
-        let program_id_index = ix["programIdIndex"].as_u64().unwrap() as usize;
-        let program_id = &account_keys[program_id_index];
+        let Some(program) = program_at(ix) else { continue };
 
         // Top-level instruction.
-        entries.push(CpiEntry {
-            index,
-            program: program_id.to_string(),
-            stack_height: 1,
-        });
+        entries.push(CpiEntry { index, program, stack_height: 1 });
 
-        let inner_ix = tx["meta"]["innerInstructions"]
+        // No inner group just means this instruction made no CPIs — that's normal.
+        let my_group = tx["meta"]["innerInstructions"]
             .as_array()
-            .expect("innerInstructions should be an array");
-
-        let my_group = inner_ix
+            .unwrap_or(&empty)
             .iter()
             .find(|group| group["index"].as_u64() == Some(index as u64));
 
-        // No inner group just means this instruction made no CPIs — that's normal.
         if let Some(my_group) = my_group {
-            let inners = my_group["instructions"].as_array().unwrap();
-            for inner in inners {
-                let pid_index = inner["programIdIndex"].as_u64().unwrap() as usize;
-                let pid = &account_keys[pid_index];
-                let stack_height = inner["stackHeight"].as_u64().unwrap();
-
-                entries.push(CpiEntry {
-                    index,
-                    program: pid.to_string(),
-                    stack_height,
-                });
+            for inner in my_group["instructions"].as_array().unwrap_or(&empty) {
+                let Some(program) = program_at(inner) else { continue };
+                // Old transactions (pre-v1.14.6 meta) report no stackHeight; a
+                // direct CPI (depth 2) is the faithful default there.
+                let stack_height = inner["stackHeight"].as_u64().unwrap_or(2);
+                entries.push(CpiEntry { index, program, stack_height });
             }
         }
     }
 
     entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tx(inner: Value) -> Value {
+        json!({
+            "transaction": { "message": {
+                "accountKeys": ["Payer111", "ProgA", "ProgB"],
+                "instructions": [{ "programIdIndex": 1 }]
+            }},
+            "meta": { "innerInstructions": inner }
+        })
+    }
+
+    #[test]
+    fn builds_tree_with_stack_heights() {
+        let t = tx(json!([{ "index": 0, "instructions": [
+            { "programIdIndex": 2, "stackHeight": 2 },
+            { "programIdIndex": 1, "stackHeight": 3 }
+        ]}]));
+        let tree = build_cpi_tree(&t);
+        assert_eq!(tree.len(), 3);
+        assert_eq!((tree[0].program.as_str(), tree[0].stack_height), ("ProgA", 1));
+        assert_eq!((tree[1].program.as_str(), tree[1].stack_height), ("ProgB", 2));
+        assert_eq!((tree[2].program.as_str(), tree[2].stack_height), ("ProgA", 3));
+    }
+
+    #[test]
+    fn missing_stack_height_defaults_to_direct_cpi() {
+        let t = tx(json!([{ "index": 0, "instructions": [{ "programIdIndex": 2 }] }]));
+        let tree = build_cpi_tree(&t);
+        assert_eq!(tree[1].stack_height, 2);
+    }
+
+    #[test]
+    fn tolerates_missing_meta_and_instructions() {
+        assert!(build_cpi_tree(&json!({})).is_empty());
+        let no_inner = json!({
+            "transaction": { "message": {
+                "accountKeys": ["Payer111", "ProgA"],
+                "instructions": [{ "programIdIndex": 1 }]
+            }},
+            "meta": {}
+        });
+        let tree = build_cpi_tree(&no_inner);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].stack_height, 1);
+    }
 }

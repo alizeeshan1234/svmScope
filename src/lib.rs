@@ -10,7 +10,6 @@ pub mod fixture;
 pub mod report;
 pub mod diffs;
 pub mod replay;
-pub mod state;
 pub mod utils;
 pub mod idl;
 
@@ -323,11 +322,13 @@ pub fn run_replay(client: &RpcClient, signature: &str) -> Result<replay::ReplayR
     Ok(replay::replay_transaction(client, signature, &account_keys, tx["slot"].as_u64(), &pre))
 }
 
-/// Replay a transaction after applying what-if mutations, returning just the result.
+/// Replay a transaction after applying what-if mutations (optionally with the
+/// clock warped), returning just the result.
 pub fn simulate(
     client: &RpcClient,
     signature: &str,
     mutations: &[replay::Mutation],
+    time_travel: replay::TimeTravel,
 ) -> Result<replay::ReplayResult, String> {
     let tx: serde_json::Value = client
         .send(
@@ -342,7 +343,9 @@ pub fn simulate(
 
     let account_keys = utils::resolve_account_keys(&tx);
     let pre = replay::PreState::from_meta(&tx, &account_keys);
-    Ok(replay::mutate_and_replay(client, signature, &account_keys, mutations, tx["slot"].as_u64(), &pre))
+    let mut ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
+    ctx.set_time_travel(time_travel);
+    Ok(ctx.run(mutations))
 }
 
 /// A simulation result enriched with what a developer actually needs: a
@@ -564,7 +567,7 @@ pub fn simulate_preflight(
         .map_err(|e| format!("bad base64 transaction: {e}"))?;
     let tx: solana_transaction::versioned::VersionedTransaction =
         bincode::deserialize(&bytes).map_err(|e| format!("could not deserialize transaction: {e}"))?;
-    let ctx = replay::preflight_context(client, tx);
+    let ctx = replay::preflight_context(client, tx)?;
     Ok(ctx.run(mutations))
 }
 
@@ -582,7 +585,7 @@ pub fn preflight_report(
         .map_err(|e| format!("bad base64 transaction: {e}"))?;
     let tx: solana_transaction::versioned::VersionedTransaction =
         bincode::deserialize(&bytes).map_err(|e| format!("could not deserialize transaction: {e}"))?;
-    let mut ctx = replay::preflight_context(client, tx);
+    let mut ctx = replay::preflight_context(client, tx)?;
     let warped = !time_travel.is_noop();
     ctx.set_time_travel(time_travel);
     let clock_desc = warped.then(|| ctx.describe_clock());
@@ -613,7 +616,7 @@ pub fn replay_report(
     }
     let account_keys = utils::resolve_account_keys(&tx);
     let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let mut ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre);
+    let mut ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
     let warped = !time_travel.is_noop();
     ctx.set_time_travel(time_travel);
     let clock_desc = warped.then(|| ctx.describe_clock());
@@ -628,10 +631,12 @@ pub fn replay_report(
 
 /// Run a suite of test scenarios against one transaction. State is fetched once
 /// and every scenario replays against a fresh copy — the core of the tester.
+/// `time_travel` warps the clock for every scenario in the suite.
 pub fn simulate_suite(
     client: &RpcClient,
     signature: &str,
     scenarios: Vec<replay::ScenarioSpec>,
+    time_travel: replay::TimeTravel,
 ) -> Result<Vec<replay::ScenarioOutcome>, String> {
     let tx: serde_json::Value = client
         .send(
@@ -644,7 +649,8 @@ pub fn simulate_suite(
     }
     let account_keys = utils::resolve_account_keys(&tx);
     let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre);
+    let mut ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
+    ctx.set_time_travel(time_travel);
     Ok(replay::run_suite(&ctx, &scenarios))
 }
 
@@ -663,15 +669,38 @@ pub fn capture_fixture(client: &RpcClient, signature: &str) -> Result<fixture::F
     let slot = tx["slot"].as_u64();
     let account_keys = utils::resolve_account_keys(&tx);
     let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let ctx = replay::build_context(client, signature, &account_keys, slot, &pre);
+    let ctx = replay::build_context(client, signature, &account_keys, slot, &pre)?;
     Ok(ctx.to_fixture(signature, slot))
 }
 
 /// Run a scenario suite against a frozen fixture — deterministic, offline, CI-safe.
+/// `time_travel` warps the clock for every scenario in the suite.
 pub fn run_fixture_suite(
     fx: &fixture::Fixture,
     scenarios: Vec<replay::ScenarioSpec>,
+    time_travel: replay::TimeTravel,
 ) -> Result<Vec<replay::ScenarioOutcome>, String> {
-    let ctx = replay::ReplayContext::from_fixture(fx)?;
+    let mut ctx = replay::ReplayContext::from_fixture(fx)?;
+    ctx.set_time_travel(time_travel);
     Ok(replay::run_suite(&ctx, &scenarios))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_rpc_precedence() {
+        // Explicit URL beats everything.
+        assert_eq!(resolve_rpc(Some("devnet"), Some("http://my"), "http://def"), "http://my");
+        // Cluster names map to public endpoints.
+        assert_eq!(resolve_rpc(Some("devnet"), None, "http://def"), "https://api.devnet.solana.com");
+        assert_eq!(resolve_rpc(Some("m"), None, "http://def"), "https://api.mainnet-beta.solana.com");
+        assert_eq!(resolve_rpc(Some("localnet"), None, "http://def"), "http://127.0.0.1:8899");
+        // Nothing specified → the default; unknown cluster → the default.
+        assert_eq!(resolve_rpc(None, None, "http://def"), "http://def");
+        assert_eq!(resolve_rpc(Some("nope"), None, "http://def"), "http://def");
+        // A non-http "rpc" value is ignored, not used verbatim.
+        assert_eq!(resolve_rpc(None, Some("garbage"), "http://def"), "http://def");
+    }
 }

@@ -84,7 +84,7 @@ struct SimRequest {
 
 /// Serve the static frontend page.
 async fn index() -> Html<&'static str> {
-    Html(include_str!("../../static/index.html"))
+    Html(include_str!("../../../static/index.html"))
 }
 
 /// GET /analyze/:signature — decode + replay a transaction, return JSON.
@@ -122,7 +122,7 @@ async fn simulate_handler(
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || {
         let client = RpcClient::new(url);
-        svmscope::simulate(&client, &req.signature, &mutations)
+        svmscope::simulate(&client, &req.signature, &mutations, req.time_travel)
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
@@ -137,6 +137,15 @@ async fn simulate_handler(
 async fn suite_handler(
     Json(req): Json<SuiteRequest>,
 ) -> Result<Json<Vec<ScenarioOutcome>>, (StatusCode, String)> {
+    // Fixture-backed suites are a CLI feature (`svmscope test suite.json`) — the
+    // server can't read a file on the caller's machine, so say so instead of
+    // silently ignoring the field.
+    if req.fixture.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "fixture suites run locally: `svmscope test suite.json`. The API needs a `signature`.".to_string(),
+        ));
+    }
     let signature = req
         .signature
         .clone()
@@ -151,7 +160,7 @@ async fn suite_handler(
 
     let result = tokio::task::spawn_blocking(move || {
         let client = RpcClient::new(url);
-        svmscope::simulate_suite(&client, &signature, scenarios)
+        svmscope::simulate_suite(&client, &signature, scenarios, req.time_travel)
     })
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
@@ -398,8 +407,8 @@ async fn api_index() -> Json<serde_json::Value> {
         "endpoints": {
             "GET  /analyze/{signature}":  "Decode a transaction: CPI tree, balance & token changes, compute, and IDL-decoded accounts.",
             "GET  /replay/{signature}":   "Re-execute the transaction locally against reconstructed pre-state.",
-            "POST /simulate":             "{ signature, mutations[] } — replay with what-if account mutations.",
-            "POST /simulate_suite":       "{ signature, scenarios[] } — run a suite of scenarios with outcome + state assertions.",
+            "POST /simulate":             "{ signature, mutations[], time_travel? } — replay with what-if account mutations, optionally with the clock warped.",
+            "POST /simulate_suite":       "{ signature, scenarios[], time_travel? } — run a suite of scenarios with outcome + state assertions.",
             "POST /preflight":            "{ transaction, mutations[] } — simulate an UNSIGNED transaction against current state before sending.",
             "GET  /freeze/{signature}":   "Capture a self-contained fixture for deterministic, offline replay."
         }

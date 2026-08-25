@@ -1,4 +1,4 @@
-//! Prints how many compute units each program consumed, parsed from the logs.
+//! How many compute units each program consumed, parsed from the logs.
 
 use serde_json::Value;
 
@@ -45,6 +45,32 @@ pub fn cu_per_program(tx: &Value) -> Vec<CuUsage> {
             CuUsage { program, cu }
         })
         .collect();
-    cu_usage.sort_by(|a, b| b.cu.cmp(&a.cu));
+    cu_usage.sort_by_key(|c| std::cmp::Reverse(c.cu));
     cu_usage
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn sums_per_program_and_sorts_descending() {
+        let tx = json!({ "meta": { "logMessages": [
+            "Program AAA invoke [1]",
+            "Program AAA consumed 100 of 200000 compute units",
+            "Program BBB consumed 5000 of 200000 compute units",
+            "Program AAA consumed 400 of 200000 compute units",
+            "Program AAA success"
+        ]}});
+        let cu = cu_per_program(&tx);
+        assert_eq!(cu.len(), 2);
+        assert_eq!((cu[0].program.as_str(), cu[0].cu), ("BBB", 5000));
+        assert_eq!((cu[1].program.as_str(), cu[1].cu), ("AAA", 500));
+    }
+
+    #[test]
+    fn no_logs_means_no_rows() {
+        assert!(cu_per_program(&json!({})).is_empty());
+    }
 }

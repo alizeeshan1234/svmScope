@@ -351,13 +351,31 @@ export class Svmscope {
   }
 
   /** Replay a landed transaction with what-if account mutations. */
-  simulate(signature: string, mutations: Mutation[], cluster?: Cluster): Promise<ReplayResult> {
-    return this.post("/simulate", { signature, mutations, ...this.clusterBody(cluster) });
+  simulate(
+    signature: string,
+    mutations: Mutation[],
+    opts: { timeTravel?: TimeTravel; cluster?: Cluster } = {},
+  ): Promise<ReplayResult> {
+    return this.post("/simulate", {
+      signature,
+      mutations,
+      time_travel: opts.timeTravel ?? {},
+      ...this.clusterBody(opts.cluster),
+    });
   }
 
   /** Run a suite of test scenarios (outcome + state assertions) against a transaction. */
-  runSuite(signature: string, scenarios: Scenario[], cluster?: Cluster): Promise<ScenarioOutcome[]> {
-    return this.post("/simulate_suite", { signature, scenarios, ...this.clusterBody(cluster) });
+  runSuite(
+    signature: string,
+    scenarios: Scenario[],
+    opts: { timeTravel?: TimeTravel; cluster?: Cluster } = {},
+  ): Promise<ScenarioOutcome[]> {
+    return this.post("/simulate_suite", {
+      signature,
+      scenarios,
+      time_travel: opts.timeTravel ?? {},
+      ...this.clusterBody(opts.cluster),
+    });
   }
 
   /**

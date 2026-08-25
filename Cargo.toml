@@ -20,9 +20,3 @@ solana-clock = "=3.1.1"
 solana-client = "=4.1.1"
 solana-transaction = "=4.1.6"
 tokio = { version = "1.53.1", features = ["full"] }
-
-# Add later, when you need them:
-# solana-transaction-status = "2"   # typed tx/meta structs (upgrade from serde_json::Value)
-# solana-client = "2"               # RpcClient, to fetch live transactions
-# regex = "1"                       # parse "consumed N compute units" from logs
-# owo-colors = "4"                  # colored tree output

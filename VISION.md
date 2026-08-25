@@ -98,12 +98,17 @@ re-execute the transaction, and confirm you get the **same result** — same suc
 failure, same logs, same state changes. This is the moment `svmscope` stops being a
 decoder and becomes a *simulator*: a transaction you can run, not just read.
 
-### Stage 4 — "What-If" Mutation Engine  ✅
-Once you can replay deterministically, you can change one thing and replay again:
-- Crash or stale an **oracle price**.
-- Remove or swap a **signer**.
-- Change an **account balance, owner, or data**.
-- Advance **time / slot**.
+### Stage 4 — "What-If" Mutation Engine  ✅ (partially)
+Once you can replay deterministically, you can change one thing and replay again.
+
+Implemented today:
+- Change an **account balance or data** (`Lamports`, `Data`, `DataPatch`) — which
+  covers crashing/staling an **oracle price** by patching the oracle account's bytes.
+- Advance **time / slot / epoch** (relative or absolute — the time-travel engine).
+
+Not yet implemented:
+- Remove or swap a **signer** (sigverify is disabled during replay, so signer
+  semantics aren't modelled at all yet).
 - Exhaust the **compute budget**.
 - Swap a dependency's **program binary** (e.g. test a patch).
 
@@ -127,13 +132,14 @@ under different conditions.
   decode         CPI tree, balance diffs, compute, ALT resolution   (Stage 1)
   state          reconstruct accounts + program binaries + sysvars  (Stage 2)
   replay         embedded SVM harness, execute & compare            (Stage 3)
-  mutate         state/price/signer/time mutations                  (Stage 4)
+  mutate         state/data/time mutations                          (Stage 4)
   invariants     invariant definitions + checks + test emission     (Stage 5)
 ```
 
 Today, `cli`, `fetch`, `decode`, `state`, `replay`, and `mutate` all exist (across
-`main`, the `cpi_tree` / `diffs` / `compute` / `utils` modules, `state`, and `replay`).
-Stage 5 (`invariants`) is the build ahead.
+`main`, the `cpi_tree` / `diffs` / `compute` / `utils` / `idl` / `decode` modules, and
+`replay` — which owns state reconstruction, the SVM harness, mutations, and time
+travel). Stage 5 (`invariants`) is the build ahead.
 
 ---
 
@@ -163,7 +169,8 @@ invariant layer*, not in re-implementing an SVM.
       resolution, graceful error handling.
 - [x] **Stage 2 — State reconstruction**: fetch accounts + program binaries.
 - [x] **Stage 3 — Deterministic replay**: LiteSVM harness, replay & compare.
-- [x] **Stage 4 — Mutation engine** (lamports + data): oracle / signer / account / time / compute.
+- [x] **Stage 4 — Mutation engine**: account lamports/data mutations + time travel.
+      Still open: signer removal/swap, compute-budget mutation, program-binary swap.
 - [ ] **Stage 5 — Invariants & test generation**.
 
 Adjacent quality-of-life: file mode (offline analysis), configurable RPC endpoint,

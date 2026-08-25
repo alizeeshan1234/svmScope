@@ -10,7 +10,7 @@ use std::env;
 use std::error::Error;
 use std::str::FromStr;
 
-use svmscope::{analyze, api, compute, cpi_tree, diffs, replay, simulate_suite, state, utils};
+use svmscope::{analyze, api, compute, cpi_tree, diffs, replay, simulate_suite, utils};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
@@ -115,9 +115,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("{:<44} {} CU", c.program, c.cu);
     }
 
-    println!("\n-- account states --");
-    state::fetch_account_states(&client, &account_keys);
-
     println!("\n-- replay --");
     let pre = replay::PreState::from_meta(&tx, &account_keys);
     let baseline = replay::replay_transaction(&client, signature, &account_keys, tx["slot"].as_u64(), &pre);
@@ -176,10 +173,10 @@ fn load_and_run_suite(
             .map_err(|e| format!("cannot read fixture {}: {e}", fx_path.display()))?;
         let fx = svmscope::fixture::Fixture::from_json(&fx_text)?;
         let label = format!("fixture {} ({}) [deterministic, offline]", fx.signature, fx.summary());
-        Ok((label, svmscope::run_fixture_suite(&fx, scenarios)?))
+        Ok((label, svmscope::run_fixture_suite(&fx, scenarios, req.time_travel)?))
     } else if let Some(sig) = &req.signature {
         let label = format!("{sig} [live RPC — may drift]");
-        Ok((label, simulate_suite(client, sig, scenarios)?))
+        Ok((label, simulate_suite(client, sig, scenarios, req.time_travel)?))
     } else {
         Err("suite must specify either \"fixture\" or \"signature\"".into())
     }

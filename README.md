@@ -182,9 +182,12 @@ writes the matching `suite.json`.
 - [x] Baseline-vs-mutated **diff** output (web UI)
 - [x] Hermetic **fixtures** — freeze state once, replay deterministically offline
 - [x] Scenario suites + post-state **assertions**; `svmscope test` runner for CI
+- [x] IDL-aware account decoding (named fields on Anchor program accounts, on-chain or pasted IDL)
+- [x] Richer assertions (`token_amount`, `lamports_delta`, `token_delta`)
+- [x] **Time travel** — warp the clock (slots/epochs/seconds or absolute) for replays, what-ifs, and suites
 - [ ] Archival state so fixtures capture pre-transaction state at the exact slot
-- [ ] IDL-aware account decoding (name fields on arbitrary program accounts)
-- [ ] Richer assertions (token-amount / SOL deltas, cross-account invariants)
+- [ ] Named-field assertions (`pool.reserve_a == N` instead of `u64@64`)
+- [ ] Cross-account invariants (token conservation, solvency)
 
 See [VISION.md](./VISION.md) for the full architecture.
 
@@ -208,8 +211,8 @@ lists the surface):
 | --- | --- |
 | `GET /analyze/{sig}` | Decode a tx: CPI tree, balances, compute, IDL-decoded accounts. |
 | `GET /replay/{sig}` | Re-execute it locally against reconstructed pre-state. |
-| `POST /simulate` | `{ signature, mutations[] }` — replay with what-if edits. |
-| `POST /simulate_suite` | `{ signature, scenarios[] }` — scenario tests with assertions. |
+| `POST /simulate` | `{ signature, mutations[], time_travel? }` — replay with what-if edits. |
+| `POST /simulate_suite` | `{ signature, scenarios[], time_travel? }` — scenario tests with assertions. |
 | `POST /preflight` | `{ transaction, mutations[] }` — simulate an **unsigned** tx before sending. |
 | `GET /freeze/{sig}` | Capture a deterministic, offline fixture. |
 
@@ -218,10 +221,17 @@ lists the surface):
 `?rpc=<url>` for a custom endpoint — so one instance serves them all. The UI has a
 cluster dropdown; the CLI takes `--cluster <name>` / `--rpc <url>`.
 
-A typed TypeScript client lives in [`sdk/`](./sdk) (`npm install svmscope`):
+**Time travel:** `time_travel` warps the SVM clock before executing — relative
+(`{ "epochs": 1 }`, `{ "seconds": 2592000 }`, `{ "slots": N }`) or absolute
+(`at_unix_timestamp` / `at_slot` / `at_epoch`) — so time-gated logic (vesting
+cliffs, staking cooldowns, auction ends) is testable without waiting. The UI's
+**⏱ Now** control applies it globally.
+
+A typed TypeScript client lives in [`sdk/`](./sdk) — a single zero-dependency
+file; vendor `sdk/src/index.ts` until it's published to npm:
 
 ```ts
-import { Svmscope } from "svmscope";
+import { Svmscope } from "./svmscope";
 const svm = new Svmscope("http://127.0.0.1:3000");
 const result = await svm.preflight(unsignedTx.serialize()); // preview before signing
 ```

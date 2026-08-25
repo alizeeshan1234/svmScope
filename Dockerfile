@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy only what the server binary needs to compile. `include_str!` in
-# src/bin/server.rs pulls in ../../static/index.html at compile time, so static/
+# src/bin/server/main.rs pulls in ../../../static/index.html at compile time, so static/
 # must be present during the build.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src

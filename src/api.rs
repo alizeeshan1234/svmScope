@@ -6,7 +6,7 @@
 
 use serde::Deserialize;
 
-use crate::replay::{AccountAssert, CmpOp, Expect, Mutation, ScenarioSpec, StateCheck};
+use crate::replay::{AccountAssert, CmpOp, Expect, Mutation, ScenarioSpec, StateCheck, TimeTravel};
 
 /// One what-if mutation. `kind` selects the variant:
 /// `{"kind":"lamports","address":..,"lamports":..}` or
@@ -21,7 +21,7 @@ pub enum MutationInput {
 /// Decode a hex string, tolerating `0x`, spaces, and underscores.
 pub fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     let s = s.trim().trim_start_matches("0x").replace([' ', '_'], "");
-    if s.is_empty() || s.len() % 2 != 0 {
+    if s.is_empty() || !s.len().is_multiple_of(2) {
         return Err("hex bytes must be a non-empty, even-length hex string".into());
     }
     (0..s.len())
@@ -144,6 +144,91 @@ impl ScenarioInput {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_decode_tolerates_prefix_spaces_underscores() {
+        assert_eq!(hex_decode("0xDEAD_beef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(hex_decode("00 ff").unwrap(), vec![0x00, 0xff]);
+    }
+
+    #[test]
+    fn hex_decode_rejects_bad_input() {
+        assert!(hex_decode("").is_err());
+        assert!(hex_decode("abc").is_err()); // odd length
+        assert!(hex_decode("zz").is_err());
+    }
+
+    #[test]
+    fn data_mutation_becomes_patch() {
+        let m: MutationInput = serde_json::from_str(
+            r#"{"kind":"data","address":"X","offset":64,"bytes_hex":"0000000000000000"}"#,
+        )
+        .unwrap();
+        match m.into_mutation().unwrap() {
+            Mutation::DataPatch { address, offset, bytes } => {
+                assert_eq!(address, "X");
+                assert_eq!(offset, 64);
+                assert_eq!(bytes, vec![0u8; 8]);
+            }
+            _ => panic!("expected DataPatch"),
+        }
+    }
+
+    #[test]
+    fn assert_kinds_and_ops_resolve() {
+        let a: AssertInput = serde_json::from_str(
+            r#"{"address":"X","kind":"token_amount","op":">=","value":5}"#,
+        )
+        .unwrap();
+        // token_amount is shorthand for u64 at the SPL amount offset.
+        match a.into_assert().unwrap().check {
+            StateCheck::U64At { offset: 64, op: CmpOp::Ge, value: 5 } => {}
+            _ => panic!("expected U64At @64 >= 5"),
+        }
+
+        let d: AssertInput = serde_json::from_str(
+            r#"{"address":"X","kind":"token_delta","op":"<","value":-3}"#,
+        )
+        .unwrap();
+        match d.into_assert().unwrap().check {
+            StateCheck::TokenDelta { op: CmpOp::Lt, value: -3 } => {}
+            _ => panic!("expected TokenDelta < -3"),
+        }
+    }
+
+    #[test]
+    fn non_delta_assert_rejects_negative_value() {
+        let a: AssertInput =
+            serde_json::from_str(r#"{"address":"X","kind":"lamports","value":-1}"#).unwrap();
+        assert!(a.into_assert().is_err());
+    }
+
+    #[test]
+    fn unknown_op_and_kind_error() {
+        let a: AssertInput =
+            serde_json::from_str(r#"{"address":"X","op":"~=","value":1}"#).unwrap();
+        assert!(a.into_assert().is_err());
+        let k: AssertInput =
+            serde_json::from_str(r#"{"address":"X","kind":"balancez","value":1}"#).unwrap();
+        assert!(k.into_assert().is_err());
+    }
+
+    #[test]
+    fn scenario_expect_revert_with_contains() {
+        let s: ScenarioInput = serde_json::from_str(
+            r#"{"name":"drain","expect":"revert","contains":"Slippage","mutations":[],"asserts":[]}"#,
+        )
+        .unwrap();
+        match s.into_spec().unwrap().expect {
+            Expect::RevertContains(t) => assert_eq!(t, "Slippage"),
+            _ => panic!("expected RevertContains"),
+        }
+    }
+}
+
 /// POST body for `/simulate_suite`, and the on-disk format for `svmscope test`.
 ///
 /// Provide `fixture` (a path to a frozen fixture file) for a deterministic,
@@ -160,5 +245,8 @@ pub struct SuiteRequest {
     /// Explicit RPC URL override for the live-signature path.
     #[serde(default)]
     pub rpc: Option<String>,
+    /// Optional clock warp applied to every scenario in the suite.
+    #[serde(default)]
+    pub time_travel: TimeTravel,
     pub scenarios: Vec<ScenarioInput>,
 }

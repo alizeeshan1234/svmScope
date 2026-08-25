@@ -32,7 +32,7 @@ pub struct ReplayResult {
 fn b64_decode(s: &str) -> Vec<u8> {
     base64::engine::general_purpose::STANDARD
         .decode(s)
-        .expect("bad base64")
+        .unwrap_or_default()
 }
 
 /// Fetch a single account's raw data via getAccountInfo.
@@ -53,6 +53,9 @@ enum Loaded {
     Program(Vec<u8>),
 }
 
+/// The loadables plus the set of addresses that actually exist on-chain.
+type LoadedAccounts = (Vec<(Address, Loaded)>, HashMap<String, ()>);
+
 /// Fetch each account's on-chain state and resolve program ELFs into loadables.
 ///
 /// This does all the network I/O; building a fresh SVM from the result is then
@@ -61,18 +64,17 @@ enum Loaded {
 /// (non-null) — including programs whose ELF we couldn't resolve. The caller uses
 /// that set to tell a genuinely-closed account (safe to reconstruct) apart from a
 /// program that merely failed to load (must NOT be reconstructed as data).
-fn fetch_loaded(
-    client: &RpcClient,
-    account_keys: &[String],
-) -> (Vec<(Address, Loaded)>, HashMap<String, ()>) {
+fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Result<LoadedAccounts, String> {
     let resp: serde_json::Value = client
         .send(
             RpcRequest::GetMultipleAccounts,
             json!([account_keys, { "encoding": "base64" }]),
         )
-        .expect("getMultipleAccounts failed");
+        .map_err(|e| format!("getMultipleAccounts failed: {e}"))?;
 
-    let accounts = resp["value"].as_array().expect("value should be an array");
+    let accounts = resp["value"]
+        .as_array()
+        .ok_or("unexpected getMultipleAccounts response (no value array)")?;
     let mut out: Vec<(Address, Loaded)> = Vec::new();
     let mut existing: HashMap<String, ()> = HashMap::new();
 
@@ -81,20 +83,20 @@ fn fetch_loaded(
             continue; // account doesn't exist (created during the tx, etc.)
         }
         existing.insert(account_keys[i].clone(), ());
-        let address = Address::from_str(&account_keys[i]).expect("bad account address");
-        let owner = acc["owner"].as_str().unwrap();
-        let executable = acc["executable"].as_bool().unwrap();
+        let Ok(address) = Address::from_str(&account_keys[i]) else { continue };
+        let owner = acc["owner"].as_str().unwrap_or_default();
+        let executable = acc["executable"].as_bool().unwrap_or(false);
 
         if executable {
             // Resolve the program's ELF bytecode based on which loader owns it.
             let elf: Option<Vec<u8>> = if owner == NATIVE_LOADER {
                 None // native programs are built into LiteSVM
             } else if owner == BPF_LOADER_2 {
-                Some(b64_decode(acc["data"][0].as_str().unwrap()))
+                Some(b64_decode(acc["data"][0].as_str().unwrap_or_default()))
             } else if owner == BPF_LOADER_UPGRADEABLE {
                 // Upgradeable: program account is a pointer; bytes 4..36 = the
                 // programdata address, ELF starts at offset 45 inside it.
-                let prog = b64_decode(acc["data"][0].as_str().unwrap());
+                let prog = b64_decode(acc["data"][0].as_str().unwrap_or_default());
                 if prog.len() >= 36 {
                     let pd_bytes: [u8; 32] = prog[4..36].try_into().unwrap();
                     let pd_addr = Address::from(pd_bytes);
@@ -113,19 +115,19 @@ fn fetch_loaded(
             continue;
         }
 
-        let owner_addr = Address::from_str(owner).expect("bad owner address");
+        let Ok(owner_addr) = Address::from_str(owner) else { continue };
         out.push((
             address,
             Loaded::Data(Account {
-                lamports: acc["lamports"].as_u64().unwrap(),
-                data: b64_decode(acc["data"][0].as_str().unwrap()),
+                lamports: acc["lamports"].as_u64().unwrap_or(0),
+                data: b64_decode(acc["data"][0].as_str().unwrap_or_default()),
                 owner: owner_addr,
                 executable: false,
                 rent_epoch: 0,
             }),
         ));
     }
-    (out, existing)
+    Ok((out, existing))
 }
 
 /// Build a fresh LiteSVM from already-fetched loadables (no network).
@@ -138,7 +140,9 @@ fn svm_from_loaded(loaded: &[(Address, Loaded)]) -> LiteSVM {
     for (addr, l) in loaded {
         match l {
             Loaded::Data(a) => {
-                svm.set_account(*addr, a.clone()).expect("set_account failed");
+                if let Err(e) = svm.set_account(*addr, a.clone()) {
+                    eprintln!("warn: skipped account {addr}: {e:?}");
+                }
             }
             Loaded::Program(elf) => {
                 if let Err(e) = svm.add_program(*addr, elf) {
@@ -484,17 +488,17 @@ pub fn build_context(
     account_keys: &[String],
     slot: Option<u64>,
     pre_state: &PreState,
-) -> ReplayContext {
+) -> Result<ReplayContext, String> {
     // The transaction's real block time, so date-based logic sees the actual moment.
     let block_time = slot.and_then(|s| client.get_block_time(s).ok());
-    let tx = fetch_transaction(client, signature);
+    let tx = fetch_transaction(client, signature)?;
     let mut all_keys = account_keys.to_vec();
     if let Some(lookups) = tx.message.address_table_lookups() {
         for l in lookups {
             all_keys.push(l.account_key.to_string());
         }
     }
-    let (mut loaded, existing) = fetch_loaded(client, &all_keys);
+    let (mut loaded, existing) = fetch_loaded(client, &all_keys)?;
 
     if !pre_state.is_empty() {
         // Reconstruct accounts that existed at tx-time but are *closed now* (null
@@ -523,7 +527,7 @@ pub fn build_context(
         }
     }
 
-    ReplayContext { tx, loaded, slot, block_time, time_travel: TimeTravel::default() }
+    Ok(ReplayContext { tx, loaded, slot, block_time, time_travel: TimeTravel::default() })
 }
 
 fn b64_encode(bytes: &[u8]) -> String {
@@ -563,7 +567,10 @@ fn resolve_alt_addresses(client: &RpcClient, tx: &VersionedTransaction) -> (Vec<
 /// hasn't been sent yet. Resolves its accounts (incl. ALTs), loads their *current*
 /// on-chain state (which, for a not-yet-sent tx, IS the pre-state — no drift, no
 /// archival), and sets the slot to the current slot so ALT resolution works.
-pub fn preflight_context(client: &RpcClient, tx: VersionedTransaction) -> ReplayContext {
+pub fn preflight_context(
+    client: &RpcClient,
+    tx: VersionedTransaction,
+) -> Result<ReplayContext, String> {
     let mut keys: Vec<String> = tx
         .message
         .static_account_keys()
@@ -581,12 +588,12 @@ pub fn preflight_context(client: &RpcClient, tx: VersionedTransaction) -> Replay
             all_keys.push(l.account_key.to_string());
         }
     }
-    let (loaded, _existing) = fetch_loaded(client, &all_keys);
+    let (loaded, _existing) = fetch_loaded(client, &all_keys)?;
     let slot = client.get_slot().ok();
     // Real wall-clock time for that slot — a pre-flight simulation should run
     // "now", and any date-based program logic depends on this being accurate.
     let block_time = slot.and_then(|s| client.get_block_time(s).ok());
-    ReplayContext { tx, loaded, slot, block_time, time_travel: TimeTravel::default() }
+    Ok(ReplayContext { tx, loaded, slot, block_time, time_travel: TimeTravel::default() })
 }
 
 impl ReplayContext {
@@ -661,18 +668,19 @@ impl ReplayContext {
 }
 
 /// Fetch the raw transaction (base64 wire bytes) and deserialize it.
-fn fetch_transaction(client: &RpcClient, signature: &str) -> VersionedTransaction {
+fn fetch_transaction(client: &RpcClient, signature: &str) -> Result<VersionedTransaction, String> {
     let resp: serde_json::Value = client
         .send(
             RpcRequest::GetTransaction,
             json!([signature, { "encoding": "base64", "maxSupportedTransactionVersion": 0 }]),
         )
-        .expect("getTransaction failed");
+        .map_err(|e| format!("getTransaction failed: {e}"))?;
     let tx_b64 = resp["transaction"][0]
         .as_str()
-        .expect("no base64 transaction in response");
+        .ok_or_else(|| format!("no base64 transaction in response for {signature}"))?;
     let bytes = b64_decode(tx_b64);
-    bincode::deserialize::<VersionedTransaction>(&bytes).expect("failed to deserialize transaction")
+    bincode::deserialize::<VersionedTransaction>(&bytes)
+        .map_err(|e| format!("could not deserialize transaction {signature}: {e}"))
 }
 
 /// A change to apply to an account before replaying.
@@ -740,6 +748,12 @@ fn to_replay_result(result: TransactionResult) -> ReplayResult {
     }
 }
 
+/// A replay that never ran because state couldn't be reconstructed (RPC error,
+/// missing transaction) — reported as a failed result instead of a panic.
+fn failed_result(error: String) -> ReplayResult {
+    ReplayResult { success: false, error: Some(error), logs: vec![], compute_units: 0 }
+}
+
 /// Replay the transaction against the reconstructed state.
 pub fn replay_transaction(
     client: &RpcClient,
@@ -748,7 +762,10 @@ pub fn replay_transaction(
     slot: Option<u64>,
     pre_state: &PreState,
 ) -> ReplayResult {
-    build_context(client, signature, account_keys, slot, pre_state).run(&[])
+    match build_context(client, signature, account_keys, slot, pre_state) {
+        Ok(ctx) => ctx.run(&[]),
+        Err(e) => failed_result(e),
+    }
 }
 
 /// Replay the transaction after applying the given mutations.
@@ -760,7 +777,10 @@ pub fn mutate_and_replay(
     slot: Option<u64>,
     pre_state: &PreState,
 ) -> ReplayResult {
-    build_context(client, signature, account_keys, slot, pre_state).run(mutations)
+    match build_context(client, signature, account_keys, slot, pre_state) {
+        Ok(ctx) => ctx.run(mutations),
+        Err(e) => failed_result(e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -992,4 +1012,110 @@ pub fn run_suite(ctx: &ReplayContext, scenarios: &[ScenarioSpec]) -> Vec<Scenari
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chrono_like_formats_utc() {
+        assert_eq!(chrono_like(0), "1970-01-01 00:00 UTC");
+        // 2020-03-16 14:29:00 UTC — Solana mainnet genesis.
+        assert_eq!(chrono_like(1_584_368_940), "2020-03-16 14:29 UTC");
+        // Pre-epoch timestamps wrap to the previous civil day, not garbage.
+        assert_eq!(chrono_like(-1), "1969-12-31 23:59 UTC");
+    }
+
+    fn clock() -> Clock {
+        Clock {
+            slot: 1_000 * SLOTS_PER_EPOCH as u64,
+            epoch: 1_000,
+            epoch_start_timestamp: 2_000_000_000,
+            unix_timestamp: 2_000_000_000,
+            leader_schedule_epoch: 1_001,
+        }
+    }
+
+    #[test]
+    fn noop_time_travel_changes_nothing() {
+        let tt = TimeTravel::default();
+        assert!(tt.is_noop());
+        let mut c = clock();
+        tt.apply(&mut c);
+        assert_eq!((c.slot, c.epoch, c.unix_timestamp), (clock().slot, 1_000, 2_000_000_000));
+    }
+
+    #[test]
+    fn epoch_jump_advances_slot_epoch_and_time_together() {
+        let tt = TimeTravel { epochs: Some(2), ..Default::default() };
+        let mut c = clock();
+        tt.apply(&mut c);
+        assert_eq!(c.epoch, 1_002);
+        assert_eq!(c.slot, clock().slot + 2 * SLOTS_PER_EPOCH as u64);
+        let expected_secs = (2.0 * SLOTS_PER_EPOCH as f64 * SECS_PER_SLOT) as i64;
+        assert_eq!(c.unix_timestamp, 2_000_000_000 + expected_secs);
+        assert_eq!(c.leader_schedule_epoch, c.epoch + 1);
+    }
+
+    #[test]
+    fn seconds_jump_moves_slots_in_step() {
+        let tt = TimeTravel { seconds: Some(40), ..Default::default() };
+        let mut c = clock();
+        tt.apply(&mut c);
+        assert_eq!(c.unix_timestamp, 2_000_000_040);
+        assert_eq!(c.slot, clock().slot + 100); // 40s / 0.4s per slot
+    }
+
+    #[test]
+    fn absolute_settings_override_relative_jumps() {
+        let tt = TimeTravel {
+            seconds: Some(1_000_000),
+            at_unix_timestamp: Some(3_000_000_000),
+            at_epoch: Some(7),
+            ..Default::default()
+        };
+        let mut c = clock();
+        tt.apply(&mut c);
+        assert_eq!(c.unix_timestamp, 3_000_000_000);
+        assert_eq!(c.epoch, 7);
+        // The epoch's start can never be after "now".
+        assert!(c.epoch_start_timestamp <= c.unix_timestamp);
+    }
+
+    #[test]
+    fn read_u64_at_handles_bounds() {
+        let mut data = vec![0u8; 72];
+        data[64..72].copy_from_slice(&42u64.to_le_bytes());
+        assert_eq!(read_u64_at(&data, 64), 42);
+        assert_eq!(read_u64_at(&data, 70), 0); // out of range → 0, not a panic
+    }
+
+    #[test]
+    fn reconstructs_closed_token_account_from_meta() {
+        let tx = serde_json::json!({
+            "meta": {
+                "preBalances": [2_039_280],
+                "preTokenBalances": [{
+                    "accountIndex": 0,
+                    "mint": "So11111111111111111111111111111111111111112",
+                    "owner": "Vote111111111111111111111111111111111111111",
+                    "uiTokenAmount": { "amount": "12345", "decimals": 9 }
+                }]
+            }
+        });
+        let keys = vec!["4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T".to_string()];
+        let pre = PreState::from_meta(&tx, &keys);
+        let acc = pre.reconstruct(&keys[0]).expect("should rebuild the SPL account");
+        assert_eq!(acc.data.len(), 165);
+        assert_eq!(read_u64_at(&acc.data, 64), 12345);
+        assert_eq!(acc.data[108], 1); // AccountState::Initialized
+        assert_eq!(acc.owner.to_string(), SPL_TOKEN_PROGRAM);
+    }
+
+    #[test]
+    fn never_resurrects_an_account_the_tx_creates() {
+        let pre = PreState::default();
+        assert!(pre.reconstruct("SomeAddr").is_none());
+    }
 }
