@@ -4,8 +4,10 @@
 
 `svmscope` takes a mainnet transaction and:
 
-1. **Decodes** it into a readable report — the full cross-program call tree, who gained
-   or lost SOL, and compute units per program (with Address Lookup Table resolution).
+1. **Decodes** it into a readable report — the full cross-program call tree with every
+   instruction named and its arguments and accounts decoded (from the on-chain IDL or
+   known native layouts), who gained or lost SOL, and compute units per program (with
+   Address Lookup Table resolution).
 2. **Replays** it locally in an embedded SVM ([LiteSVM](https://github.com/LiteSVM/litesvm)) —
    re-executing the real programs against the transaction's reconstructed state.
 3. **Mutates** — change an account's balance or data, then replay again, to ask
@@ -183,8 +185,11 @@ writes the matching `suite.json`.
 - [x] Hermetic **fixtures** — freeze state once, replay deterministically offline
 - [x] Scenario suites + post-state **assertions**; `svmscope test` runner for CI
 - [x] IDL-aware account decoding (named fields on Anchor program accounts, on-chain or pasted IDL)
+- [x] **Instruction decoding** — named instructions + decoded arguments + named accounts, from the on-chain IDL (Anchor) or known native layouts, at every depth of the call tree
 - [x] Richer assertions (`token_amount`, `lamports_delta`, `token_delta`)
 - [x] **Time travel** — warp the clock (slots/epochs/seconds or absolute) for replays, what-ifs, and suites
+- [x] Any cluster or **custom RPC** endpoint, per request
+- [ ] Anchor event decoding (`emit!` events from the program logs)
 - [ ] Archival state so fixtures capture pre-transaction state at the exact slot
 - [ ] Named-field assertions (`pool.reserve_a == N` instead of `u64@64`)
 - [ ] Cross-account invariants (token conservation, solvency)
@@ -209,7 +214,7 @@ lists the surface):
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /analyze/{sig}` | Decode a tx: CPI tree, balances, compute, IDL-decoded accounts. |
+| `GET /analyze/{sig}` | Decode a tx: named CPI tree (instruction names, decoded args & accounts), balances, compute, IDL-decoded accounts. |
 | `GET /replay/{sig}` | Re-execute it locally against reconstructed pre-state. |
 | `POST /simulate` | `{ signature, mutations[], time_travel? }` — replay with what-if edits. |
 | `POST /simulate_suite` | `{ signature, scenarios[], time_travel? }` — scenario tests with assertions. |
@@ -218,8 +223,9 @@ lists the surface):
 
 **Clusters:** every endpoint takes an optional cluster — `?cluster=devnet` (or
 `mainnet` / `testnet` / `localnet`) on GETs, a `cluster` field on POSTs, or
-`?rpc=<url>` for a custom endpoint — so one instance serves them all. The UI has a
-cluster dropdown; the CLI takes `--cluster <name>` / `--rpc <url>`.
+`?rpc=<url>` for a custom endpoint — so one instance serves them all. The UI's
+cluster dropdown includes a **Custom RPC…** option; the CLI takes `--cluster <name>`
+/ `--rpc <url>`.
 
 **Time travel:** `time_travel` warps the SVM clock before executing — relative
 (`{ "epochs": 1 }`, `{ "seconds": 2592000 }`, `{ "slots": N }`) or absolute
