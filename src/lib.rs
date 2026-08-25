@@ -314,12 +314,17 @@ pub fn analyze(client: &RpcClient, input: &str) -> Result<Analysis, String> {
     let account_keys = utils::resolve_account_keys(&tx);
 
     let mut cpi_tree = cpi_tree::build_cpi_tree(&tx);
-    // Name each instruction where we can — native layouts always, Anchor programs
-    // when they publish an IDL. One IDL fetch per distinct program, cached.
+    // Decode each instruction — name, arguments, and named accounts — from native
+    // layouts (always) or the program's on-chain Anchor IDL (one fetch per program,
+    // cached). This is what turns the call trace from bare ids into a debuggable view.
     let mut idl_cache: std::collections::HashMap<String, Option<serde_json::Value>> =
         std::collections::HashMap::new();
     for e in &mut cpi_tree {
-        e.name = ixname::decode(client, &mut idl_cache, &e.program, &e.data);
+        let (name, args, accounts) =
+            ixname::enrich(client, &mut idl_cache, &e.program, &e.data, &e.account_indexes, &account_keys);
+        e.name = name;
+        e.args = args;
+        e.accounts = accounts;
     }
     Ok(Analysis {
         signature,

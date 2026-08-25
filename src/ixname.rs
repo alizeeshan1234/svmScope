@@ -2,6 +2,7 @@
 //! "Jupiter · Route V2". Native programs are decoded from their well-known
 //! layouts; Anchor programs from their on-chain IDL's instruction discriminators.
 
+use crate::cpi_tree::{IxAccount, IxArg};
 use crate::idl;
 use serde_json::Value;
 use solana_address::Address;
@@ -102,43 +103,134 @@ fn titleize(name: &str) -> String {
         .to_string()
 }
 
-/// Match an Anchor instruction's 8-byte discriminator against an IDL.
-fn anchor_ix(idl: &Value, data: &[u8]) -> Option<String> {
-    let disc = data.get(0..8)?;
-    idl.get("instructions")?.as_array()?.iter().find_map(|ix| {
-        let d = ix.get("discriminator")?.as_array()?;
-        let bytes: Vec<u8> = d.iter().filter_map(|b| b.as_u64().map(|v| v as u8)).collect();
-        if bytes == disc {
-            Some(titleize(ix.get("name")?.as_str()?))
-        } else {
-            None
-        }
-    })
+/// Positional account role names for a native program's instruction, so the
+/// call trace reads "Source / Destination / Authority", not bare addresses.
+fn native_account_names(program: &str, data: &[u8]) -> Vec<&'static str> {
+    let v = |s: &[&'static str]| s.to_vec();
+    match program {
+        TOKEN | TOKEN_2022 => match data.first() {
+            Some(1) => v(&["Account", "Mint", "Owner", "Rent Sysvar"]),
+            Some(3) => v(&["Source", "Destination", "Authority"]),
+            Some(4) => v(&["Source", "Delegate", "Authority"]),
+            Some(7) => v(&["Mint", "Destination", "Authority"]),
+            Some(8) => v(&["Account", "Mint", "Authority"]),
+            Some(9) => v(&["Account", "Destination", "Authority"]),
+            Some(12) => v(&["Source", "Mint", "Destination", "Authority"]),
+            Some(14) => v(&["Mint", "Destination", "Authority"]),
+            Some(15) => v(&["Account", "Mint", "Authority"]),
+            _ => vec![],
+        },
+        SYSTEM => match data.get(0..4).map(|b| u32::from_le_bytes(b.try_into().unwrap())) {
+            Some(0) => v(&["Funder", "New Account"]),
+            Some(2) => v(&["From", "To"]),
+            _ => vec![],
+        },
+        ATA => v(&["Funder", "Associated Token Account", "Wallet", "Mint", "System Program", "Token Program"]),
+        _ => vec![],
+    }
 }
 
-/// The human name of one instruction, if we can decode it. `idl_cache` avoids
-/// re-fetching an IDL for every instruction of the same program.
-pub fn decode(
+/// Decode a native instruction's key arguments (the amounts developers look for).
+fn native_args(program: &str, data: &[u8]) -> Vec<IxArg> {
+    let u64_at = |o: usize| data.get(o..o + 8).map(|b| u64::from_le_bytes(b.try_into().unwrap()));
+    let u32_at = |o: usize| data.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+    let arg = |name: &str, ty: &str, v: u64| IxArg { name: name.into(), ty: ty.into(), value: v.to_string() };
+    match program {
+        TOKEN | TOKEN_2022 => match data.first() {
+            Some(3) | Some(7) | Some(8) => u64_at(1).map(|a| vec![arg("amount", "u64", a)]).unwrap_or_default(),
+            Some(12) | Some(14) | Some(15) => {
+                let mut out = vec![];
+                if let Some(a) = u64_at(1) { out.push(arg("amount", "u64", a)); }
+                if let Some(&d) = data.get(9) { out.push(arg("decimals", "u8", d as u64)); }
+                out
+            }
+            _ => vec![],
+        },
+        SYSTEM => match data.get(0..4).map(|b| u32::from_le_bytes(b.try_into().unwrap())) {
+            Some(2) => u64_at(4).map(|l| vec![arg("lamports", "u64", l)]).unwrap_or_default(),
+            _ => vec![],
+        },
+        COMPUTE_BUDGET => match data.first() {
+            Some(2) => u32_at(1).map(|u| vec![arg("units", "u32", u as u64)]).unwrap_or_default(),
+            Some(3) => u64_at(1).map(|p| vec![arg("micro_lamports", "u64", p)]).unwrap_or_default(),
+            Some(4) => u32_at(1).map(|b| vec![arg("bytes", "u32", b as u64)]).unwrap_or_default(),
+            _ => vec![],
+        },
+        _ => vec![],
+    }
+}
+
+/// Decode an instruction fully: its name, its arguments, and its accounts named
+/// from the IDL (Anchor) or a known layout (native). `idl_cache` avoids re-fetching
+/// an IDL for every instruction of the same program.
+pub fn enrich(
     client: &RpcClient,
     idl_cache: &mut HashMap<String, Option<Value>>,
     program: &str,
     data: &[u8],
-) -> Option<String> {
-    match program {
-        TOKEN | TOKEN_2022 => token_ix(data).map(String::from),
-        SYSTEM => system_ix(data).map(String::from),
-        COMPUTE_BUDGET => compute_budget_ix(data).map(String::from),
-        ATA => Some(if data.first() == Some(&1) { "Create Idempotent".into() } else { "Create".into() }),
-        MEMO | MEMO_V1 => Some("Memo".into()),
-        _ => {
-            // Anchor program: resolve (and cache) its on-chain IDL, then match the
-            // instruction discriminator.
-            let idl = idl_cache
-                .entry(program.to_string())
-                .or_insert_with(|| Address::from_str(program).ok().and_then(|a| idl::fetch_idl_json(client, a)));
-            idl.as_ref().and_then(|i| anchor_ix(i, data))
+    account_indexes: &[usize],
+    account_keys: &[String],
+) -> (Option<String>, Vec<IxArg>, Vec<IxAccount>) {
+    let addresses: Vec<String> = account_indexes
+        .iter()
+        .map(|&i| account_keys.get(i).cloned().unwrap_or_default())
+        .collect();
+
+    let is_native = matches!(program, TOKEN | TOKEN_2022 | SYSTEM | COMPUTE_BUDGET | ATA | MEMO | MEMO_V1);
+
+    // Name + args + per-position account names.
+    let (name, args, names): (Option<String>, Vec<IxArg>, Vec<Option<String>>) = if is_native {
+        let name = match program {
+            TOKEN | TOKEN_2022 => token_ix(data).map(String::from),
+            SYSTEM => system_ix(data).map(String::from),
+            COMPUTE_BUDGET => compute_budget_ix(data).map(String::from),
+            ATA => Some(if data.first() == Some(&1) { "Create Idempotent".into() } else { "Create".into() }),
+            _ => Some("Memo".into()),
+        };
+        let names = native_account_names(program, data)
+            .into_iter()
+            .map(|n| Some(n.to_string()))
+            .collect();
+        (name, native_args(program, data), names)
+    } else {
+        // Anchor program: resolve (and cache) its IDL, then match by discriminator.
+        let idl = idl_cache
+            .entry(program.to_string())
+            .or_insert_with(|| Address::from_str(program).ok().and_then(|a| idl::fetch_idl_json(client, a)));
+        match idl.as_ref().and_then(|i| idl::find_ix(i, data)) {
+            Some(ix) => {
+                let name = ix.get("name").and_then(|n| n.as_str()).map(titleize);
+                let args = idl::decode_ix_args(ix, data)
+                    .into_iter()
+                    .map(|(name, ty, value)| IxArg { name, ty, value })
+                    .collect();
+                let named: Vec<Option<String>> = ix
+                    .get("accounts")
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.iter().map(|acc| acc.get("name").and_then(|n| n.as_str()).map(titleize)).collect())
+                    .unwrap_or_default();
+                (name, args, named)
+            }
+            None => (None, vec![], vec![]),
         }
-    }
+    };
+
+    // Pair each account with its role name; extras beyond the named list are the
+    // program's "remaining accounts" (Anchor's variadic tail).
+    let named_len = names.len();
+    let accounts = addresses
+        .into_iter()
+        .enumerate()
+        .map(|(i, address)| {
+            let name = names.get(i).cloned().flatten().or_else(|| {
+                (!is_native && !names.is_empty() && i >= named_len)
+                    .then(|| format!("Remaining Account #{}", i - named_len + 1))
+            });
+            IxAccount { name, address }
+        })
+        .collect();
+
+    (name, args, accounts)
 }
 
 #[cfg(test)]
@@ -165,14 +257,23 @@ mod tests {
     }
 
     #[test]
-    fn anchor_discriminator_match() {
-        let idl = serde_json::json!({
-            "instructions": [
-                { "name": "routeV2", "discriminator": [1, 2, 3, 4, 5, 6, 7, 8] },
-                { "name": "swap", "discriminator": [9, 9, 9, 9, 9, 9, 9, 9] }
-            ]
-        });
-        assert_eq!(anchor_ix(&idl, &[1, 2, 3, 4, 5, 6, 7, 8, 99]).as_deref(), Some("Route V2"));
-        assert_eq!(anchor_ix(&idl, &[0, 0, 0, 0, 0, 0, 0, 0]).as_deref(), None);
+    fn native_account_layouts() {
+        // Token TransferChecked → Source / Mint / Destination / Authority.
+        assert_eq!(native_account_names(TOKEN, &[12]), vec!["Source", "Mint", "Destination", "Authority"]);
+        // System Transfer → From / To.
+        assert_eq!(native_account_names(SYSTEM, &[2, 0, 0, 0]), vec!["From", "To"]);
+    }
+
+    #[test]
+    fn native_argument_decoding() {
+        // Token Transfer: amount u64 at offset 1.
+        let mut d = vec![3u8];
+        d.extend_from_slice(&1_000_000u64.to_le_bytes());
+        let a = native_args(TOKEN, &d);
+        assert_eq!((a[0].name.as_str(), a[0].value.as_str()), ("amount", "1000000"));
+        // Compute Budget SetComputeUnitLimit: u32 at offset 1.
+        let mut c = vec![2u8];
+        c.extend_from_slice(&169_062u32.to_le_bytes());
+        assert_eq!(native_args(COMPUTE_BUDGET, &c)[0].value, "169062");
     }
 }

@@ -629,6 +629,36 @@ body::after {
   background: var(--brand-soft); border: 1px solid var(--brand-border);
   border-radius: 6px; padding: 1px 8px; white-space: nowrap;
 }
+.tnode.expandable { cursor: pointer; }
+.tnode .ix-caret {
+  color: var(--text-3); font-size: 9px; width: 10px; flex: 0 0 auto;
+  transition: transform var(--t-fast) var(--ease);
+}
+.tnode.on .ix-caret { transform: rotate(90deg); color: var(--brand-strong); }
+/* expandable instruction detail */
+.ixdetail {
+  display: none;
+  margin: 2px 0 8px 34px;
+  border-left: 2px solid var(--brand-border);
+  padding: var(--s-2) 0 var(--s-2) var(--s-4);
+}
+.ixdetail.open { display: block; animation: fade-up .2s var(--ease) both; }
+.ixd-sec + .ixd-sec { margin-top: var(--s-3); }
+.ixd-h {
+  font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.09em;
+  color: var(--text-3); margin-bottom: var(--s-2);
+  display: flex; align-items: center; gap: var(--s-2);
+}
+.ixd-n { font-family: var(--font-mono); font-weight: 500; color: var(--text-2);
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-full); padding: 0 6px; font-size: 9.5px; }
+.ix-row { display: flex; align-items: baseline; gap: var(--s-4); padding: 3px 0; font-size: 12px; }
+.ix-row + .ix-row { border-top: 1px solid var(--border); }
+.ix-k, .ix-an { color: var(--text-2); flex: 0 0 auto; min-width: 170px; font-weight: 500; }
+.ix-an { color: var(--cyan); font-weight: 550; }
+.ix-an.dim { color: var(--text-3); }
+.ix-ty { color: var(--text-3); font-family: var(--font-mono); font-size: 10px; font-weight: 400; }
+.ix-v { font-family: var(--font-mono); font-variant-numeric: tabular-nums; color: var(--text-1); word-break: break-all; margin-left: auto; text-align: right; }
+.ix-var { color: var(--text-3); font-style: italic; }
 
 /* ---------- data rows (compute, balances, tokens) ---------- */
 .rows { display: flex; flex-direction: column; }
@@ -1633,16 +1663,45 @@ function renderOverview(o, compute) {
 
 function renderTree(entries) {
   $('treeCount').textContent = entries.length;
-  $('tree').innerHTML = entries.map(e => {
+  $('tree').innerHTML = entries.map((e, i) => {
     const depth = Math.max(1, e.stack_height);
     const rail = depth > 1 ? '│   '.repeat(depth - 2) + '└── ' : '';
     const ix = depth === 1 ? `<span class="ix">#${e.index}</span>` : `<span class="ix"></span>`;
     // The decoded instruction name — "Route V2", "Swap V2", "Transfer" — is what
     // turns a wall of program ids into a readable call trace.
     const nm = e.name ? `<span class="ixname">${esc(e.name)}</span>` : '';
-    return `<div class="tnode">${ix}<span class="rail">${rail}</span>${progChip(e.program)}${nm}` +
-           (depth > 1 ? `<span class="depth">depth ${depth}</span>` : '') + `</div>`;
+    const hasDetail = (e.args && e.args.length) || (e.accounts && e.accounts.length);
+    const caret = hasDetail ? `<span class="ix-caret">▸</span>` : '';
+    const head = `<div class="tnode${hasDetail ? ' expandable' : ''}"${hasDetail ? ` data-ix="${i}"` : ''}>` +
+      `${ix}<span class="rail">${rail}</span>${caret}${progChip(e.program)}${nm}` +
+      (depth > 1 ? `<span class="depth">depth ${depth}</span>` : '') + `</div>`;
+    return head + (hasDetail ? renderIxDetail(e, i) : '');
   }).join('');
+  // Toggle a detail panel on click.
+  $('tree').querySelectorAll('.tnode.expandable').forEach(n => n.addEventListener('click', ev => {
+    if (ev.target.closest('.addr-pill')) return; // let copy-clicks through
+    const panel = document.getElementById('ixd-' + n.dataset.ix);
+    if (panel) { panel.classList.toggle('open'); n.classList.toggle('on'); }
+  }));
+  wireCopy($('tree'));
+}
+
+// The developer payload: an instruction's decoded arguments and named accounts,
+// shown on demand under its row.
+function renderIxDetail(e, i) {
+  const args = (e.args || []).map(a => {
+    // Format token/lamport amounts as raw (the decoded value) with the type tag.
+    const val = a.value === '' ? '<span class="ix-var">variable-length →</span>' : esc(a.value);
+    return `<div class="ix-row"><span class="ix-k">${esc(a.name)} <span class="ix-ty">${esc(a.type)}</span></span><span class="ix-v">${val}</span></div>`;
+  }).join('');
+  const accts = (e.accounts || []).map(ac => {
+    const nm = ac.name ? `<span class="ix-an">${esc(ac.name)}</span>` : `<span class="ix-an dim">account</span>`;
+    return `<div class="ix-row">${nm}<span class="ix-v">${copyPill(ac.address, short(ac.address))}</span></div>`;
+  }).join('');
+  return `<div class="ixdetail" id="ixd-${i}">` +
+    (args ? `<div class="ixd-sec"><div class="ixd-h">Arguments</div>${args}</div>` : '') +
+    (accts ? `<div class="ixd-sec"><div class="ixd-h">Accounts <span class="ixd-n">${e.accounts.length}</span></div>${accts}</div>` : '') +
+    `</div>`;
 }
 
 function renderCompute(rows) {

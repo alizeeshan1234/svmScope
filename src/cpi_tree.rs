@@ -3,6 +3,23 @@
 use crate::utils::resolve_account_keys;
 use serde_json::Value;
 
+/// One account an instruction touches, with its IDL role name where known.
+#[derive(serde::Serialize)]
+pub struct IxAccount {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub address: String,
+}
+
+/// One decoded instruction argument.
+#[derive(serde::Serialize)]
+pub struct IxArg {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+    pub value: String,
+}
+
 #[derive(serde::Serialize)]
 pub struct CpiEntry {
     pub index: usize,
@@ -12,10 +29,19 @@ pub struct CpiEntry {
     /// IDL or a known native layout lets us name it. `None` = couldn't decode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Raw instruction data, kept only so `analyze` can decode the name; never
-    /// serialized to the client.
+    /// The instruction's accounts, named from the IDL / native layout where known.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub accounts: Vec<IxAccount>,
+    /// Decoded instruction arguments (name/type/value).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<IxArg>,
+    /// Raw instruction data, kept only so `analyze` can decode it; never serialized.
     #[serde(skip)]
     pub data: Vec<u8>,
+    /// This instruction's account indexes into the resolved account list; used by
+    /// `analyze` to resolve addresses, never serialized.
+    #[serde(skip)]
+    pub account_indexes: Vec<usize>,
 }
 
 /// Build the CPI call tree as a flat list; nesting is carried by `stack_height`
@@ -38,6 +64,13 @@ pub fn build_cpi_tree(tx: &Value) -> Vec<CpiEntry> {
     let data_of = |ix: &Value| -> Vec<u8> {
         ix["data"].as_str().and_then(|s| bs58::decode(s).into_vec().ok()).unwrap_or_default()
     };
+    let accts_of = |ix: &Value| -> Vec<usize> {
+        ix["accounts"].as_array().map(|a| a.iter().filter_map(|i| i.as_u64().map(|v| v as usize)).collect()).unwrap_or_default()
+    };
+    let entry = |index, program, stack_height, ix: &Value| CpiEntry {
+        index, program, stack_height, name: None, accounts: vec![], args: vec![],
+        data: data_of(ix), account_indexes: accts_of(ix),
+    };
 
     let mut entries: Vec<CpiEntry> = Vec::new();
 
@@ -45,7 +78,7 @@ pub fn build_cpi_tree(tx: &Value) -> Vec<CpiEntry> {
         let Some(program) = program_at(ix) else { continue };
 
         // Top-level instruction.
-        entries.push(CpiEntry { index, program, stack_height: 1, name: None, data: data_of(ix) });
+        entries.push(entry(index, program, 1, ix));
 
         // No inner group just means this instruction made no CPIs — that's normal.
         let my_group = tx["meta"]["innerInstructions"]
@@ -60,7 +93,7 @@ pub fn build_cpi_tree(tx: &Value) -> Vec<CpiEntry> {
                 // Old transactions (pre-v1.14.6 meta) report no stackHeight; a
                 // direct CPI (depth 2) is the faithful default there.
                 let stack_height = inner["stackHeight"].as_u64().unwrap_or(2);
-                entries.push(CpiEntry { index, program, stack_height, name: None, data: data_of(inner) });
+                entries.push(entry(index, program, stack_height, inner));
             }
         }
     }

@@ -168,6 +168,47 @@ pub fn instructions(idl: &Value) -> Vec<IdlInstruction> {
         .collect()
 }
 
+/// Find the IDL instruction whose 8-byte discriminator matches this instruction's
+/// data — the entry that names it and describes its args and accounts.
+pub fn find_ix<'a>(idl: &'a Value, data: &[u8]) -> Option<&'a Value> {
+    let disc = data.get(0..8)?;
+    idl.get("instructions")?.as_array()?.iter().find(|ix| {
+        ix.get("discriminator")
+            .and_then(|d| d.as_array())
+            .map(|d| d.iter().filter_map(|b| b.as_u64().map(|v| v as u8)).collect::<Vec<u8>>() == disc)
+            .unwrap_or(false)
+    })
+}
+
+/// Borsh-decode an Anchor instruction's arguments — the bytes after the 8-byte
+/// discriminator — using the IDL instruction's `args`. Returns `(name, type,
+/// value)` per arg, stopping at the first variable-length arg (offsets past it
+/// are no longer trustworthy), same rule as the account-field walker.
+pub fn decode_ix_args(idl_ix: &Value, data: &[u8]) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let Some(args) = idl_ix.get("args").and_then(|a| a.as_array()) else { return out };
+    let mut off = 8usize; // skip the discriminator
+    for arg in args {
+        let name = arg.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+        let ty = arg.get("type").unwrap_or(&Value::Null);
+        match resolve_fixed(ty) {
+            Some(kind) => {
+                let sz = kind.size();
+                let Some(bytes) = data.get(off..off + sz) else { break };
+                out.push((name, kind.label(), read_value(bytes, kind)));
+                off += sz;
+            }
+            None => {
+                // Variable-length / composite arg — name it, but the value and
+                // everything after it can't be read from a fixed offset.
+                out.push((name, type_label(ty), String::new()));
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// A readable label for an IDL type (used by the builder's arg inputs).
 fn type_label(ty: &Value) -> String {
     if let Some(s) = ty.as_str() {
