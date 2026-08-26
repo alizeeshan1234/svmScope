@@ -123,20 +123,41 @@ fn vet_custom_rpc(url: &str) -> Option<String> {
     any.then(|| url.to_string())
 }
 
-/// Resolve a per-request RPC. Precedence: explicit ?rpc= (SSRF-vetted) > per-cluster
-/// env var > cluster's public endpoint > the generic env default. A caller-supplied
-/// `rpc` that fails the safety check is ignored, falling through to trusted sources.
+/// Whether the server honors a caller-supplied `?rpc=` at all.
+///
+/// A *shared public* instance must not proxy arbitrary RPC URLs — even IP-vetted,
+/// a re-resolved hostname (DNS rebinding) or an HTTP redirect can still reach an
+/// internal target between the check and the fetch. So custom RPC is **off unless
+/// the operator opts in** with `SVMSCOPE_ALLOW_CUSTOM_RPC=1` (the safe default for
+/// hosted; self-hosters running locally can enable it). The built-in cluster
+/// presets and env-configured endpoints are always available.
+fn custom_rpc_allowed() -> bool {
+    matches!(
+        std::env::var("SVMSCOPE_ALLOW_CUSTOM_RPC").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+/// Resolve a per-request RPC. Precedence: explicit ?rpc= (only when custom RPC is
+/// enabled AND it passes the SSRF check) > per-cluster env var > cluster's public
+/// endpoint > the generic env default. A caller `rpc` that is disabled or unsafe is
+/// ignored, falling through to trusted sources.
 fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> String {
-    if let Some(u) = rpc {
-        if let Some(safe) = vet_custom_rpc(u) {
-            return safe;
+    // Only trust a caller-supplied RPC when the operator has opted in.
+    let allow = custom_rpc_allowed();
+    if allow {
+        if let Some(u) = rpc {
+            if let Some(safe) = vet_custom_rpc(u) {
+                return safe;
+            }
         }
     }
     if let Some(u) = cluster_env_rpc(cluster) {
         return u;
     }
-    // Don't let an unsafe caller `rpc` reach resolve_rpc's verbatim-URL branch.
-    let safe_rpc = rpc.filter(|u| vet_custom_rpc(u).is_some());
+    // Never let a caller `rpc` reach resolve_rpc's verbatim-URL branch unless it's
+    // both allowed and vetted.
+    let safe_rpc = rpc.filter(|u| allow && vet_custom_rpc(u).is_some());
     svmscope::resolve_rpc(cluster, safe_rpc, &rpc_url())
 }
 
@@ -537,6 +558,8 @@ async fn api_index() -> Json<serde_json::Value> {
         "name": "svmscope",
         "description": "Solana transaction simulation layer — decode, replay, mutate, assert.",
         "version": env!("CARGO_PKG_VERSION"),
+        // Lets the UI hide the custom-RPC field on instances that don't allow it.
+        "custom_rpc": custom_rpc_allowed(),
         "endpoints": {
             "GET  /analyze/{signature}":  "Decode a transaction: CPI tree, balance & token changes, compute, and IDL-decoded accounts.",
             "GET  /replay/{signature}":   "Re-execute the transaction locally against reconstructed pre-state.",
@@ -732,5 +755,15 @@ mod tests {
         assert!(is_blocked_ip("100.100.0.1".parse().unwrap())); // CGNAT
         assert!(!is_blocked_ip("8.8.8.8".parse().unwrap()));
         assert!(!is_blocked_ip("1.1.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn caller_rpc_ignored_when_custom_disabled() {
+        // Default (no SVMSCOPE_ALLOW_CUSTOM_RPC): a caller-supplied RPC — even a
+        // syntactically fine public one — must never be used verbatim. This is the
+        // real SSRF backstop on the shared public instance, independent of DNS.
+        assert!(!custom_rpc_allowed());
+        let out = rpc_for(None, Some("http://8.8.8.8:9999/evil"));
+        assert_ne!(out, "http://8.8.8.8:9999/evil");
     }
 }

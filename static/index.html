@@ -1500,7 +1500,20 @@ const api = (path, init) => fetch(API + path, init);
 // Prewarm the engine on page load. The free host sleeps after ~15 min idle; kicking
 // off a cheap /api ping the instant someone lands means the container is already
 // waking while they read the hero, so it's ready by the time they paste a signature.
-try { fetch(API + '/api', { mode: 'cors', cache: 'no-store' }).catch(() => {}); } catch {}
+// The same ping tells us whether this instance honors a caller-supplied RPC. Public
+// instances disable it (SSRF safety), so hide the "Custom RPC…" option there rather
+// than offer a control the server will ignore.
+try {
+  fetch(API + '/api', { mode: 'cors', cache: 'no-store' })
+    .then(r => r.ok ? r.json() : null)
+    .then(info => {
+      if (info && info.custom_rpc === false) {
+        const opt = document.querySelector('#cluster option[value="custom"]');
+        if (opt) opt.remove();
+      }
+    })
+    .catch(() => {});
+} catch {}
 
 // Selected cluster — appended to GET requests and merged into POST bodies so one
 // instance serves mainnet / devnet / testnet / localnet / a custom RPC endpoint.

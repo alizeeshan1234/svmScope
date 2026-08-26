@@ -857,7 +857,10 @@ pub fn capture_fixture(client: &RpcClient, signature: &str) -> Result<fixture::F
     let account_keys = utils::resolve_account_keys(&tx);
     let pre = replay::PreState::from_meta(&tx, &account_keys);
     let ctx = replay::build_context(client, signature, &account_keys, slot, &pre)?;
-    Ok(ctx.to_fixture(signature, slot))
+    // Freeze the exact slot/clock the context runs at (build_context anchors to
+    // "now"), so a reloaded fixture reproduces this live replay rather than the
+    // transaction's original slot.
+    Ok(ctx.to_fixture(signature))
 }
 
 /// Run a scenario suite against a frozen fixture — deterministic, offline, CI-safe.

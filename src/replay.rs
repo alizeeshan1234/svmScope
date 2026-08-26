@@ -687,7 +687,12 @@ pub fn preflight_context(
 impl ReplayContext {
     /// Freeze this context into a portable, self-contained [`Fixture`] — the tx
     /// wire bytes plus every account/program, so it can replay offline forever.
-    pub fn to_fixture(&self, signature: &str, captured_slot: Option<u64>) -> Fixture {
+    ///
+    /// The captured slot and block time come from the context itself (`self.slot`
+    /// / `self.block_time`) — the exact clock the live replay ran with — so a
+    /// reloaded fixture reproduces the live outcome instead of drifting to the
+    /// transaction's original slot.
+    pub fn to_fixture(&self, signature: &str) -> Fixture {
         let tx_bytes = bincode::serialize(&self.tx).expect("serialize tx");
         let entries = self
             .loaded
@@ -707,7 +712,8 @@ impl ReplayContext {
             .collect();
         Fixture {
             signature: signature.to_string(),
-            captured_slot,
+            captured_slot: self.slot,
+            captured_block_time: self.block_time,
             tx_b64: b64_encode(&tx_bytes),
             entries,
         }
@@ -763,7 +769,7 @@ impl ReplayContext {
             tx,
             loaded,
             slot: fx.captured_slot,
-            block_time: None,
+            block_time: fx.captured_block_time,
             time_travel: TimeTravel::default(),
             idls: HashMap::new(),
         })
@@ -1312,6 +1318,34 @@ mod tests {
         };
         assert_eq!(read_field_int(&(-42i64).to_le_bytes(), &f).unwrap(), -42);
         assert_eq!(read_field_int(&7i64.to_le_bytes(), &f).unwrap(), 7);
+    }
+
+    #[test]
+    fn fixture_roundtrip_preserves_slot_and_clock() {
+        // The core fixture-fidelity invariant: freezing a context and reloading it
+        // must reproduce the exact slot AND wall-clock the live replay ran at — not
+        // drop the block time (which used to happen, so time-gated programs behaved
+        // differently after freezing).
+        let ctx = ReplayContext {
+            tx: VersionedTransaction::default(),
+            loaded: Vec::new(),
+            slot: Some(295_000_123),
+            block_time: Some(1_787_600_325),
+            time_travel: TimeTravel::default(),
+            idls: HashMap::new(),
+        };
+
+        let fx = ctx.to_fixture("SIG");
+        assert_eq!(fx.captured_slot, Some(295_000_123));
+        assert_eq!(fx.captured_block_time, Some(1_787_600_325));
+
+        // Survives a JSON round-trip (the on-disk format)…
+        let json = fx.to_json().unwrap();
+        let fx2 = Fixture::from_json(&json).unwrap();
+        // …and reloads into a context with the same clock.
+        let restored = ReplayContext::from_fixture(&fx2).unwrap();
+        assert_eq!(restored.slot, Some(295_000_123));
+        assert_eq!(restored.block_time, Some(1_787_600_325));
     }
 
     #[test]

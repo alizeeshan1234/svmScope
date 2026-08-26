@@ -31,9 +31,16 @@ pub enum FixtureEntry {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Fixture {
     pub signature: String,
-    /// The slot the state was captured at, when known (informational).
+    /// The slot the live context actually ran at — the SVM clock is set to this on
+    /// reload, so a frozen replay uses the *same* slot the live one did (not the
+    /// transaction's original slot, which would contradict the captured accounts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captured_slot: Option<u64>,
+    /// The wall-clock time (unix seconds) that same slot ran at. Captured so a
+    /// frozen replay's clock matches the live context that produced it — without
+    /// it, any date-based program logic behaves differently after freezing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_block_time: Option<i64>,
     /// base64 of the bincode-serialized `VersionedTransaction`.
     pub tx_b64: String,
     pub entries: Vec<FixtureEntry>,
