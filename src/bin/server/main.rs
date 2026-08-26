@@ -138,6 +138,17 @@ fn custom_rpc_allowed() -> bool {
     )
 }
 
+/// The only `cluster` values a public instance will act on. Anything else — a
+/// URL-shaped cluster (`cluster=http://169.254.169.254/…`) or `localnet`
+/// (127.0.0.1) — is an SSRF vector, since `resolve_rpc` otherwise honors both
+/// verbatim. Self-hosters (custom RPC enabled) keep the full set.
+fn public_cluster_ok(c: &str) -> bool {
+    matches!(
+        c.trim().to_ascii_lowercase().as_str(),
+        "mainnet" | "mainnet-beta" | "m" | "devnet" | "d" | "testnet" | "t"
+    )
+}
+
 /// Resolve a per-request RPC. Precedence: explicit ?rpc= (only when custom RPC is
 /// enabled AND it passes the SSRF check) > per-cluster env var > cluster's public
 /// endpoint > the generic env default. A caller `rpc` that is disabled or unsafe is
@@ -145,6 +156,9 @@ fn custom_rpc_allowed() -> bool {
 fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> String {
     // Only trust a caller-supplied RPC when the operator has opted in.
     let allow = custom_rpc_allowed();
+    // On a public instance, drop any cluster that isn't a known public preset, so a
+    // URL-shaped or localnet cluster can't be forwarded to resolve_rpc verbatim.
+    let cluster = cluster.filter(|c| allow || public_cluster_ok(c));
     if allow {
         if let Some(u) = rpc {
             if let Some(safe) = vet_custom_rpc(u) {
@@ -156,7 +170,7 @@ fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> String {
         return u;
     }
     // Never let a caller `rpc` reach resolve_rpc's verbatim-URL branch unless it's
-    // both allowed and vetted.
+    // both allowed and vetted. `cluster` is already sanitized above.
     let safe_rpc = rpc.filter(|u| allow && vet_custom_rpc(u).is_some());
     svmscope::resolve_rpc(cluster, safe_rpc, &rpc_url())
 }
@@ -743,9 +757,10 @@ mod tests {
 
     #[test]
     fn ssrf_guard_allows_public_rpc() {
-        // A normal public endpoint (resolves to a routable IP) passes through unchanged.
-        let ok = vet_custom_rpc("https://api.mainnet-beta.solana.com");
-        assert_eq!(ok.as_deref(), Some("https://api.mainnet-beta.solana.com"));
+        // A routable public IP literal passes through unchanged — no DNS, so the
+        // test is hermetic (a hostname would need a live resolver).
+        let ok = vet_custom_rpc("https://8.8.8.8/");
+        assert_eq!(ok.as_deref(), Some("https://8.8.8.8/"));
     }
 
     #[test]
@@ -765,5 +780,28 @@ mod tests {
         assert!(!custom_rpc_allowed());
         let out = rpc_for(None, Some("http://8.8.8.8:9999/evil"));
         assert_ne!(out, "http://8.8.8.8:9999/evil");
+    }
+
+    #[test]
+    fn public_instance_rejects_url_and_localnet_clusters() {
+        // The second SSRF vector: `cluster` is also caller-controlled, and
+        // resolve_rpc honors URL-shaped and localnet clusters verbatim. On a public
+        // instance neither may reach an internal target.
+        assert!(!custom_rpc_allowed());
+        let meta = rpc_for(Some("http://169.254.169.254/latest/meta-data"), None);
+        assert!(!meta.contains("169.254"), "url cluster leaked: {meta}");
+        let local = rpc_for(Some("localnet"), None);
+        assert!(!local.contains("127.0.0.1"), "localnet leaked: {local}");
+        // A legitimate public cluster still resolves normally.
+        assert!(rpc_for(Some("devnet"), None).starts_with("http"));
+    }
+
+    #[test]
+    fn public_cluster_allowlist() {
+        assert!(public_cluster_ok("mainnet"));
+        assert!(public_cluster_ok("devnet"));
+        assert!(public_cluster_ok("testnet"));
+        assert!(!public_cluster_ok("localnet"));
+        assert!(!public_cluster_ok("http://169.254.169.254"));
     }
 }
