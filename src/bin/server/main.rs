@@ -331,6 +331,9 @@ struct PreflightRequest {
     /// Optional clock warp — test time-gated logic without waiting.
     #[serde(default)]
     time_travel: svmscope::replay::TimeTravel,
+    /// Optional runtime feature-gate toggles.
+    #[serde(default)]
+    features: Vec<svmscope::api::FeatureInput>,
     #[serde(default)]
     cluster: Option<String>,
     #[serde(default)]
@@ -428,11 +431,13 @@ async fn preflight_report_handler(
         .collect::<Result<_, _>>()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
+    let features =
+        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(move || {
         let client = RpcClient::new(url);
-        svmscope::preflight_report(&client, &req.transaction, &mutations, tt)
+        svmscope::preflight_report(&client, &req.transaction, &mutations, tt, features)
     })
     .await
     .map_err(|e| {
@@ -457,11 +462,13 @@ async fn replay_report_handler(
         .collect::<Result<_, _>>()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
+    let features =
+        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(move || {
         let client = RpcClient::new(url);
-        svmscope::replay_report(&client, &req.signature, &mutations, tt)
+        svmscope::replay_report(&client, &req.signature, &mutations, tt, features)
     })
     .await
     .map_err(|e| {

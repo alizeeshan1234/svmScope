@@ -737,6 +737,7 @@ pub fn preflight_report(
     tx_b64: &str,
     mutations: &[replay::Mutation],
     time_travel: replay::TimeTravel,
+    features: Vec<replay::FeatureToggle>,
 ) -> Result<SimulationReport, String> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -747,6 +748,7 @@ pub fn preflight_report(
     let mut ctx = replay::preflight_context(client, tx)?;
     let warped = !time_travel.is_noop();
     ctx.set_time_travel(time_travel);
+    ctx.set_feature_toggles(features);
     let clock_desc = warped.then(|| ctx.describe_clock());
     let (replay, raw_diffs) = ctx.run_with_diff(mutations);
     Ok(SimulationReport {
@@ -765,6 +767,7 @@ pub fn replay_report(
     signature: &str,
     mutations: &[replay::Mutation],
     time_travel: replay::TimeTravel,
+    features: Vec<replay::FeatureToggle>,
 ) -> Result<SimulationReport, String> {
     let tx: serde_json::Value = client
         .send(
@@ -781,6 +784,7 @@ pub fn replay_report(
         replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
     let warped = !time_travel.is_noop();
     ctx.set_time_travel(time_travel);
+    ctx.set_feature_toggles(features);
     let clock_desc = warped.then(|| ctx.describe_clock());
     let (replay, raw_diffs) = ctx.run_with_diff(mutations);
     Ok(SimulationReport {
