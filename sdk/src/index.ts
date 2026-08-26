@@ -215,6 +215,17 @@ export interface TimeTravel {
   at_epoch?: number;
 }
 
+/**
+ * A runtime feature-gate toggle: replay as if a Solana feature were (in)active.
+ * Most execution-affecting SIMDs ship on-chain as one of these.
+ */
+export interface Feature {
+  /** The feature gate's on-chain pubkey. */
+  id: string;
+  /** true = activate the gate (test a not-yet-live feature early); false = deactivate. */
+  active: boolean;
+}
+
 /** A simulation plus everything a developer needs to act on it. */
 export interface SimulationReport {
   replay: ReplayResult;
@@ -360,12 +371,13 @@ export class Svmscope {
   simulate(
     signature: string,
     mutations: Mutation[],
-    opts: { timeTravel?: TimeTravel; cluster?: Cluster } = {},
+    opts: { timeTravel?: TimeTravel; features?: Feature[]; cluster?: Cluster } = {},
   ): Promise<ReplayResult> {
     return this.post("/simulate", {
       signature,
       mutations,
       time_travel: opts.timeTravel ?? {},
+      features: opts.features ?? [],
       ...this.clusterBody(opts.cluster),
     });
   }
@@ -374,12 +386,13 @@ export class Svmscope {
   runSuite(
     signature: string,
     scenarios: Scenario[],
-    opts: { timeTravel?: TimeTravel; cluster?: Cluster } = {},
+    opts: { timeTravel?: TimeTravel; features?: Feature[]; cluster?: Cluster } = {},
   ): Promise<ScenarioOutcome[]> {
     return this.post("/simulate_suite", {
       signature,
       scenarios,
       time_travel: opts.timeTravel ?? {},
+      features: opts.features ?? [],
       ...this.clusterBody(opts.cluster),
     });
   }

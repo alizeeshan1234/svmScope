@@ -6171,6 +6171,7 @@ dependencies = [
  "solana-address 2.6.1",
  "solana-client",
  "solana-clock",
+ "solana-pubkey 4.2.1",
  "solana-transaction",
  "tokio",
  "tower-http",

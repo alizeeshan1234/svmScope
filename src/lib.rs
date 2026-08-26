@@ -444,6 +444,7 @@ pub fn simulate(
     signature: &str,
     mutations: &[replay::Mutation],
     time_travel: replay::TimeTravel,
+    features: Vec<replay::FeatureToggle>,
 ) -> Result<replay::ReplayResult, String> {
     let tx: serde_json::Value = client
         .send(
@@ -461,6 +462,7 @@ pub fn simulate(
     let mut ctx =
         replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
     ctx.set_time_travel(time_travel);
+    ctx.set_feature_toggles(features);
     let mut r = ctx.run(mutations);
     resolve_error_name(client, &mut r);
     Ok(r)
@@ -799,6 +801,7 @@ pub fn simulate_suite(
     signature: &str,
     scenarios: Vec<replay::ScenarioSpec>,
     time_travel: replay::TimeTravel,
+    features: Vec<replay::FeatureToggle>,
 ) -> Result<Vec<replay::ScenarioOutcome>, String> {
     let tx: serde_json::Value = client
         .send(
@@ -814,6 +817,7 @@ pub fn simulate_suite(
     let mut ctx =
         replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
     ctx.set_time_travel(time_travel);
+    ctx.set_feature_toggles(features);
 
     // Named-field asserts resolve against the owner program's IDL, and this is
     // the layer with RPC access — fetch one IDL per distinct owner up front.
@@ -869,9 +873,11 @@ pub fn run_fixture_suite(
     fx: &fixture::Fixture,
     scenarios: Vec<replay::ScenarioSpec>,
     time_travel: replay::TimeTravel,
+    features: Vec<replay::FeatureToggle>,
 ) -> Result<Vec<replay::ScenarioOutcome>, String> {
     let mut ctx = replay::ReplayContext::from_fixture(fx)?;
     ctx.set_time_travel(time_travel);
+    ctx.set_feature_toggles(features);
     Ok(replay::run_suite(&ctx, &scenarios))
 }
 

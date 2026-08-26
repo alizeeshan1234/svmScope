@@ -1095,6 +1095,23 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
   color: var(--text-2); font-family: var(--font-sans); font-size: 12.5px; text-decoration: underline;
 }
 .clockbanner .rst:hover { color: var(--text-1); }
+/* feature-gate toggle list inside the Features popover */
+.feat-list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
+.feat-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface-2);
+}
+.feat-row:hover { border-color: var(--line-2); }
+.feat-row.off { opacity: .62; }
+.feat-row input { accent-color: var(--brand-strong); width: 15px; height: 15px; }
+.feat-main { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+.feat-name { font-size: 13px; font-weight: 600; color: var(--text-1); }
+.feat-note { font-size: 11.5px; color: var(--text-3); }
+.feat-badge {
+  font-size: 10.5px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 999px; background: var(--brand-soft); color: var(--brand-strong);
+}
+.feat-row.off .feat-badge { background: rgba(248,113,113,.14); color: #f87171; }
 
 /* ---------- time travel ---------- */
 .timetravel {
@@ -1219,6 +1236,23 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
             <div id="ttState" class="cp-state">Simulating at the current time.</div>
           </div>
         </div>
+        <div class="clockctl">
+          <button class="cluster clockbtn" id="featBtn" title="Replay with Solana feature gates toggled on/off">
+            <span id="featLabel">⚑ Features</span>
+          </button>
+          <div class="clockpop hidden" id="featPop">
+            <div class="cp-title">Feature gates</div>
+            <div class="cp-sub">Replay as if a Solana runtime feature were (in)active. Most execution-affecting
+              SIMDs ship on-chain as one of these — flip one and re-run to see if a transaction still works.</div>
+            <div id="featList" class="feat-list"></div>
+            <div class="cp-custom" style="margin-top:10px">
+              <input id="featCustom" class="finput mono" placeholder="feature gate pubkey…" spellcheck="false" style="flex:1" />
+              <select id="featCustomState" class="finput"><option value="on">activate</option><option value="off">deactivate</option></select>
+              <button class="btn sm" id="featAdd">Add</button>
+            </div>
+            <div id="featState" class="cp-state">Running under mainnet's active feature set.</div>
+          </div>
+        </div>
         <input id="sig" placeholder="paste a transaction signature — or a program / account address…" spellcheck="false" autocomplete="off" />
         <button class="btn" id="go">Analyze</button>
       </div>
@@ -1227,6 +1261,7 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 
   <main>
     <div id="clockBanner" class="clockbanner hidden"></div>
+    <div id="featBanner" class="clockbanner hidden"></div>
     <div id="hero" class="hero">
       <div class="eyebrow"><span class="bkt">[</span><span class="pulse"></span> the Solana transaction simulation layer <span class="bkt">]</span></div>
       <h1>
@@ -1841,7 +1876,7 @@ function renderReplayPanel() {
     $('replay').innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>replaying at the selected time…</div>';
     api('/replay_report', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, mutations: [], time_travel: timeTravel, ...clusterParams() }),
+      body: JSON.stringify({ signature: currentSig, mutations: [], time_travel: timeTravel, features: activeFeatures, ...clusterParams() }),
     })
       .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
       .then(rep => renderReport(rep, $('replay')))
@@ -2006,7 +2041,7 @@ async function runSuite() {
       return s;
     });
     const res = await api('/simulate_suite', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, scenarios, time_travel: timeTravel, ...clusterParams() }) });
+      body: JSON.stringify({ signature: currentSig, scenarios, time_travel: timeTravel, features: activeFeatures, ...clusterParams() }) });
     if (!res.ok) throw new Error(await res.text());
     const outcomes = await res.json();
     outcomes.forEach((o, i) => {
@@ -2443,7 +2478,7 @@ async function simulate() {
     // Need the un-mutated baseline for the before/after comparison; fetch it lazily.
     const before = await ensureBaseline();
     const res = await api('/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m), time_travel: timeTravel, ...clusterParams() }) });
+      body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m), time_travel: timeTravel, features: activeFeatures, ...clusterParams() }) });
     if (!res.ok) throw new Error(await res.text());
     showResult(before, await res.json(), { n: toSend.length });
   } catch (e) { flashSim('error: ' + e.message, true); }
@@ -2848,7 +2883,7 @@ async function runPreflight() {
     if (!b64) throw new Error('paste a base64 transaction first');
     const res = await api('/preflight_report', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transaction: b64, mutations: [], time_travel: timeTravel, ...clusterParams() }),
+      body: JSON.stringify({ transaction: b64, mutations: [], time_travel: timeTravel, features: activeFeatures, ...clusterParams() }),
     });
     if (!res.ok) throw new Error(await res.text());
     renderReport(await res.json(), $('simOut'));
@@ -2896,13 +2931,89 @@ document.querySelectorAll('.chip.gtt').forEach(c =>
   c.addEventListener('click', () => { $('ttAmount').value = ''; setTimeTravel(JSON.parse(c.dataset.tt), c); }));
 $('ttApply').addEventListener('click', applyCustomTT);
 $('ttAmount').addEventListener('keydown', e => { if (e.key === 'Enter') applyCustomTT(); });
-$('clockBtn').addEventListener('click', e => { e.stopPropagation(); $('clockPop').classList.toggle('hidden'); });
+$('clockBtn').addEventListener('click', e => { e.stopPropagation(); $('clockPop').classList.toggle('hidden'); $('featPop').classList.add('hidden'); });
 document.addEventListener('click', e => {
-  if (!e.target.closest('.clockctl')) $('clockPop').classList.add('hidden');
+  if (!e.target.closest('.clockctl')) { $('clockPop').classList.add('hidden'); $('featPop').classList.add('hidden'); }
 });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') $('clockPop').classList.add('hidden');
+  if (e.key === 'Escape') { $('clockPop').classList.add('hidden'); $('featPop').classList.add('hidden'); }
 });
+
+// ---- feature gates ----
+// Curated, mainnet-active Solana feature gates worth toggling. Each is "on" by
+// default (it's live); un-ticking sends {active:false} to replay without it. Any
+// other gate can be added by pubkey. Verified live: deactivating the get_sysvar
+// syscall gate makes a Jupiter swap fail (it depends on that syscall).
+const FEATURE_GATES = [
+  { id: 'CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq', name: 'sol_get_sysvar syscall',            note: 'cheap sysvar reads; many programs depend on it' },
+  { id: '6TkHkRmP7JZy1fdM6fg5uXn76wChQBWGokHBJzrLB3mj', name: 'raise CPI nesting limit to 8',      note: 'deeper cross-program call chains' },
+  { id: 'A16q37opZdQMCbe5qJ6xpBB9usykfv8jZaMkxvZQi4GJ', name: 'alt_bn128 syscalls',                note: 'EVM-compatible pairing / bn254 math' },
+  { id: '7rcw5UtqgDTBBv2EcynNfYckgdAaH1MAsCjKgXMkN7Ri', name: 'curve25519 syscalls',               note: 'ed25519 / ristretto ops in-program' },
+  { id: 'zkhiy5oLowR7HY4zogXjCjeMXyruLqBwSWH21qcFtnv',  name: 'ZK ElGamal proof program',          note: 'confidential-transfer proofs' },
+  { id: '5x3825XS7M2A3Ekbn5VGGkvFoAg5qrRWkTrY4bARP1GL', name: 'loader SetAuthorityChecked ix',     note: 'safer program upgrade-authority change' },
+];
+// Sent as `features`; empty = mainnet as-is. Only holds gates flipped off default.
+let activeFeatures = [];
+const featState = (id) => activeFeatures.find(f => f.id === id);
+
+function renderFeatList() {
+  $('featList').innerHTML = FEATURE_GATES.map(g => {
+    const off = featState(g.id)?.active === false;
+    return `<label class="feat-row${off ? ' off' : ''}">
+      <input type="checkbox" data-fid="${g.id}" ${off ? '' : 'checked'} />
+      <span class="feat-main"><span class="feat-name">${esc(g.name)}</span>
+        <span class="feat-note">${esc(g.note)}</span></span>
+      <span class="feat-badge">${off ? 'off' : 'on'}</span></label>`;
+  }).join('') + activeFeatures.filter(f => !FEATURE_GATES.some(g => g.id === f.id)).map(f =>
+    `<label class="feat-row${f.active ? '' : ' off'}">
+      <input type="checkbox" data-fid="${f.id}" ${f.active ? 'checked' : ''} data-custom="1" />
+      <span class="feat-main"><span class="feat-name mono">${esc(short(f.id))}</span>
+        <span class="feat-note">custom gate</span></span>
+      <span class="feat-badge">${f.active ? 'on' : 'off'}</span></label>`).join('');
+  $('featList').querySelectorAll('input[data-fid]').forEach(cb =>
+    cb.addEventListener('change', () => toggleFeature(cb.dataset.fid, cb.checked, cb.dataset.custom === '1')));
+}
+
+function toggleFeature(id, checked, isCustom) {
+  activeFeatures = activeFeatures.filter(f => f.id !== id);
+  // Curated gates are on by default: only record when turned OFF.
+  // Custom gates were added to activate: recording keeps them, unchecking drops them.
+  if (isCustom) { if (checked) activeFeatures.push({ id, active: true }); }
+  else if (!checked) activeFeatures.push({ id, active: false });
+  refreshFeatures();
+}
+
+function refreshFeatures() {
+  const n = activeFeatures.length;
+  $('featLabel').textContent = n ? `⚑ ${n} feature${n === 1 ? '' : 's'}` : '⚑ Features';
+  $('featBtn').classList.toggle('warped', !!n);
+  $('featState').textContent = n
+    ? activeFeatures.map(f => `${short(f.id)} ${f.active ? 'on' : 'off'}`).join(' · ')
+    : "Running under mainnet's active feature set.";
+  const b = $('featBanner');
+  if (b) {
+    b.classList.toggle('hidden', !n);
+    if (n) b.innerHTML = `<span>⚑</span><span>Replaying with ${n} feature gate${n === 1 ? '' : 's'} flipped: ` +
+      `${activeFeatures.map(f => esc(short(f.id)) + (f.active ? ' on' : ' off')).join(', ')}. Everything below runs under this feature set.</span>` +
+      `<button class="rst" id="featReset">reset</button>`;
+    if (n) $('featReset')?.addEventListener('click', () => { activeFeatures = []; renderFeatList(); refreshFeatures(); onClockChanged(); });
+  }
+  renderFeatList();
+  onClockChanged();
+}
+
+$('featBtn').addEventListener('click', e => { e.stopPropagation(); $('featPop').classList.toggle('hidden'); $('clockPop').classList.add('hidden'); });
+$('featAdd').addEventListener('click', () => {
+  const id = ($('featCustom').value || '').trim();
+  let ok = false; try { ok = bs58decode(id).length === 32; } catch {}
+  if (!ok) { $('featState').textContent = 'that is not a valid feature gate pubkey'; return; }
+  activeFeatures = activeFeatures.filter(f => f.id !== id);
+  activeFeatures.push({ id, active: $('featCustomState').value === 'on' });
+  $('featCustom').value = '';
+  refreshFeatures();
+});
+$('featCustom').addEventListener('keydown', e => { if (e.key === 'Enter') $('featAdd').click(); });
+renderFeatList();
 
 $('openSim').addEventListener('click', () => showSim(true));
 $('navSim').addEventListener('click', () => showSim(true));

@@ -183,6 +183,7 @@ fn load_and_run_suite(
         .into_iter()
         .map(|s| s.into_spec())
         .collect::<Result<Vec<_>, _>>()?;
+    let features = svmscope::api::feature_toggles(req.features)?;
 
     if let Some(fx_ref) = &req.fixture {
         // Fixture path is resolved relative to the suite file's directory.
@@ -200,13 +201,13 @@ fn load_and_run_suite(
         );
         Ok((
             label,
-            svmscope::run_fixture_suite(&fx, scenarios, req.time_travel)?,
+            svmscope::run_fixture_suite(&fx, scenarios, req.time_travel, features)?,
         ))
     } else if let Some(sig) = &req.signature {
         let label = format!("{sig} [live RPC — may drift]");
         Ok((
             label,
-            simulate_suite(client, sig, scenarios, req.time_travel)?,
+            simulate_suite(client, sig, scenarios, req.time_travel, features)?,
         ))
     } else {
         Err("suite must specify either \"fixture\" or \"signature\"".into())

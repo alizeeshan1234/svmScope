@@ -19,5 +19,11 @@ solana-account = "=4.3.2"
 solana-address = { version = "=2.6.1", features = ["curve25519", "sha2"] }
 solana-clock = "=3.1.1"
 solana-client = "=4.1.1"
+solana-pubkey = "=4.2.1"
 solana-transaction = "=4.1.6"
 tokio = { version = "1.53.1", features = ["full"] }
+
+[dev-dependencies]
+# Enables LiteSVM's feature-set accessors (get_feature_set) for tests only;
+# not compiled into the normal build.
+litesvm = { version = "0.15.2", features = ["internal-test"] }

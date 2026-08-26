@@ -196,6 +196,9 @@ struct SimRequest {
     /// Optional clock warp — test time-gated logic without waiting.
     #[serde(default)]
     time_travel: svmscope::replay::TimeTravel,
+    /// Optional runtime feature-gate toggles — replay as if a feature were (in)active.
+    #[serde(default)]
+    features: Vec<svmscope::api::FeatureInput>,
     #[serde(default)]
     cluster: Option<String>,
     #[serde(default)]
@@ -244,10 +247,19 @@ async fn simulate_handler(
         .collect::<Result<_, _>>()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
+    let features =
+        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || {
         let client = RpcClient::new(url);
-        svmscope::simulate(&client, &req.signature, &mutations, req.time_travel)
+        svmscope::simulate(
+            &client,
+            &req.signature,
+            &mutations,
+            req.time_travel,
+            features,
+        )
     })
     .await
     .map_err(|e| {
@@ -288,10 +300,12 @@ async fn suite_handler(
         .map(|s| s.into_spec())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let features =
+        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
 
     let result = tokio::task::spawn_blocking(move || {
         let client = RpcClient::new(url);
-        svmscope::simulate_suite(&client, &signature, scenarios, req.time_travel)
+        svmscope::simulate_suite(&client, &signature, scenarios, req.time_travel, features)
     })
     .await
     .map_err(|e| {
@@ -590,8 +604,8 @@ async fn api_index() -> Json<serde_json::Value> {
         "endpoints": {
             "GET  /analyze/{signature}":  "Decode a transaction: CPI tree, balance & token changes, compute, and IDL-decoded accounts.",
             "GET  /replay/{signature}":   "Re-execute the transaction locally against reconstructed pre-state.",
-            "POST /simulate":             "{ signature, mutations[], time_travel? } — replay with what-if account mutations, optionally with the clock warped.",
-            "POST /simulate_suite":       "{ signature, scenarios[], time_travel? } — run a suite of scenarios with outcome + state assertions.",
+            "POST /simulate":             "{ signature, mutations[], time_travel?, features? } — replay with what-if account mutations, an optional clock warp, and optional runtime feature-gate toggles.",
+            "POST /simulate_suite":       "{ signature, scenarios[], time_travel?, features? } — run a suite of scenarios with outcome + state assertions, under optional feature-gate toggles.",
             "POST /preflight":            "{ transaction, mutations[] } — simulate an UNSIGNED transaction against current state before sending.",
             "GET  /freeze/{signature}":   "Capture a self-contained fixture for deterministic, offline replay."
         }

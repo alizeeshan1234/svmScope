@@ -139,13 +139,49 @@ fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Result<LoadedAcc
     Ok((out, existing))
 }
 
+/// A Solana runtime feature gate to flip for a replay: activate one that isn't
+/// live on mainnet yet ("will my tx still work when this ships?"), or deactivate
+/// an active one. Most execution-affecting SIMDs land on-chain as one of these.
+#[derive(Clone, Debug)]
+pub struct FeatureToggle {
+    /// The feature gate's account address (its on-chain pubkey).
+    pub id: Address,
+    /// `true` = activate the gate, `false` = deactivate it.
+    pub active: bool,
+}
+
 /// Build a fresh LiteSVM from already-fetched loadables (no network).
-fn svm_from_loaded(loaded: &[(Address, Loaded)]) -> LiteSVM {
+///
+/// `features` optionally overrides the runtime feature set: we start from the
+/// mainnet-active set (the replay baseline) and flip each requested gate, so a
+/// transaction can be re-executed as if a feature were (in)active.
+fn svm_from_loaded(loaded: &[(Address, Loaded)], features: &[FeatureToggle], slot: u64) -> LiteSVM {
     // Disable sigverify + blockhash check: we're replaying an already-signed
     // transaction, so its original blockhash won't be valid in a fresh SVM.
     let mut svm = LiteSVM::new()
         .with_sigverify(false)
         .with_blockhash_check(false);
+    if !features.is_empty() {
+        // Start from mainnet's active gates and flip the requested ones. The
+        // pubkey types differ across crates (Address vs solana_pubkey::Pubkey),
+        // so bridge by their shared 32-byte representation.
+        let mut fs = LiteSVM::mainnet_feature_set();
+        for t in features {
+            let pk = solana_pubkey::Pubkey::new_from_array(t.id.to_bytes());
+            if t.active {
+                fs.activate(&pk, slot);
+            } else {
+                fs.deactivate(&pk);
+            }
+        }
+        // `with_builtins` is what rebuilds the program-runtime environment (CU
+        // model, syscalls, feature-gated builtins) from the feature set — setting
+        // the set alone doesn't, so execution would otherwise ignore the toggle.
+        svm = svm
+            .with_feature_set(fs)
+            .with_builtins()
+            .with_feature_accounts();
+    }
     for (addr, l) in loaded {
         match l {
             Loaded::Data(a) => {
@@ -184,6 +220,8 @@ pub struct ReplayContext {
     /// (`assert pool.reserveA`) against accounts the built-in decoders don't
     /// recognize. Populated by the library layer, which has RPC access.
     idls: HashMap<String, serde_json::Value>,
+    /// Runtime feature gates to flip before replaying (empty = mainnet-as-is).
+    feature_toggles: Vec<FeatureToggle>,
 }
 
 /// An account that the transaction changed, with raw before/after bytes. The
@@ -319,6 +357,12 @@ impl ReplayContext {
         self.time_travel = tt;
     }
 
+    /// Flip runtime feature gates for subsequent runs (see [`FeatureToggle`]).
+    /// Every run rebuilds its SVM, so this takes effect on the next replay.
+    pub fn set_feature_toggles(&mut self, toggles: Vec<FeatureToggle>) {
+        self.feature_toggles = toggles;
+    }
+
     /// Seed the clock with the transaction's real slot, and derive the epoch and
     /// wall-clock time from it. LiteSVM starts at epoch 0 / timestamp 0, which
     /// would make any date-based program logic nonsense, so we anchor to reality:
@@ -351,7 +395,7 @@ impl ReplayContext {
     /// A pristine SVM loaded with the reconstructed state, its clock advanced to
     /// the transaction's slot (and then by any requested time travel).
     fn fresh_svm(&self) -> LiteSVM {
-        let mut svm = svm_from_loaded(&self.loaded);
+        let mut svm = svm_from_loaded(&self.loaded, &self.feature_toggles, self.slot.unwrap_or(0));
         let mut clock = svm.get_sysvar::<Clock>();
         self.base_clock(&mut clock);
         if !self.time_travel.is_noop() {
@@ -603,6 +647,7 @@ pub fn build_context(
         block_time,
         time_travel: TimeTravel::default(),
         idls: HashMap::new(),
+        feature_toggles: Vec::new(),
     })
 }
 
@@ -681,6 +726,7 @@ pub fn preflight_context(
         block_time,
         time_travel: TimeTravel::default(),
         idls: HashMap::new(),
+        feature_toggles: Vec::new(),
     })
 }
 
@@ -772,6 +818,7 @@ impl ReplayContext {
             block_time: fx.captured_block_time,
             time_travel: TimeTravel::default(),
             idls: HashMap::new(),
+            feature_toggles: Vec::new(),
         })
     }
 }
@@ -1291,6 +1338,34 @@ mod tests {
     }
 
     #[test]
+    fn feature_toggle_changes_the_effective_feature_set() {
+        // The get_sysvar syscall gate is active on mainnet (our replay baseline).
+        let feat = Address::from_str("CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq").unwrap();
+        let pk = solana_pubkey::Pubkey::new_from_array(feat.to_bytes());
+
+        // Baseline (no toggles) has it active…
+        let base = svm_from_loaded(&[], &[], 0);
+        assert!(
+            base.get_feature_set().is_active(&pk),
+            "gate should be active by default"
+        );
+
+        // …and our deactivate toggle actually removes it from the runtime set.
+        let off = svm_from_loaded(
+            &[],
+            &[FeatureToggle {
+                id: feat,
+                active: false,
+            }],
+            0,
+        );
+        assert!(
+            !off.get_feature_set().is_active(&pk),
+            "toggle should deactivate the gate"
+        );
+    }
+
+    #[test]
     fn unknown_field_errors_and_lists_candidates() {
         let (dec, _) = token_decoded();
         let e = find_field(&dec, "reserveA").unwrap_err();
@@ -1333,6 +1408,7 @@ mod tests {
             block_time: Some(1_787_600_325),
             time_travel: TimeTravel::default(),
             idls: HashMap::new(),
+            feature_toggles: Vec::new(),
         };
 
         let fx = ctx.to_fixture("SIG");

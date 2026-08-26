@@ -5,8 +5,41 @@
 //! `replay::{Mutation, ScenarioSpec}` the engine runs.
 
 use serde::Deserialize;
+use solana_address::Address;
+use std::str::FromStr;
 
-use crate::replay::{AccountAssert, CmpOp, Expect, Mutation, ScenarioSpec, StateCheck, TimeTravel};
+use crate::replay::{
+    AccountAssert, CmpOp, Expect, FeatureToggle, Mutation, ScenarioSpec, StateCheck, TimeTravel,
+};
+
+/// A runtime feature-gate toggle for a replay: `{"id":"<feature pubkey>","active":true}`.
+/// `active` true = activate the gate (e.g. test a not-yet-live feature early),
+/// false = deactivate an active one.
+#[derive(Deserialize, Clone)]
+pub struct FeatureInput {
+    pub id: String,
+    #[serde(default)]
+    pub active: bool,
+}
+
+impl FeatureInput {
+    pub fn into_toggle(self) -> Result<FeatureToggle, String> {
+        let id = Address::from_str(self.id.trim())
+            .map_err(|_| format!("bad feature id (not a pubkey): {}", self.id))?;
+        Ok(FeatureToggle {
+            id,
+            active: self.active,
+        })
+    }
+}
+
+/// Convert a list of feature inputs into engine toggles, failing on the first bad id.
+pub fn feature_toggles(features: Vec<FeatureInput>) -> Result<Vec<FeatureToggle>, String> {
+    features
+        .into_iter()
+        .map(FeatureInput::into_toggle)
+        .collect()
+}
 
 /// One what-if mutation. `kind` selects the variant:
 /// `{"kind":"lamports","address":..,"lamports":..}` or
@@ -363,5 +396,8 @@ pub struct SuiteRequest {
     /// Optional clock warp applied to every scenario in the suite.
     #[serde(default)]
     pub time_travel: TimeTravel,
+    /// Optional runtime feature-gate toggles applied to every scenario.
+    #[serde(default)]
+    pub features: Vec<FeatureInput>,
     pub scenarios: Vec<ScenarioInput>,
 }
