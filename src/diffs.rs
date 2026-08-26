@@ -155,9 +155,19 @@ mod tests {
     fn token_deltas_include_drained_accounts() {
         let d = token_diffs(&tx());
         assert_eq!(d.len(), 2);
-        assert_eq!((d[0].address.as_str(), d[0].delta_raw.as_str()), ("B", "-600"));
+        assert_eq!(
+            (d[0].address.as_str(), d[0].delta_raw.as_str()),
+            ("B", "-600")
+        );
         // Present pre but not post: fully drained, delta is the whole balance.
-        assert_eq!((d[1].address.as_str(), d[1].delta_raw.as_str(), d[1].post_raw.as_str()), ("C", "-7", "0"));
+        assert_eq!(
+            (
+                d[1].address.as_str(),
+                d[1].delta_raw.as_str(),
+                d[1].post_raw.as_str()
+            ),
+            ("C", "-7", "0")
+        );
     }
 
     #[test]

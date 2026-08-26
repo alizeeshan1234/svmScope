@@ -13,10 +13,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use std::net::SocketAddr;
 use serde::Deserialize;
 use serde_json::json;
 use solana_client::rpc_client::RpcClient;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use svmscope::api::{MutationInput, SuiteRequest};
 use svmscope::replay::{Mutation, ReplayResult, ScenarioOutcome};
 use svmscope::Analysis;
@@ -63,18 +63,81 @@ struct ClusterQuery {
     rpc: Option<String>,
 }
 
-/// Resolve a per-request RPC. Precedence: explicit ?rpc= > per-cluster env var >
-/// cluster's public endpoint > the generic env default.
+/// True if `ip` is one the public server must never be tricked into fetching —
+/// loopback, private, link-local (incl. the cloud metadata address 169.254.169.254),
+/// or unspecified. This is the core of the SSRF guard on caller-supplied `?rpc=`.
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                // 100.64.0.0/10 carrier-grade NAT / cloud internal
+                || (v4.octets()[0] == 100 && (64..128).contains(&v4.octets()[1]))
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // unique-local fc00::/7 and link-local fe80::/10
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // IPv4-mapped: unwrap and re-check against the v4 rules
+                || v6.to_ipv4_mapped().is_some_and(|m| is_blocked_ip(IpAddr::V4(m)))
+        }
+    }
+}
+
+/// Validate a caller-supplied RPC URL before the server will fetch through it.
+/// Requires http(s), and resolves the host so a public deployment can't be aimed
+/// at localhost, private networks, or the cloud metadata endpoint (SSRF). Returns
+/// the URL unchanged when safe. DNS that resolves to *any* blocked address is
+/// rejected (defends the obvious rebind-to-metadata trick).
+fn vet_custom_rpc(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    // host[:port] is everything up to the first '/', '?' or '#'.
+    let hostport = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = hostport
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(hostport);
+    let host = host.trim_matches(['[', ']']); // strip IPv6 brackets
+    if host.is_empty() {
+        return None;
+    }
+    // A bare IP literal is checked directly; a hostname is resolved (all A/AAAA).
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return (!is_blocked_ip(ip)).then(|| url.to_string());
+    }
+    let addrs = (host, 443u16).to_socket_addrs().ok()?;
+    let mut any = false;
+    for a in addrs {
+        any = true;
+        if is_blocked_ip(a.ip()) {
+            return None;
+        }
+    }
+    any.then(|| url.to_string())
+}
+
+/// Resolve a per-request RPC. Precedence: explicit ?rpc= (SSRF-vetted) > per-cluster
+/// env var > cluster's public endpoint > the generic env default. A caller-supplied
+/// `rpc` that fails the safety check is ignored, falling through to trusted sources.
 fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> String {
     if let Some(u) = rpc {
-        if u.starts_with("http") {
-            return u.to_string();
+        if let Some(safe) = vet_custom_rpc(u) {
+            return safe;
         }
     }
     if let Some(u) = cluster_env_rpc(cluster) {
         return u;
     }
-    svmscope::resolve_rpc(cluster, rpc, &rpc_url())
+    // Don't let an unsafe caller `rpc` reach resolve_rpc's verbatim-URL branch.
+    let safe_rpc = rpc.filter(|u| vet_custom_rpc(u).is_some());
+    svmscope::resolve_rpc(cluster, safe_rpc, &rpc_url())
 }
 
 /// POST body for /simulate.
@@ -109,7 +172,12 @@ async fn analyze_handler(
         svmscope::analyze(&client, &signature)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
 
     match result {
         Ok(analysis) => Ok(Json(analysis)),
@@ -134,7 +202,12 @@ async fn simulate_handler(
         svmscope::simulate(&client, &req.signature, &mutations, req.time_travel)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
 
     match result {
         Ok(replay) => Ok(Json(replay)),
@@ -152,7 +225,8 @@ async fn suite_handler(
     if req.fixture.is_some() {
         return Err((
             StatusCode::BAD_REQUEST,
-            "fixture suites run locally: `svmscope test suite.json`. The API needs a `signature`.".to_string(),
+            "fixture suites run locally: `svmscope test suite.json`. The API needs a `signature`."
+                .to_string(),
         ));
     }
     let signature = req
@@ -172,7 +246,12 @@ async fn suite_handler(
         svmscope::simulate_suite(&client, &signature, scenarios, req.time_travel)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
 
     match result {
         Ok(outcomes) => Ok(Json(outcomes)),
@@ -214,7 +293,12 @@ async fn preflight_handler(
         svmscope::simulate_preflight(&client, &req.transaction, &mutations)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
 
     match result {
         Ok(r) => Ok(Json(r)),
@@ -233,7 +317,12 @@ async fn account_handler(
         svmscope::account_overview(&client, &address)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
 
     match result {
         Ok(ov) => Ok(Json(ov)),
@@ -252,7 +341,12 @@ async fn signatures_handler(
         svmscope::recent_signatures(&client, &address, 25)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
 
     match result {
         Ok(sigs) => Ok(Json(sigs)),
@@ -279,7 +373,12 @@ async fn preflight_report_handler(
         svmscope::preflight_report(&client, &req.transaction, &mutations, tt)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
 
     result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
 }
@@ -303,7 +402,12 @@ async fn replay_report_handler(
         svmscope::replay_report(&client, &req.signature, &mutations, tt)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
 
     result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
 }
@@ -339,7 +443,12 @@ async fn decode_account_handler(
         svmscope::decode_account_with(&client, &address, idl.as_ref())
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
 
     result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
 }
@@ -363,7 +472,12 @@ async fn instructions_handler(
         svmscope::program_instructions(&client, &program)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
 
     result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
 }
@@ -379,7 +493,12 @@ async fn replay_handler(
         svmscope::run_replay(&client, &signature)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
 
     match result {
         Ok(replay) => Ok(Json(replay)),
@@ -398,7 +517,12 @@ async fn freeze_handler(
         svmscope::capture_fixture(&client, &signature)
     })
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
 
     match result {
         Ok(fx) => Ok(Json(fx)),
@@ -502,7 +626,9 @@ async fn cache_layer(req: Request, next: Next) -> Response {
     let (mut parts, body) = res.into_parts();
     let bytes = match axum::body::to_bytes(body, 32 * 1024 * 1024).await {
         Ok(b) => b,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "response read error").into_response(),
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "response read error").into_response()
+        }
     };
     if let Ok(text) = String::from_utf8(bytes.to_vec()) {
         guard::cache_put(key, text);
@@ -545,7 +671,10 @@ async fn main() {
     // Host/port from the environment so it runs unchanged locally and on any
     // platform (Fly, Render, Railway, Docker) that injects PORT and expects 0.0.0.0.
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-    let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(3000);
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3000);
     let addr = format!("{host}:{port}");
 
     let listener = match tokio::net::TcpListener::bind(&addr).await {
@@ -562,7 +691,46 @@ async fn main() {
     };
     println!("svmscope → http://{addr}   (API index: /api)");
     // into_make_service_with_connect_info gives the rate limiter the peer address.
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssrf_guard_blocks_internal_targets() {
+        // Cloud metadata, loopback, and private ranges must never be fetched.
+        assert!(vet_custom_rpc("http://169.254.169.254/latest/meta-data").is_none());
+        assert!(vet_custom_rpc("http://localhost:8899").is_none());
+        assert!(vet_custom_rpc("http://127.0.0.1/").is_none());
+        assert!(vet_custom_rpc("http://10.0.0.5:8899").is_none());
+        assert!(vet_custom_rpc("http://192.168.1.1").is_none());
+        assert!(vet_custom_rpc("http://[::1]:8899").is_none());
+        assert!(vet_custom_rpc("http://0.0.0.0").is_none());
+        // Non-http schemes and junk are rejected outright.
+        assert!(vet_custom_rpc("file:///etc/passwd").is_none());
+        assert!(vet_custom_rpc("not-a-url").is_none());
+    }
+
+    #[test]
+    fn ssrf_guard_allows_public_rpc() {
+        // A normal public endpoint (resolves to a routable IP) passes through unchanged.
+        let ok = vet_custom_rpc("https://api.mainnet-beta.solana.com");
+        assert_eq!(ok.as_deref(), Some("https://api.mainnet-beta.solana.com"));
+    }
+
+    #[test]
+    fn blocked_ip_classifies_ranges() {
+        assert!(is_blocked_ip("169.254.169.254".parse().unwrap()));
+        assert!(is_blocked_ip("127.0.0.1".parse().unwrap()));
+        assert!(is_blocked_ip("100.100.0.1".parse().unwrap())); // CGNAT
+        assert!(!is_blocked_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_blocked_ip("1.1.1.1".parse().unwrap()));
+    }
 }

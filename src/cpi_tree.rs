@@ -62,20 +62,38 @@ pub fn build_cpi_tree(tx: &Value) -> Vec<CpiEntry> {
     // Instruction data is base58 in `json` encoding; keep the raw bytes so the
     // caller can decode an instruction name from them.
     let data_of = |ix: &Value| -> Vec<u8> {
-        ix["data"].as_str().and_then(|s| bs58::decode(s).into_vec().ok()).unwrap_or_default()
+        ix["data"]
+            .as_str()
+            .and_then(|s| bs58::decode(s).into_vec().ok())
+            .unwrap_or_default()
     };
     let accts_of = |ix: &Value| -> Vec<usize> {
-        ix["accounts"].as_array().map(|a| a.iter().filter_map(|i| i.as_u64().map(|v| v as usize)).collect()).unwrap_or_default()
+        ix["accounts"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|i| i.as_u64().map(|v| v as usize))
+                    .collect()
+            })
+            .unwrap_or_default()
     };
     let entry = |index, program, stack_height, ix: &Value| CpiEntry {
-        index, program, stack_height, name: None, accounts: vec![], args: vec![],
-        data: data_of(ix), account_indexes: accts_of(ix),
+        index,
+        program,
+        stack_height,
+        name: None,
+        accounts: vec![],
+        args: vec![],
+        data: data_of(ix),
+        account_indexes: accts_of(ix),
     };
 
     let mut entries: Vec<CpiEntry> = Vec::new();
 
     for (index, ix) in instructions.iter().enumerate() {
-        let Some(program) = program_at(ix) else { continue };
+        let Some(program) = program_at(ix) else {
+            continue;
+        };
 
         // Top-level instruction.
         entries.push(entry(index, program, 1, ix));
@@ -89,7 +107,9 @@ pub fn build_cpi_tree(tx: &Value) -> Vec<CpiEntry> {
 
         if let Some(my_group) = my_group {
             for inner in my_group["instructions"].as_array().unwrap_or(&empty) {
-                let Some(program) = program_at(inner) else { continue };
+                let Some(program) = program_at(inner) else {
+                    continue;
+                };
                 // Old transactions (pre-v1.14.6 meta) report no stackHeight; a
                 // direct CPI (depth 2) is the faithful default there.
                 let stack_height = inner["stackHeight"].as_u64().unwrap_or(2);
@@ -124,9 +144,18 @@ mod tests {
         ]}]));
         let tree = build_cpi_tree(&t);
         assert_eq!(tree.len(), 3);
-        assert_eq!((tree[0].program.as_str(), tree[0].stack_height), ("ProgA", 1));
-        assert_eq!((tree[1].program.as_str(), tree[1].stack_height), ("ProgB", 2));
-        assert_eq!((tree[2].program.as_str(), tree[2].stack_height), ("ProgA", 3));
+        assert_eq!(
+            (tree[0].program.as_str(), tree[0].stack_height),
+            ("ProgA", 1)
+        );
+        assert_eq!(
+            (tree[1].program.as_str(), tree[1].stack_height),
+            ("ProgB", 2)
+        );
+        assert_eq!(
+            (tree[2].program.as_str(), tree[2].stack_height),
+            ("ProgA", 3)
+        );
     }
 
     #[test]

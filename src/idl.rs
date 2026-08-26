@@ -3,8 +3,8 @@ use std::io::Read;
 use crate::decode::{DecodedAccount, Field};
 use flate2::bufread::ZlibDecoder;
 use serde_json::{json, Value};
-use solana_client::rpc_client::RpcClient;
 use solana_address::Address;
+use solana_client::rpc_client::RpcClient;
 
 pub fn fetch_idl_json(client: &RpcClient, program_id: Address) -> Option<Value> {
     let base = Address::find_program_address(&[], &program_id).0;
@@ -25,7 +25,6 @@ pub fn fetch_idl_json(client: &RpcClient, program_id: Address) -> Option<Value> 
     decoder.read_to_end(&mut out).ok()?;
 
     serde_json::from_slice::<Value>(&out).ok()
-
 }
 
 /// A program error resolved from an IDL's `errors[]` — the difference between
@@ -42,8 +41,16 @@ pub fn error_for_code(idl: &Value, code: u64) -> Option<IdlError> {
     idl.get("errors")?.as_array()?.iter().find_map(|e| {
         (e.get("code")?.as_u64()? == code).then(|| IdlError {
             code,
-            name: e.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
-            msg: e.get("msg").and_then(|m| m.as_str()).unwrap_or("").to_string(),
+            name: e
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string(),
+            msg: e
+                .get("msg")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string(),
         })
     })
 }
@@ -112,7 +119,11 @@ pub fn instructions(idl: &Value) -> Vec<IdlInstruction> {
                 docs: ix
                     .get("docs")
                     .and_then(|d| d.as_array())
-                    .map(|d| d.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                    .map(|d| {
+                        d.iter()
+                            .filter_map(|s| s.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 accounts: ix
                     .get("accounts")
@@ -120,9 +131,19 @@ pub fn instructions(idl: &Value) -> Vec<IdlInstruction> {
                     .map(|a| {
                         a.iter()
                             .map(|acc| IdlAccountSpec {
-                                name: acc.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
-                                writable: acc.get("writable").and_then(|w| w.as_bool()).unwrap_or(false),
-                                signer: acc.get("signer").and_then(|s| s.as_bool()).unwrap_or(false),
+                                name: acc
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                writable: acc
+                                    .get("writable")
+                                    .and_then(|w| w.as_bool())
+                                    .unwrap_or(false),
+                                signer: acc
+                                    .get("signer")
+                                    .and_then(|s| s.as_bool())
+                                    .unwrap_or(false),
                                 pda: acc.get("pda").is_some(),
                                 seeds: acc
                                     .get("pda")
@@ -133,7 +154,9 @@ pub fn instructions(idl: &Value) -> Vec<IdlInstruction> {
                                             .iter()
                                             .filter_map(|sd| match sd.get("kind")?.as_str()? {
                                                 "const" => Some(PdaSeed::Const {
-                                                    bytes: sd.get("value")?.as_array()?
+                                                    bytes: sd
+                                                        .get("value")?
+                                                        .as_array()?
                                                         .iter()
                                                         .filter_map(|b| b.as_u64().map(|v| v as u8))
                                                         .collect(),
@@ -146,7 +169,10 @@ pub fn instructions(idl: &Value) -> Vec<IdlInstruction> {
                                             .collect()
                                     })
                                     .unwrap_or_default(),
-                                address: acc.get("address").and_then(|a| a.as_str()).map(String::from),
+                                address: acc
+                                    .get("address")
+                                    .and_then(|a| a.as_str())
+                                    .map(String::from),
                             })
                             .collect()
                     })
@@ -157,7 +183,11 @@ pub fn instructions(idl: &Value) -> Vec<IdlInstruction> {
                     .map(|a| {
                         a.iter()
                             .map(|arg| IdlArg {
-                                name: arg.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+                                name: arg
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
                                 ty: type_label(arg.get("type").unwrap_or(&Value::Null)),
                             })
                             .collect()
@@ -175,7 +205,12 @@ pub fn find_ix<'a>(idl: &'a Value, data: &[u8]) -> Option<&'a Value> {
     idl.get("instructions")?.as_array()?.iter().find(|ix| {
         ix.get("discriminator")
             .and_then(|d| d.as_array())
-            .map(|d| d.iter().filter_map(|b| b.as_u64().map(|v| v as u8)).collect::<Vec<u8>>() == disc)
+            .map(|d| {
+                d.iter()
+                    .filter_map(|b| b.as_u64().map(|v| v as u8))
+                    .collect::<Vec<u8>>()
+                    == disc
+            })
             .unwrap_or(false)
     })
 }
@@ -186,15 +221,23 @@ pub fn find_ix<'a>(idl: &'a Value, data: &[u8]) -> Option<&'a Value> {
 /// are no longer trustworthy), same rule as the account-field walker.
 pub fn decode_ix_args(idl_ix: &Value, data: &[u8]) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
-    let Some(args) = idl_ix.get("args").and_then(|a| a.as_array()) else { return out };
+    let Some(args) = idl_ix.get("args").and_then(|a| a.as_array()) else {
+        return out;
+    };
     let mut off = 8usize; // skip the discriminator
     for arg in args {
-        let name = arg.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+        let name = arg
+            .get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string();
         let ty = arg.get("type").unwrap_or(&Value::Null);
         match resolve_fixed(ty) {
             Some(kind) => {
                 let sz = kind.size();
-                let Some(bytes) = data.get(off..off + sz) else { break };
+                let Some(bytes) = data.get(off..off + sz) else {
+                    break;
+                };
                 out.push((name, kind.label(), read_value(bytes, kind)));
                 off += sz;
             }
@@ -236,11 +279,11 @@ fn type_label(ty: &Value) -> String {
 /// A fixed-size scalar type we know how to read from account bytes.
 #[derive(Clone, Copy)]
 enum Kind {
-    U(usize),      // unsigned int, `usize` = byte width (1,2,4,8,16)
-    I(usize),      // signed int
+    U(usize), // unsigned int, `usize` = byte width (1,2,4,8,16)
+    I(usize), // signed int
     Bool,
     Pubkey,
-    Bytes(usize),  // fixed byte array [u8; N]
+    Bytes(usize), // fixed byte array [u8; N]
 }
 
 impl Kind {
@@ -332,7 +375,8 @@ fn read_value(bytes: &[u8], kind: Kind) -> String {
 /// (`{"defined": {"name": "Fees"}}`) and the old one (`{"defined": "Fees"}`).
 fn defined_name(ty: &Value) -> Option<&str> {
     let d = ty.get("defined")?;
-    d.as_str().or_else(|| d.get("name").and_then(|n| n.as_str()))
+    d.as_str()
+        .or_else(|| d.get("name").and_then(|n| n.as_str()))
 }
 
 /// Read a little-endian u32 at `offset` (borsh length prefixes).
@@ -405,7 +449,9 @@ fn walk_fields(
             // An enum is a 1-byte variant tag, then that variant's payload (if any),
             // so we can read the tag, name the variant, and walk its fields.
             if let Some(variants) = enum_variants(types, name) {
-                let Some(&tag) = data.get(*offset) else { return false };
+                let Some(&tag) = data.get(*offset) else {
+                    return false;
+                };
                 let variant = variants.get(tag as usize);
                 let vname = variant
                     .and_then(|v| v.get("name"))
@@ -422,7 +468,10 @@ fn walk_fields(
                 });
                 *offset += 1;
                 // Tuple/struct variants carry fields; walk them so the cursor stays true.
-                if let Some(vfields) = variant.and_then(|v| v.get("fields")).and_then(|f| f.as_array()) {
+                if let Some(vfields) = variant
+                    .and_then(|v| v.get("fields"))
+                    .and_then(|f| f.as_array())
+                {
                     // Tuple variants are bare types; give them positional names.
                     let named: Vec<Value> = vfields
                         .iter()
@@ -449,7 +498,9 @@ fn walk_fields(
         if let Some(arr) = ty.get("array").and_then(|a| a.as_array()) {
             if let (Some(inner), Some(count)) = (arr.first(), arr.get(1).and_then(|c| c.as_u64())) {
                 if let Some(name) = defined_name(inner) {
-                    let Some(sub) = struct_fields(types, name) else { return false };
+                    let Some(sub) = struct_fields(types, name) else {
+                        return false;
+                    };
                     for i in 0..count {
                         if !walk_fields(sub, types, data, offset, &format!("{fname}[{i}]."), out) {
                             return false;
@@ -465,7 +516,9 @@ fn walk_fields(
         //
         // string: u32 length + utf8 bytes
         if ty.as_str() == Some("string") {
-            let Some(len) = read_u32_at(data, *offset) else { return false };
+            let Some(len) = read_u32_at(data, *offset) else {
+                return false;
+            };
             let start = *offset + 4;
             let end = start + len as usize;
             if end > data.len() {
@@ -473,8 +526,13 @@ fn walk_fields(
             }
             let text = String::from_utf8_lossy(&data[start..end]).to_string();
             out.push(Field {
-                name: fname, offset: *offset, ty: "string".into(), size: 4 + len as usize,
-                value: text, editable: false, note: None,
+                name: fname,
+                offset: *offset,
+                ty: "string".into(),
+                size: 4 + len as usize,
+                value: text,
+                editable: false,
+                note: None,
             });
             *offset = end;
             continue;
@@ -482,18 +540,27 @@ fn walk_fields(
 
         // option<T>: 1-byte tag, then T when present.
         if let Some(inner) = ty.get("option") {
-            let Some(&tag) = data.get(*offset) else { return false };
+            let Some(&tag) = data.get(*offset) else {
+                return false;
+            };
             *offset += 1;
             if tag == 0 {
                 out.push(Field {
-                    name: fname, offset: *offset - 1, ty: "option".into(), size: 1,
-                    value: "none".into(), editable: false, note: None,
+                    name: fname,
+                    offset: *offset - 1,
+                    ty: "option".into(),
+                    size: 1,
+                    value: "none".into(),
+                    editable: false,
+                    note: None,
                 });
                 continue;
             }
             // Present: fall through by walking the inner type as a single field.
             let one = json!([{ "name": fname, "type": inner.clone() }]);
-            let Some(arr) = one.as_array() else { return false };
+            let Some(arr) = one.as_array() else {
+                return false;
+            };
             if !walk_fields(arr, types, data, offset, "", out) {
                 return false;
             }
@@ -502,10 +569,17 @@ fn walk_fields(
 
         // vec<T>: u32 count, then the elements. Walk each so the cursor stays true.
         if let Some(inner) = ty.get("vec") {
-            let Some(count) = read_u32_at(data, *offset) else { return false };
+            let Some(count) = read_u32_at(data, *offset) else {
+                return false;
+            };
             out.push(Field {
-                name: format!("{fname}.len"), offset: *offset, ty: "u32".into(), size: 4,
-                value: count.to_string(), editable: false, note: None,
+                name: format!("{fname}.len"),
+                offset: *offset,
+                ty: "u32".into(),
+                size: 4,
+                value: count.to_string(),
+                editable: false,
+                note: None,
             });
             *offset += 4;
             // Cap how many elements we expand so a huge vec can't flood the UI;
@@ -516,7 +590,9 @@ fn walk_fields(
             }
             for i in 0..count {
                 let one = json!([{ "name": format!("{fname}[{i}]"), "type": inner.clone() }]);
-                let Some(arr) = one.as_array() else { return false };
+                let Some(arr) = one.as_array() else {
+                    return false;
+                };
                 if !walk_fields(arr, types, data, offset, "", out) {
                     return false;
                 }
@@ -564,7 +640,10 @@ pub fn decode_with_idl(idl: &Value, data: &[u8]) -> Option<DecodedAccount> {
     for a in accounts {
         let d = a.get("discriminator").and_then(|d| d.as_array());
         let matches = d.is_some_and(|d| {
-            d.len() == 8 && d.iter().zip(disc).all(|(v, b)| v.as_u64() == Some(*b as u64))
+            d.len() == 8
+                && d.iter()
+                    .zip(disc)
+                    .all(|(v, b)| v.as_u64() == Some(*b as u64))
         });
         if matches {
             type_name = a.get("name").and_then(|n| n.as_str()).map(String::from);

@@ -50,7 +50,13 @@ pub fn cache_put(key: String, body: String) {
             map.remove(&oldest);
         }
     }
-    map.insert(key, Entry { body, stored: Instant::now() });
+    map.insert(
+        key,
+        Entry {
+            body,
+            stored: Instant::now(),
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -71,7 +77,9 @@ const MAX_PER_WINDOW: usize = 40;
 /// Record a hit for `client` and report whether it is within the limit.
 /// Returns `Err(retry_after_seconds)` when the client is over.
 pub fn rate_check(client: &str) -> Result<(), u64> {
-    let Ok(mut map) = hits().lock() else { return Ok(()) };
+    let Ok(mut map) = hits().lock() else {
+        return Ok(());
+    };
 
     // Drop clients that have gone quiet, so the map doesn't grow forever.
     map.retain(|_, v| v.last().is_some_and(|t| t.elapsed() < WINDOW));

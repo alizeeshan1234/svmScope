@@ -15,11 +15,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
       - name: Build
         run: cargo build --all-targets
       - name: Test
         run: cargo test
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: SDK build
+        run: |
+          cd sdk
+          npm ci || npm install
+          npx tsc --noEmit

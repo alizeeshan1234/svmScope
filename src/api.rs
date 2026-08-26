@@ -14,8 +14,15 @@ use crate::replay::{AccountAssert, CmpOp, Expect, Mutation, ScenarioSpec, StateC
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum MutationInput {
-    Lamports { address: String, lamports: u64 },
-    Data { address: String, offset: usize, bytes_hex: String },
+    Lamports {
+        address: String,
+        lamports: u64,
+    },
+    Data {
+        address: String,
+        offset: usize,
+        bytes_hex: String,
+    },
 }
 
 /// Decode a hex string, tolerating `0x`, spaces, and underscores.
@@ -33,12 +40,19 @@ pub fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
 impl MutationInput {
     pub fn into_mutation(self) -> Result<Mutation, String> {
         Ok(match self {
-            MutationInput::Lamports { address, lamports } => {
-                Mutation::Lamports { address, value: lamports }
-            }
-            MutationInput::Data { address, offset, bytes_hex } => {
-                Mutation::DataPatch { address, offset, bytes: hex_decode(&bytes_hex)? }
-            }
+            MutationInput::Lamports { address, lamports } => Mutation::Lamports {
+                address,
+                value: lamports,
+            },
+            MutationInput::Data {
+                address,
+                offset,
+                bytes_hex,
+            } => Mutation::DataPatch {
+                address,
+                offset,
+                bytes: hex_decode(&bytes_hex)?,
+            },
         })
     }
 }
@@ -97,20 +111,51 @@ impl AssertInput {
         let field = || -> Result<String, String> {
             match &self.field {
                 Some(f) if !f.trim().is_empty() => Ok(f.trim().to_string()),
-                _ => Err(format!("assert kind \"{}\" needs a \"field\" name", self.kind)),
+                _ => Err(format!(
+                    "assert kind \"{}\" needs a \"field\" name",
+                    self.kind
+                )),
             }
         };
         let check = match self.kind.as_str() {
-            "lamports" => StateCheck::Lamports { op, value: unsigned()? },
-            "u64" => StateCheck::U64At { offset: self.offset, op, value: unsigned()? },
-            "token_amount" => StateCheck::U64At { offset: 64, op, value: unsigned()? },
-            "lamports_delta" => StateCheck::LamportsDelta { op, value: self.value as i128 },
-            "token_delta" => StateCheck::TokenDelta { op, value: self.value as i128 },
-            "field" => StateCheck::Field { name: field()?, op, value: self.value as i128 },
-            "field_delta" => StateCheck::FieldDelta { name: field()?, op, value: self.value as i128 },
+            "lamports" => StateCheck::Lamports {
+                op,
+                value: unsigned()?,
+            },
+            "u64" => StateCheck::U64At {
+                offset: self.offset,
+                op,
+                value: unsigned()?,
+            },
+            "token_amount" => StateCheck::U64At {
+                offset: 64,
+                op,
+                value: unsigned()?,
+            },
+            "lamports_delta" => StateCheck::LamportsDelta {
+                op,
+                value: self.value as i128,
+            },
+            "token_delta" => StateCheck::TokenDelta {
+                op,
+                value: self.value as i128,
+            },
+            "field" => StateCheck::Field {
+                name: field()?,
+                op,
+                value: self.value as i128,
+            },
+            "field_delta" => StateCheck::FieldDelta {
+                name: field()?,
+                op,
+                value: self.value as i128,
+            },
             other => return Err(format!("unknown assert kind: {other}")),
         };
-        Ok(AccountAssert { address: self.address, check })
+        Ok(AccountAssert {
+            address: self.address,
+            check,
+        })
     }
 }
 
@@ -156,7 +201,12 @@ impl ScenarioInput {
             .into_iter()
             .map(AssertInput::into_assert)
             .collect::<Result<_, _>>()?;
-        Ok(ScenarioSpec { name: self.name, mutations, expect, asserts })
+        Ok(ScenarioSpec {
+            name: self.name,
+            mutations,
+            expect,
+            asserts,
+        })
     }
 }
 
@@ -166,7 +216,10 @@ mod tests {
 
     #[test]
     fn hex_decode_tolerates_prefix_spaces_underscores() {
-        assert_eq!(hex_decode("0xDEAD_beef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(
+            hex_decode("0xDEAD_beef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
         assert_eq!(hex_decode("00 ff").unwrap(), vec![0x00, 0xff]);
     }
 
@@ -184,7 +237,11 @@ mod tests {
         )
         .unwrap();
         match m.into_mutation().unwrap() {
-            Mutation::DataPatch { address, offset, bytes } => {
+            Mutation::DataPatch {
+                address,
+                offset,
+                bytes,
+            } => {
                 assert_eq!(address, "X");
                 assert_eq!(offset, 64);
                 assert_eq!(bytes, vec![0u8; 8]);
@@ -195,22 +252,27 @@ mod tests {
 
     #[test]
     fn assert_kinds_and_ops_resolve() {
-        let a: AssertInput = serde_json::from_str(
-            r#"{"address":"X","kind":"token_amount","op":">=","value":5}"#,
-        )
-        .unwrap();
+        let a: AssertInput =
+            serde_json::from_str(r#"{"address":"X","kind":"token_amount","op":">=","value":5}"#)
+                .unwrap();
         // token_amount is shorthand for u64 at the SPL amount offset.
         match a.into_assert().unwrap().check {
-            StateCheck::U64At { offset: 64, op: CmpOp::Ge, value: 5 } => {}
+            StateCheck::U64At {
+                offset: 64,
+                op: CmpOp::Ge,
+                value: 5,
+            } => {}
             _ => panic!("expected U64At @64 >= 5"),
         }
 
-        let d: AssertInput = serde_json::from_str(
-            r#"{"address":"X","kind":"token_delta","op":"<","value":-3}"#,
-        )
-        .unwrap();
+        let d: AssertInput =
+            serde_json::from_str(r#"{"address":"X","kind":"token_delta","op":"<","value":-3}"#)
+                .unwrap();
         match d.into_assert().unwrap().check {
-            StateCheck::TokenDelta { op: CmpOp::Lt, value: -3 } => {}
+            StateCheck::TokenDelta {
+                op: CmpOp::Lt,
+                value: -3,
+            } => {}
             _ => panic!("expected TokenDelta < -3"),
         }
     }
@@ -222,7 +284,11 @@ mod tests {
         )
         .unwrap();
         match a.into_assert().unwrap().check {
-            StateCheck::Field { name, op: CmpOp::Ge, value: 1000 } => assert_eq!(name, "pool.reserveA"),
+            StateCheck::Field {
+                name,
+                op: CmpOp::Ge,
+                value: 1000,
+            } => assert_eq!(name, "pool.reserveA"),
             _ => panic!("expected Field >= 1000"),
         }
 
@@ -232,7 +298,11 @@ mod tests {
         )
         .unwrap();
         match d.into_assert().unwrap().check {
-            StateCheck::FieldDelta { name, op: CmpOp::Eq, value: -500 } => assert_eq!(name, "reserveA"),
+            StateCheck::FieldDelta {
+                name,
+                op: CmpOp::Eq,
+                value: -500,
+            } => assert_eq!(name, "reserveA"),
             _ => panic!("expected FieldDelta == -500"),
         }
     }

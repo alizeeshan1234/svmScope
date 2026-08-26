@@ -42,8 +42,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Report mode: run a suite and render a shareable HTML report.
     if signature == "report" {
-        let path = args.get(2).ok_or("usage: svmscope report <scenarios.json> [-o report.html]")?;
-        let out = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1));
+        let path = args
+            .get(2)
+            .ok_or("usage: svmscope report <scenarios.json> [-o report.html]")?;
+        let out = args
+            .iter()
+            .position(|a| a == "-o")
+            .and_then(|i| args.get(i + 1));
         return run_report(&client, path, out);
     }
 
@@ -61,8 +66,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Freeze mode: `svmscope freeze <sig> [-o fixture.json]` captures a
     // self-contained fixture for deterministic, offline replay.
     if signature == "freeze" {
-        let sig = args.get(2).ok_or("usage: svmscope freeze <signature> [-o fixture.json]")?;
-        let out = args.iter().position(|a| a == "-o").and_then(|i| args.get(i + 1));
+        let sig = args
+            .get(2)
+            .ok_or("usage: svmscope freeze <signature> [-o fixture.json]")?;
+        let out = args
+            .iter()
+            .position(|a| a == "-o")
+            .and_then(|i| args.get(i + 1));
         eprintln!("freezing {sig}…");
         let fx = svmscope::capture_fixture(&client, sig)?;
         let json = fx.to_json()?;
@@ -117,7 +127,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("\n-- replay --");
     let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let baseline = replay::replay_transaction(&client, signature, &account_keys, tx["slot"].as_u64(), &pre);
+    let baseline =
+        replay::replay_transaction(&client, signature, &account_keys, tx["slot"].as_u64(), &pre);
     print_replay("REPLAY", &baseline);
 
     // Mutations come only from the CLI (`--mutate <address>:<lamports>`).
@@ -125,7 +136,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut i = 2;
     while i < args.len() {
         if args[i] == "--mutate" {
-            let spec = args.get(i + 1).expect("--mutate needs <address>:<lamports>");
+            let spec = args
+                .get(i + 1)
+                .expect("--mutate needs <address>:<lamports>");
             let (addr, lamports_str) = spec
                 .split_once(':')
                 .expect("mutation must look like <address>:<lamports>");
@@ -141,7 +154,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if !mutations.is_empty() {
-        let mutated = replay::mutate_and_replay(&client, signature, &account_keys, &mutations, tx["slot"].as_u64(), &pre);
+        let mutated = replay::mutate_and_replay(
+            &client,
+            signature,
+            &account_keys,
+            &mutations,
+            tx["slot"].as_u64(),
+            &pre,
+        );
         print_replay("MUTATED REPLAY", &mutated);
     }
 
@@ -155,7 +175,8 @@ fn load_and_run_suite(
     path: &str,
 ) -> Result<(String, Vec<replay::ScenarioOutcome>), Box<dyn Error>> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-    let req: api::SuiteRequest = serde_json::from_str(&text).map_err(|e| format!("bad scenario file: {e}"))?;
+    let req: api::SuiteRequest =
+        serde_json::from_str(&text).map_err(|e| format!("bad scenario file: {e}"))?;
 
     let scenarios = req
         .scenarios
@@ -172,11 +193,21 @@ fn load_and_run_suite(
         let fx_text = std::fs::read_to_string(&fx_path)
             .map_err(|e| format!("cannot read fixture {}: {e}", fx_path.display()))?;
         let fx = svmscope::fixture::Fixture::from_json(&fx_text)?;
-        let label = format!("fixture {} ({}) [deterministic, offline]", fx.signature, fx.summary());
-        Ok((label, svmscope::run_fixture_suite(&fx, scenarios, req.time_travel)?))
+        let label = format!(
+            "fixture {} ({}) [deterministic, offline]",
+            fx.signature,
+            fx.summary()
+        );
+        Ok((
+            label,
+            svmscope::run_fixture_suite(&fx, scenarios, req.time_travel)?,
+        ))
     } else if let Some(sig) = &req.signature {
         let label = format!("{sig} [live RPC — may drift]");
-        Ok((label, simulate_suite(client, sig, scenarios, req.time_travel)?))
+        Ok((
+            label,
+            simulate_suite(client, sig, scenarios, req.time_travel)?,
+        ))
     } else {
         Err("suite must specify either \"fixture\" or \"signature\"".into())
     }
@@ -190,7 +221,11 @@ fn run_report(client: &RpcClient, path: &str, out: Option<&String>) -> Result<()
         Some(p) => {
             std::fs::write(p, &html).map_err(|e| format!("write {p}: {e}"))?;
             let passed = outcomes.iter().filter(|o| o.pass).count();
-            eprintln!("wrote {p} — {passed}/{} scenarios ({} bytes)", outcomes.len(), html.len());
+            eprintln!(
+                "wrote {p} — {passed}/{} scenarios ({} bytes)",
+                outcomes.len(),
+                html.len()
+            );
         }
         None => println!("{html}"),
     }
@@ -208,9 +243,17 @@ fn run_tests(client: &RpcClient, path: &str) -> Result<(), Box<dyn Error>> {
         let got = if o.actual.success {
             "succeeded".to_string()
         } else {
-            format!("reverted ({})", o.actual.error.as_deref().unwrap_or("error"))
+            format!(
+                "reverted ({})",
+                o.actual.error.as_deref().unwrap_or("error")
+            )
         };
-        let mark = if o.pass { passed += 1; "PASS" } else { "FAIL" };
+        let mark = if o.pass {
+            passed += 1;
+            "PASS"
+        } else {
+            "FAIL"
+        };
         println!("  {mark}  {}  (expect: {}; got: {})", o.name, o.expect, got);
         for a in &o.asserts {
             let am = if a.pass { "✓" } else { "✗" };

@@ -80,7 +80,15 @@ fn read_u32(data: &[u8], off: usize) -> u32 {
 }
 
 fn field(name: &str, offset: usize, ty: &str, size: usize, value: String, editable: bool) -> Field {
-    Field { name: name.into(), offset, ty: ty.into(), size, value, editable, note: None }
+    Field {
+        name: name.into(),
+        offset,
+        ty: ty.into(),
+        size,
+        value,
+        editable,
+        note: None,
+    }
 }
 
 /// Decode an SPL Token account (Token or Token-2022 base layout, 165 bytes).
@@ -121,8 +129,22 @@ fn decode_token_account(data: &[u8]) -> DecodedAccount {
             field("delegate", 72, "coption-pubkey", 32, delegate, false),
             state,
             field("isNative", 109, "coption-u64", 8, is_native, false),
-            field("delegatedAmount", 121, "u64", 8, read_u64(data, 121).to_string(), true),
-            field("closeAuthority", 129, "coption-pubkey", 32, close_authority, false),
+            field(
+                "delegatedAmount",
+                121,
+                "u64",
+                8,
+                read_u64(data, 121).to_string(),
+                true,
+            ),
+            field(
+                "closeAuthority",
+                129,
+                "coption-pubkey",
+                32,
+                close_authority,
+                false,
+            ),
         ],
     }
 }
@@ -142,11 +164,32 @@ fn decode_mint(data: &[u8]) -> DecodedAccount {
     DecodedAccount {
         type_name: "SPL Mint".into(),
         fields: vec![
-            field("mintAuthority", 0, "coption-pubkey", 32, mint_authority, false),
+            field(
+                "mintAuthority",
+                0,
+                "coption-pubkey",
+                32,
+                mint_authority,
+                false,
+            ),
             field("supply", 36, "u64", 8, read_u64(data, 36).to_string(), true),
             field("decimals", 44, "u8", 1, data[44].to_string(), true),
-            field("isInitialized", 45, "bool", 1, (data[45] != 0).to_string(), true),
-            field("freezeAuthority", 46, "coption-pubkey", 32, freeze_authority, false),
+            field(
+                "isInitialized",
+                45,
+                "bool",
+                1,
+                (data[45] != 0).to_string(),
+                true,
+            ),
+            field(
+                "freezeAuthority",
+                46,
+                "coption-pubkey",
+                32,
+                freeze_authority,
+                false,
+            ),
         ],
     }
 }
@@ -169,7 +212,7 @@ const SYSTEM_PROGRAM: &str = "11111111111111111111111111111111";
 fn decode(owner: &str, data: &[u8]) -> Option<DecodedAccount> {
     match owner {
         SPL_TOKEN | SPL_TOKEN_2022 => match data.len() {
-            82 => Some(decode_mint(data)),   // base mint
+            82 => Some(decode_mint(data)),           // base mint
             165 => Some(decode_token_account(data)), // base token account
             // Token-2022 with extensions: disambiguate by the account-type byte.
             n if n > 165 => match data[165] {
@@ -201,9 +244,30 @@ fn decode_lookup_table(data: &[u8]) -> Option<DecodedAccount> {
     Some(DecodedAccount {
         type_name: "Address Lookup Table".into(),
         fields: vec![
-            field("deactivationSlot", 4, "u64", 8, read_u64(data, 4).to_string(), true),
-            field("lastExtendedSlot", 12, "u64", 8, read_u64(data, 12).to_string(), true),
-            field("lastExtendedSlotStartIndex", 20, "u8", 1, data[20].to_string(), false),
+            field(
+                "deactivationSlot",
+                4,
+                "u64",
+                8,
+                read_u64(data, 4).to_string(),
+                true,
+            ),
+            field(
+                "lastExtendedSlot",
+                12,
+                "u64",
+                8,
+                read_u64(data, 12).to_string(),
+                true,
+            ),
+            field(
+                "lastExtendedSlotStartIndex",
+                20,
+                "u8",
+                1,
+                data[20].to_string(),
+                false,
+            ),
             field("authority", 22, "pubkey", 32, authority, false),
             field("addressCount", 56, "usize", 0, addresses.to_string(), false),
         ],
@@ -225,23 +289,96 @@ fn decode_stake(data: &[u8]) -> Option<DecodedAccount> {
     };
     let mut fields = vec![
         field("state", 0, "enum", 4, state.into(), false),
-        field("rentExemptReserve", 4, "u64", 8, read_u64(data, 4).to_string(), true),
-        field("authorizedStaker", 12, "pubkey", 32, read_pubkey(data, 12), true),
-        field("authorizedWithdrawer", 44, "pubkey", 32, read_pubkey(data, 44), true),
-        field("lockupUnixTimestamp", 76, "i64", 8, read_u64(data, 76).to_string(), true),
-        field("lockupEpoch", 84, "u64", 8, read_u64(data, 84).to_string(), true),
-        field("lockupCustodian", 92, "pubkey", 32, read_pubkey(data, 92), false),
+        field(
+            "rentExemptReserve",
+            4,
+            "u64",
+            8,
+            read_u64(data, 4).to_string(),
+            true,
+        ),
+        field(
+            "authorizedStaker",
+            12,
+            "pubkey",
+            32,
+            read_pubkey(data, 12),
+            true,
+        ),
+        field(
+            "authorizedWithdrawer",
+            44,
+            "pubkey",
+            32,
+            read_pubkey(data, 44),
+            true,
+        ),
+        field(
+            "lockupUnixTimestamp",
+            76,
+            "i64",
+            8,
+            read_u64(data, 76).to_string(),
+            true,
+        ),
+        field(
+            "lockupEpoch",
+            84,
+            "u64",
+            8,
+            read_u64(data, 84).to_string(),
+            true,
+        ),
+        field(
+            "lockupCustodian",
+            92,
+            "pubkey",
+            32,
+            read_pubkey(data, 92),
+            false,
+        ),
     ];
     // Delegation follows Meta (124 bytes in) when the account is staked.
     if read_u32(data, 0) == 2 && data.len() >= 196 {
         fields.extend([
-            field("voterPubkey", 124, "pubkey", 32, read_pubkey(data, 124), true),
-            field("stake", 156, "u64", 8, read_u64(data, 156).to_string(), true),
-            field("activationEpoch", 164, "u64", 8, read_u64(data, 164).to_string(), true),
-            field("deactivationEpoch", 172, "u64", 8, read_u64(data, 172).to_string(), true),
+            field(
+                "voterPubkey",
+                124,
+                "pubkey",
+                32,
+                read_pubkey(data, 124),
+                true,
+            ),
+            field(
+                "stake",
+                156,
+                "u64",
+                8,
+                read_u64(data, 156).to_string(),
+                true,
+            ),
+            field(
+                "activationEpoch",
+                164,
+                "u64",
+                8,
+                read_u64(data, 164).to_string(),
+                true,
+            ),
+            field(
+                "deactivationEpoch",
+                172,
+                "u64",
+                8,
+                read_u64(data, 172).to_string(),
+                true,
+            ),
         ]);
     }
-    Some(DecodedAccount { type_name: "Stake Account".into(), fields })
+    Some(DecodedAccount {
+        type_name: "Stake Account".into(),
+        fields,
+    })
 }
 
 /// Durable nonce account (system-owned, exactly 80 bytes).
@@ -256,7 +393,14 @@ fn decode_nonce(data: &[u8]) -> Option<DecodedAccount> {
             field("state", 4, "u32", 4, read_u32(data, 4).to_string(), false),
             field("authority", 8, "pubkey", 32, read_pubkey(data, 8), true),
             field("blockhash", 40, "pubkey", 32, read_pubkey(data, 40), false),
-            field("lamportsPerSignature", 72, "u64", 8, read_u64(data, 72).to_string(), true),
+            field(
+                "lamportsPerSignature",
+                72,
+                "u64",
+                8,
+                read_u64(data, 72).to_string(),
+                true,
+            ),
         ],
     })
 }
@@ -293,18 +437,32 @@ pub fn infer_layout(data: &[u8]) -> Option<DecodedAccount> {
             let zeros = w.iter().filter(|b| **b == 0).count();
             let looks_key = zeros <= 8 && w.iter().any(|b| *b != 0xff);
             if looks_key {
-                fields.push(field(&format!("pubkey@{i}"), i, "pubkey", 32, read_pubkey(data, i), true));
+                fields.push(field(
+                    &format!("pubkey@{i}"),
+                    i,
+                    "pubkey",
+                    32,
+                    read_pubkey(data, i),
+                    true,
+                ));
                 i += 32;
                 continue;
             }
         }
         let v = read_u64(data, i);
         // Plausible unix seconds (2020..2050) → timestamp; otherwise a number.
-        let label = if (1_577_836_800..4_102_444_800).contains(&v) { "i64 (time?)" } else { "u64" };
+        let label = if (1_577_836_800..4_102_444_800).contains(&v) {
+            "i64 (time?)"
+        } else {
+            "u64"
+        };
         fields.push(field(&format!("u64@{i}"), i, label, 8, v.to_string(), true));
         i += 8;
     }
-    Some(DecodedAccount { type_name: "Inferred layout".into(), fields })
+    Some(DecodedAccount {
+        type_name: "Inferred layout".into(),
+        fields,
+    })
 }
 
 /// Fetch each account's on-chain state and decode any recognized layouts.

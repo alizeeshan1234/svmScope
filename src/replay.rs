@@ -6,13 +6,13 @@
 use crate::fixture::{Fixture, FixtureEntry};
 use base64::Engine;
 use litesvm::types::TransactionResult;
-use solana_clock::Clock;
 use litesvm::LiteSVM;
 use serde_json::json;
 use solana_account::Account;
 use solana_address::Address;
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_request::RpcRequest;
+use solana_clock::Clock;
 use solana_transaction::versioned::VersionedTransaction;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -88,7 +88,9 @@ fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Result<LoadedAcc
             continue; // account doesn't exist (created during the tx, etc.)
         }
         existing.insert(account_keys[i].clone(), ());
-        let Ok(address) = Address::from_str(&account_keys[i]) else { continue };
+        let Ok(address) = Address::from_str(&account_keys[i]) else {
+            continue;
+        };
         let owner = acc["owner"].as_str().unwrap_or_default();
         let executable = acc["executable"].as_bool().unwrap_or(false);
 
@@ -120,7 +122,9 @@ fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Result<LoadedAcc
             continue;
         }
 
-        let Ok(owner_addr) = Address::from_str(owner) else { continue };
+        let Ok(owner_addr) = Address::from_str(owner) else {
+            continue;
+        };
         out.push((
             address,
             Loaded::Data(Account {
@@ -229,8 +233,12 @@ const SECS_PER_SLOT: f64 = 0.4;
 
 impl TimeTravel {
     pub fn is_noop(&self) -> bool {
-        self.epochs.is_none() && self.slots.is_none() && self.seconds.is_none()
-            && self.at_unix_timestamp.is_none() && self.at_slot.is_none() && self.at_epoch.is_none()
+        self.epochs.is_none()
+            && self.slots.is_none()
+            && self.seconds.is_none()
+            && self.at_unix_timestamp.is_none()
+            && self.at_slot.is_none()
+            && self.at_epoch.is_none()
     }
 
     /// Apply this warp to a clock, advancing the related fields together so a
@@ -245,7 +253,9 @@ impl TimeTravel {
         }
         if slot_delta != 0 {
             clock.slot = clock.slot.saturating_add_signed(slot_delta);
-            clock.epoch = clock.epoch.saturating_add_signed(slot_delta / SLOTS_PER_EPOCH);
+            clock.epoch = clock
+                .epoch
+                .saturating_add_signed(slot_delta / SLOTS_PER_EPOCH);
             clock.unix_timestamp += (slot_delta as f64 * SECS_PER_SLOT) as i64;
         }
         if let Some(secs) = self.seconds {
@@ -296,7 +306,11 @@ fn chrono_like(ts: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", secs / 3600, (secs % 3600) / 60)
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        secs / 3600,
+        (secs % 3600) / 60
+    )
 }
 
 impl ReplayContext {
@@ -319,8 +333,8 @@ impl ReplayContext {
         clock.unix_timestamp = self
             .block_time
             .unwrap_or_else(|| GENESIS_UNIX + (slot as f64 * SECS_PER_SLOT) as i64);
-        clock.epoch_start_timestamp = clock.unix_timestamp
-            - ((slot % SLOTS_PER_EPOCH as u64) as f64 * SECS_PER_SLOT) as i64;
+        clock.epoch_start_timestamp =
+            clock.unix_timestamp - ((slot % SLOTS_PER_EPOCH as u64) as f64 * SECS_PER_SLOT) as i64;
         clock.leader_schedule_epoch = clock.epoch + 1;
     }
 
@@ -360,7 +374,9 @@ impl ReplayContext {
         let mut diffs = Vec::new();
         for (addr, l) in &self.loaded {
             let Loaded::Data(before) = l else { continue };
-            let Some(after) = svm.get_account(addr) else { continue };
+            let Some(after) = svm.get_account(addr) else {
+                continue;
+            };
             if after.lamports == before.lamports && after.data == before.data {
                 continue; // untouched
             }
@@ -400,7 +416,10 @@ impl ReplayContext {
     /// token & friends) first, then the owner program's registered IDL. The
     /// pre-state layout is authoritative for both sides of a delta — an assert
     /// shouldn't silently change meaning because the tx rewrote the account.
-    fn decode_pre(&self, address: &str) -> Result<(crate::decode::DecodedAccount, &Account), String> {
+    fn decode_pre(
+        &self,
+        address: &str,
+    ) -> Result<(crate::decode::DecodedAccount, &Account), String> {
         let pre = self
             .pre_account(address)
             .ok_or_else(|| format!("no pre-state for {address}"))?;
@@ -462,12 +481,18 @@ impl PreState {
                 let amt = e["uiTokenAmount"]["amount"]
                     .as_str()
                     .and_then(|s| s.parse::<u64>().ok());
-                let (Some(addr), Some(amt)) = (account_keys.get(idx), amt) else { continue };
+                let (Some(addr), Some(amt)) = (account_keys.get(idx), amt) else {
+                    continue;
+                };
                 ps.token_amounts.insert(addr.clone(), amt);
                 if let (Some(mint), Some(owner)) = (e["mint"].as_str(), e["owner"].as_str()) {
                     ps.token_info.insert(
                         addr.clone(),
-                        TokenInfo { mint: mint.to_string(), owner: owner.to_string(), amount: amt },
+                        TokenInfo {
+                            mint: mint.to_string(),
+                            owner: owner.to_string(),
+                            amount: amt,
+                        },
                     );
                 }
             }
@@ -571,7 +596,14 @@ pub fn build_context(
         }
     }
 
-    Ok(ReplayContext { tx, loaded, slot, block_time, time_travel: TimeTravel::default(), idls: HashMap::new() })
+    Ok(ReplayContext {
+        tx,
+        loaded,
+        slot,
+        block_time,
+        time_travel: TimeTravel::default(),
+        idls: HashMap::new(),
+    })
 }
 
 fn b64_encode(bytes: &[u8]) -> String {
@@ -581,12 +613,17 @@ fn b64_encode(bytes: &[u8]) -> String {
 /// Resolve an (unsigned) transaction's Address Lookup Table references to concrete
 /// addresses — writable first, then readonly, the order the runtime resolves them.
 /// An ALT account stores its address list at offset 56, 32 bytes each.
-fn resolve_alt_addresses(client: &RpcClient, tx: &VersionedTransaction) -> (Vec<String>, Vec<String>) {
+fn resolve_alt_addresses(
+    client: &RpcClient,
+    tx: &VersionedTransaction,
+) -> (Vec<String>, Vec<String>) {
     let mut writable = Vec::new();
     let mut readonly = Vec::new();
     if let Some(lookups) = tx.message.address_table_lookups() {
         for l in lookups {
-            let Some(data) = fetch_account_data(client, &l.account_key.to_string()) else { continue };
+            let Some(data) = fetch_account_data(client, &l.account_key.to_string()) else {
+                continue;
+            };
             let read = |idx: u8| -> Option<String> {
                 let off = 56 + idx as usize * 32;
                 let bytes: [u8; 32] = data.get(off..off + 32)?.try_into().ok()?;
@@ -637,7 +674,14 @@ pub fn preflight_context(
     // Real wall-clock time for that slot — a pre-flight simulation should run
     // "now", and any date-based program logic depends on this being accurate.
     let block_time = slot.and_then(|s| client.get_block_time(s).ok());
-    Ok(ReplayContext { tx, loaded, slot, block_time, time_travel: TimeTravel::default(), idls: HashMap::new() })
+    Ok(ReplayContext {
+        tx,
+        loaded,
+        slot,
+        block_time,
+        time_travel: TimeTravel::default(),
+        idls: HashMap::new(),
+    })
 }
 
 impl ReplayContext {
@@ -681,9 +725,16 @@ impl ReplayContext {
         let mut loaded = Vec::with_capacity(fx.entries.len());
         for e in &fx.entries {
             match e {
-                FixtureEntry::Data { address, owner, lamports, data_b64 } => {
-                    let addr = Address::from_str(address).map_err(|_| format!("bad address {address}"))?;
-                    let owner_addr = Address::from_str(owner).map_err(|_| format!("bad owner {owner}"))?;
+                FixtureEntry::Data {
+                    address,
+                    owner,
+                    lamports,
+                    data_b64,
+                } => {
+                    let addr =
+                        Address::from_str(address).map_err(|_| format!("bad address {address}"))?;
+                    let owner_addr =
+                        Address::from_str(owner).map_err(|_| format!("bad owner {owner}"))?;
                     let data = base64::engine::general_purpose::STANDARD
                         .decode(data_b64)
                         .map_err(|e| format!("bad data base64 for {address}: {e}"))?;
@@ -699,7 +750,8 @@ impl ReplayContext {
                     ));
                 }
                 FixtureEntry::Program { address, elf_b64 } => {
-                    let addr = Address::from_str(address).map_err(|_| format!("bad address {address}"))?;
+                    let addr =
+                        Address::from_str(address).map_err(|_| format!("bad address {address}"))?;
                     let elf = base64::engine::general_purpose::STANDARD
                         .decode(elf_b64)
                         .map_err(|e| format!("bad elf base64 for {address}: {e}"))?;
@@ -707,7 +759,14 @@ impl ReplayContext {
                 }
             }
         }
-        Ok(ReplayContext { tx, loaded, slot: fx.captured_slot, block_time: None, time_travel: TimeTravel::default(), idls: HashMap::new() })
+        Ok(ReplayContext {
+            tx,
+            loaded,
+            slot: fx.captured_slot,
+            block_time: None,
+            time_travel: TimeTravel::default(),
+            idls: HashMap::new(),
+        })
     }
 }
 
@@ -733,9 +792,19 @@ fn fetch_transaction(client: &RpcClient, signature: &str) -> Result<VersionedTra
 /// at an offset (how you'd flip a token balance or an oracle price in place).
 #[allow(dead_code)]
 pub enum Mutation {
-    Lamports { address: String, value: u64 },
-    Data { address: String, bytes: Vec<u8> },
-    DataPatch { address: String, offset: usize, bytes: Vec<u8> },
+    Lamports {
+        address: String,
+        value: u64,
+    },
+    Data {
+        address: String,
+        bytes: Vec<u8>,
+    },
+    DataPatch {
+        address: String,
+        offset: usize,
+        bytes: Vec<u8>,
+    },
 }
 
 /// Apply one mutation to the SVM, or explain why it can't be applied.
@@ -796,7 +865,11 @@ fn to_replay_result(result: TransactionResult) -> ReplayResult {
 /// A replay that never ran because state couldn't be reconstructed (RPC error,
 /// missing transaction) — reported as a failed result instead of a panic.
 fn failed_result(error: String) -> ReplayResult {
-    ReplayResult { success: false, error: Some(error), ..Default::default() }
+    ReplayResult {
+        success: false,
+        error: Some(error),
+        ..Default::default()
+    }
 }
 
 /// Replay the transaction against the reconstructed state.
@@ -914,7 +987,11 @@ pub enum StateCheck {
     Lamports { op: CmpOp, value: u64 },
     /// The little-endian u64 at `offset` satisfies `op value`
     /// (e.g. an SPL token amount at offset 64).
-    U64At { offset: usize, op: CmpOp, value: u64 },
+    U64At {
+        offset: usize,
+        op: CmpOp,
+        value: u64,
+    },
     /// The *change* in lamports (post - pre) satisfies `op value` (may be negative)
     /// — e.g. "the fee vault gained ≥ N": `LamportsDelta { Ge, N }`.
     LamportsDelta { op: CmpOp, value: i128 },
@@ -924,9 +1001,17 @@ pub enum StateCheck {
     /// `pool.reserveA >= 1_000` instead of `u64@72`. The name resolves against
     /// the pre-state layout (built-in decoders, then the owner program's IDL);
     /// matched by exact name or by final dot-segment.
-    Field { name: String, op: CmpOp, value: i128 },
+    Field {
+        name: String,
+        op: CmpOp,
+        value: i128,
+    },
     /// The *change* in a named field (post - pre) satisfies `op value`.
-    FieldDelta { name: String, op: CmpOp, value: i128 },
+    FieldDelta {
+        name: String,
+        op: CmpOp,
+        value: i128,
+    },
 }
 
 /// A post-replay assertion targeting one account.
@@ -964,8 +1049,12 @@ pub(crate) fn find_field<'a>(
     match hits.len() {
         1 => Ok(hits[0]),
         0 => {
-            let avail: Vec<&str> =
-                dec.fields.iter().map(|f| f.name.as_str()).take(12).collect();
+            let avail: Vec<&str> = dec
+                .fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .take(12)
+                .collect();
             Err(format!(
                 "no field \"{name}\" on this {} (fields: {})",
                 dec.type_name,
@@ -974,7 +1063,10 @@ pub(crate) fn find_field<'a>(
         }
         _ => {
             let names: Vec<&str> = hits.iter().map(|f| f.name.as_str()).collect();
-            Err(format!("\"{name}\" is ambiguous here — use one of: {}", names.join(", ")))
+            Err(format!(
+                "\"{name}\" is ambiguous here — use one of: {}",
+                names.join(", ")
+            ))
         }
     }
 }
@@ -982,16 +1074,11 @@ pub(crate) fn find_field<'a>(
 /// Read a named integer field's bytes as a number. Unsigned ints zero-extend,
 /// signed ints sign-extend, bool reads as 0/1; anything else (pubkey, string,
 /// 128-bit ints) can't be compared numerically and says so.
-pub(crate) fn read_field_int(
-    data: &[u8],
-    f: &crate::decode::Field,
-) -> Result<i128, String> {
+pub(crate) fn read_field_int(data: &[u8], f: &crate::decode::Field) -> Result<i128, String> {
     let bytes = data
         .get(f.offset..f.offset + f.size)
         .ok_or_else(|| format!("{} @{} out of range (len {})", f.name, f.offset, data.len()))?;
-    let le = |b: &[u8]| -> u128 {
-        b.iter().rev().fold(0u128, |acc, &x| (acc << 8) | x as u128)
-    };
+    let le = |b: &[u8]| -> u128 { b.iter().rev().fold(0u128, |acc, &x| (acc << 8) | x as u128) };
     match (f.ty.as_str(), f.size) {
         ("bool", _) => Ok((bytes[0] != 0) as i128),
         ("u8" | "u16" | "u32" | "u64", _) => Ok(le(bytes) as i128),
@@ -1000,7 +1087,10 @@ pub(crate) fn read_field_int(
             let shift = 128 - 8 * n as u32;
             Ok(((raw as i128) << shift) >> shift) // sign-extend from n bytes
         }
-        (ty, _) => Err(format!("{} is a {ty} — only integer/bool fields can be asserted", f.name)),
+        (ty, _) => Err(format!(
+            "{} is a {ty} — only integer/bool fields can be asserted",
+            f.name
+        )),
     }
 }
 
@@ -1009,18 +1099,25 @@ impl AccountAssert {
         let a = short(&self.address);
         match &self.check {
             StateCheck::Lamports { op, value } => format!("{a} lamports {} {value}", op.symbol()),
-            StateCheck::U64At { offset, op, value } => format!("{a} u64@{offset} {} {value}", op.symbol()),
-            StateCheck::LamportsDelta { op, value } => format!("{a} lamports Δ {} {value}", op.symbol()),
+            StateCheck::U64At { offset, op, value } => {
+                format!("{a} u64@{offset} {} {value}", op.symbol())
+            }
+            StateCheck::LamportsDelta { op, value } => {
+                format!("{a} lamports Δ {} {value}", op.symbol())
+            }
             StateCheck::TokenDelta { op, value } => format!("{a} token Δ {} {value}", op.symbol()),
             StateCheck::Field { name, op, value } => format!("{a} {name} {} {value}", op.symbol()),
-            StateCheck::FieldDelta { name, op, value } => format!("{a} {name} Δ {} {value}", op.symbol()),
+            StateCheck::FieldDelta { name, op, value } => {
+                format!("{a} {name} Δ {} {value}", op.symbol())
+            }
         }
     }
 
     /// Evaluate against the post-replay `svm`; `ctx` supplies pre-transaction values
     /// for the delta checks.
     fn eval(&self, svm: &LiteSVM, ctx: &ReplayContext) -> Result<bool, String> {
-        let addr = Address::from_str(&self.address).map_err(|_| format!("bad address {}", self.address))?;
+        let addr = Address::from_str(&self.address)
+            .map_err(|_| format!("bad address {}", self.address))?;
         let acc = svm.get_account(&addr);
         match &self.check {
             StateCheck::Lamports { op, value } => {
@@ -1029,17 +1126,26 @@ impl AccountAssert {
             StateCheck::U64At { offset, op, value } => {
                 let acc = acc.ok_or_else(|| format!("account not found: {}", self.address))?;
                 if offset + 8 > acc.data.len() {
-                    return Err(format!("u64@{offset} out of range (len {})", acc.data.len()));
+                    return Err(format!(
+                        "u64@{offset} out of range (len {})",
+                        acc.data.len()
+                    ));
                 }
                 Ok(op.test(read_u64_at(&acc.data, *offset), *value))
             }
             StateCheck::LamportsDelta { op, value } => {
-                let pre = ctx.pre_account(&self.address).map(|a| a.lamports).unwrap_or(0) as i128;
+                let pre = ctx
+                    .pre_account(&self.address)
+                    .map(|a| a.lamports)
+                    .unwrap_or(0) as i128;
                 let post = acc.map(|a| a.lamports).unwrap_or(0) as i128;
                 Ok(op.test_i128(post - pre, *value))
             }
             StateCheck::TokenDelta { op, value } => {
-                let pre = ctx.pre_account(&self.address).map(|a| read_u64_at(&a.data, 64)).unwrap_or(0) as i128;
+                let pre = ctx
+                    .pre_account(&self.address)
+                    .map(|a| read_u64_at(&a.data, 64))
+                    .unwrap_or(0) as i128;
                 let post = acc.map(|a| read_u64_at(&a.data, 64)).unwrap_or(0) as i128;
                 Ok(op.test_i128(post - pre, *value))
             }
@@ -1103,7 +1209,11 @@ impl ReplayContext {
         for m in mutations {
             if let Err(e) = apply_mutation(&mut svm, m) {
                 return (
-                    ReplayResult { success: false, error: Some(e), ..Default::default() },
+                    ReplayResult {
+                        success: false,
+                        error: Some(e),
+                        ..Default::default()
+                    },
                     svm,
                 );
             }
@@ -1125,10 +1235,16 @@ pub fn run_suite(ctx: &ReplayContext, scenarios: &[ScenarioSpec]) -> Vec<Scenari
                 .asserts
                 .iter()
                 .map(|a| match a.eval(&svm, ctx) {
-                    Ok(pass) => AssertOutcome { description: a.describe(), pass },
+                    Ok(pass) => AssertOutcome {
+                        description: a.describe(),
+                        pass,
+                    },
                     // A failed eval (missing account, unknown field, bad offset)
                     // is a failed assertion — and the description says why.
-                    Err(e) => AssertOutcome { description: format!("{} — {e}", a.describe()), pass: false },
+                    Err(e) => AssertOutcome {
+                        description: format!("{} — {e}", a.describe()),
+                        pass: false,
+                    },
                 })
                 .collect();
 
@@ -1186,8 +1302,13 @@ mod tests {
     #[test]
     fn signed_fields_sign_extend() {
         let f = crate::decode::Field {
-            name: "start_ts".into(), offset: 0, ty: "i64".into(), size: 8,
-            value: String::new(), editable: true, note: None,
+            name: "start_ts".into(),
+            offset: 0,
+            ty: "i64".into(),
+            size: 8,
+            value: String::new(),
+            editable: true,
+            note: None,
         };
         assert_eq!(read_field_int(&(-42i64).to_le_bytes(), &f).unwrap(), -42);
         assert_eq!(read_field_int(&7i64.to_le_bytes(), &f).unwrap(), 7);
@@ -1218,12 +1339,18 @@ mod tests {
         assert!(tt.is_noop());
         let mut c = clock();
         tt.apply(&mut c);
-        assert_eq!((c.slot, c.epoch, c.unix_timestamp), (clock().slot, 1_000, 2_000_000_000));
+        assert_eq!(
+            (c.slot, c.epoch, c.unix_timestamp),
+            (clock().slot, 1_000, 2_000_000_000)
+        );
     }
 
     #[test]
     fn epoch_jump_advances_slot_epoch_and_time_together() {
-        let tt = TimeTravel { epochs: Some(2), ..Default::default() };
+        let tt = TimeTravel {
+            epochs: Some(2),
+            ..Default::default()
+        };
         let mut c = clock();
         tt.apply(&mut c);
         assert_eq!(c.epoch, 1_002);
@@ -1235,7 +1362,10 @@ mod tests {
 
     #[test]
     fn seconds_jump_moves_slots_in_step() {
-        let tt = TimeTravel { seconds: Some(40), ..Default::default() };
+        let tt = TimeTravel {
+            seconds: Some(40),
+            ..Default::default()
+        };
         let mut c = clock();
         tt.apply(&mut c);
         assert_eq!(c.unix_timestamp, 2_000_000_040);
@@ -1281,7 +1411,9 @@ mod tests {
         });
         let keys = vec!["4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T".to_string()];
         let pre = PreState::from_meta(&tx, &keys);
-        let acc = pre.reconstruct(&keys[0]).expect("should rebuild the SPL account");
+        let acc = pre
+            .reconstruct(&keys[0])
+            .expect("should rebuild the SPL account");
         assert_eq!(acc.data.len(), 165);
         assert_eq!(read_u64_at(&acc.data, 64), 12345);
         assert_eq!(acc.data[108], 1); // AccountState::Initialized

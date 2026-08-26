@@ -6,13 +6,13 @@ pub mod api;
 pub mod compute;
 pub mod cpi_tree;
 pub mod decode;
-pub mod fixture;
-pub mod report;
 pub mod diffs;
-pub mod replay;
-pub mod utils;
+pub mod fixture;
 pub mod idl;
 pub mod ixname;
+pub mod replay;
+pub mod report;
+pub mod utils;
 
 use serde::Serialize;
 use serde_json::json;
@@ -100,7 +100,11 @@ pub struct Overview {
     pub top_programs: Vec<String>,
 }
 
-fn build_overview(tx: &serde_json::Value, cpi_tree: &[cpi_tree::CpiEntry], account_count: usize) -> Overview {
+fn build_overview(
+    tx: &serde_json::Value,
+    cpi_tree: &[cpi_tree::CpiEntry],
+    account_count: usize,
+) -> Overview {
     let top_programs = cpi_tree
         .iter()
         .filter(|e| e.stack_height == 1)
@@ -117,10 +121,14 @@ fn build_overview(tx: &serde_json::Value, cpi_tree: &[cpi_tree::CpiEntry], accou
         fee: tx["meta"]["fee"].as_u64().unwrap_or(0),
         slot: tx["slot"].as_u64(),
         compute_units: tx["meta"]["computeUnitsConsumed"].as_u64(),
-        fee_payer: tx["transaction"]["message"]["accountKeys"][0].as_str().map(String::from),
+        fee_payer: tx["transaction"]["message"]["accountKeys"][0]
+            .as_str()
+            .map(String::from),
         version,
         block_time: tx["blockTime"].as_i64(),
-        recent_blockhash: tx["transaction"]["message"]["recentBlockhash"].as_str().map(String::from),
+        recent_blockhash: tx["transaction"]["message"]["recentBlockhash"]
+            .as_str()
+            .map(String::from),
         account_count,
         top_programs,
     }
@@ -134,7 +142,10 @@ fn resolve_signature(client: &RpcClient, input: &str) -> Result<String, String> 
     let input = input.trim();
     if Address::from_str(input).is_ok() {
         let resp: serde_json::Value = client
-            .send(RpcRequest::GetSignaturesForAddress, json!([input, { "limit": 1 }]))
+            .send(
+                RpcRequest::GetSignaturesForAddress,
+                json!([input, { "limit": 1 }]),
+            )
             .map_err(|e| format!("RPC error: {e}"))?;
         return resp
             .as_array()
@@ -181,7 +192,10 @@ pub struct ProgramInfo {
 fn get_account_raw(client: &RpcClient, address: &str) -> Option<(String, u64, bool, Vec<u8>)> {
     use base64::Engine;
     let resp: serde_json::Value = client
-        .send(RpcRequest::GetAccountInfo, json!([address, { "encoding": "base64" }]))
+        .send(
+            RpcRequest::GetAccountInfo,
+            json!([address, { "encoding": "base64" }]),
+        )
         .ok()?;
     let v = &resp["value"];
     if v.is_null() {
@@ -208,19 +222,36 @@ fn program_info(client: &RpcClient, program_data_bytes: &[u8], owner: &str) -> O
         let pd_addr = Address::from(pd_bytes).to_string();
         if let Some((_, _, _, pd)) = get_account_raw(client, &pd_addr) {
             // ProgramData: [0..4]=variant, [4..12]=slot, [12]=Option tag, [13..45]=authority.
-            let slot = pd.get(4..12).map(|s| u64::from_le_bytes(s.try_into().unwrap()));
+            let slot = pd
+                .get(4..12)
+                .map(|s| u64::from_le_bytes(s.try_into().unwrap()));
             let (upgradeable, authority) = if pd.len() >= 45 && pd[12] == 1 {
                 let a: [u8; 32] = pd[13..45].try_into().unwrap();
                 (true, Some(Address::from(a).to_string()))
             } else {
                 (false, None)
             };
-            return Some(ProgramInfo { program_data: pd_addr, upgradeable, upgrade_authority: authority, last_deployed_slot: slot });
+            return Some(ProgramInfo {
+                program_data: pd_addr,
+                upgradeable,
+                upgrade_authority: authority,
+                last_deployed_slot: slot,
+            });
         }
-        return Some(ProgramInfo { program_data: pd_addr, upgradeable: true, upgrade_authority: None, last_deployed_slot: None });
+        return Some(ProgramInfo {
+            program_data: pd_addr,
+            upgradeable: true,
+            upgrade_authority: None,
+            last_deployed_slot: None,
+        });
     }
     if owner == LOADER_V2 {
-        return Some(ProgramInfo { program_data: String::new(), upgradeable: false, upgrade_authority: None, last_deployed_slot: None });
+        return Some(ProgramInfo {
+            program_data: String::new(),
+            upgradeable: false,
+            upgrade_authority: None,
+            last_deployed_slot: None,
+        });
     }
     None
 }
@@ -233,25 +264,42 @@ pub fn account_overview(client: &RpcClient, address: &str) -> Result<AccountOver
     }
     let Some((owner, lamports, executable, data)) = get_account_raw(client, address) else {
         return Ok(AccountOverview {
-            address: address.to_string(), exists: false, owner: String::new(),
-            lamports: 0, executable: false, data_len: 0, program: None, idl_name: None, decoded: None,
+            address: address.to_string(),
+            exists: false,
+            owner: String::new(),
+            lamports: 0,
+            executable: false,
+            data_len: 0,
+            program: None,
+            idl_name: None,
+            decoded: None,
         });
     };
 
     let mut ov = AccountOverview {
-        address: address.to_string(), exists: true, owner: owner.clone(),
-        lamports, executable, data_len: data.len(), program: None, idl_name: None, decoded: None,
+        address: address.to_string(),
+        exists: true,
+        owner: owner.clone(),
+        lamports,
+        executable,
+        data_len: data.len(),
+        program: None,
+        idl_name: None,
+        decoded: None,
     };
 
     if executable {
         ov.program = program_info(client, &data, &owner);
-        ov.idl_name = Address::from_str(address).ok().and_then(|a| idl::fetch_idl_json(client, a)).and_then(|idl| {
-            idl.get("metadata")
-                .and_then(|m| m.get("name"))
-                .or_else(|| idl.get("name"))
-                .and_then(|n| n.as_str())
-                .map(String::from)
-        });
+        ov.idl_name = Address::from_str(address)
+            .ok()
+            .and_then(|a| idl::fetch_idl_json(client, a))
+            .and_then(|idl| {
+                idl.get("metadata")
+                    .and_then(|m| m.get("name"))
+                    .or_else(|| idl.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(String::from)
+            });
     } else {
         // Reuse the decoder for recognized data accounts (SPL / IDL).
         ov.decoded = decode::describe_accounts(client, &[address.to_string()])
@@ -275,13 +323,20 @@ pub struct SigInfo {
 
 /// Recent transactions that touched an account or program — what an explorer
 /// shows on an address page. Newest first.
-pub fn recent_signatures(client: &RpcClient, address: &str, limit: u64) -> Result<Vec<SigInfo>, String> {
+pub fn recent_signatures(
+    client: &RpcClient,
+    address: &str,
+    limit: u64,
+) -> Result<Vec<SigInfo>, String> {
     let address = address.trim();
     if Address::from_str(address).is_err() {
         return Err(format!("not a valid address: {address}"));
     }
     let resp: serde_json::Value = client
-        .send(RpcRequest::GetSignaturesForAddress, json!([address, { "limit": limit }]))
+        .send(
+            RpcRequest::GetSignaturesForAddress,
+            json!([address, { "limit": limit }]),
+        )
         .map_err(|e| format!("RPC error: {e}"))?;
     let arr = resp.as_array().ok_or("unexpected RPC response")?;
     Ok(arr
@@ -320,8 +375,14 @@ pub fn analyze(client: &RpcClient, input: &str) -> Result<Analysis, String> {
     let mut idl_cache: std::collections::HashMap<String, Option<serde_json::Value>> =
         std::collections::HashMap::new();
     for e in &mut cpi_tree {
-        let (name, args, accounts) =
-            ixname::enrich(client, &mut idl_cache, &e.program, &e.data, &e.account_indexes, &account_keys);
+        let (name, args, accounts) = ixname::enrich(
+            client,
+            &mut idl_cache,
+            &e.program,
+            &e.data,
+            &e.account_indexes,
+            &account_keys,
+        );
         e.name = name;
         e.args = args;
         e.accounts = accounts;
@@ -335,7 +396,11 @@ pub fn analyze(client: &RpcClient, input: &str) -> Result<Analysis, String> {
         compute: compute::cu_per_program(&tx),
         logs: tx["meta"]["logMessages"]
             .as_array()
-            .map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|l| l.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default(),
         replay: None, // run on demand — see run_replay
         accounts: decode::describe_accounts(client, &account_keys),
@@ -356,7 +421,8 @@ pub fn run_replay(client: &RpcClient, signature: &str) -> Result<replay::ReplayR
     }
     let account_keys = utils::resolve_account_keys(&tx);
     let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let mut r = replay::replay_transaction(client, signature, &account_keys, tx["slot"].as_u64(), &pre);
+    let mut r =
+        replay::replay_transaction(client, signature, &account_keys, tx["slot"].as_u64(), &pre);
     resolve_error_name(client, &mut r);
     Ok(r)
 }
@@ -392,7 +458,8 @@ pub fn simulate(
 
     let account_keys = utils::resolve_account_keys(&tx);
     let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let mut ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
+    let mut ctx =
+        replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
     ctx.set_time_travel(time_travel);
     let mut r = ctx.run(mutations);
     resolve_error_name(client, &mut r);
@@ -459,20 +526,33 @@ fn explain_error(client: &RpcClient, r: &replay::ReplayResult) -> Option<Explana
         .logs
         .iter()
         .rev()
-        .find_map(|l| l.strip_prefix("Program ").and_then(|s| s.split(" failed").next()))
+        .find_map(|l| {
+            l.strip_prefix("Program ")
+                .and_then(|s| s.split(" failed").next())
+        })
         .map(|s| s.trim().to_string())
         .filter(|s| Address::from_str(s).is_ok());
 
     // Anchor prints the resolved error itself — prefer that, it's already human.
     if let Some(line) = r.logs.iter().rev().find(|l| l.contains("Error Message:")) {
-        let detail = line.split("Error Message:").nth(1).unwrap_or("").trim().to_string();
+        let detail = line
+            .split("Error Message:")
+            .nth(1)
+            .unwrap_or("")
+            .trim()
+            .to_string();
         let title = line
             .split("Error Code:")
             .nth(1)
             .and_then(|s| s.split('.').next())
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|| "Program error".into());
-        return Some(Explanation { title, detail, program, raw: raw.clone() });
+        return Some(Explanation {
+            title,
+            detail,
+            program,
+            raw: raw.clone(),
+        });
     }
 
     // Otherwise resolve the custom code against the program's IDL.
@@ -483,8 +563,15 @@ fn explain_error(client: &RpcClient, r: &replay::ReplayResult) -> Option<Explana
         .and_then(|s| s.parse::<u64>().ok())
     {
         if let Some(pid) = program.as_ref().and_then(|p| Address::from_str(p).ok()) {
-            if let Some(e) = idl::fetch_idl_json(client, pid).and_then(|i| idl::error_for_code(&i, code)) {
-                return Some(Explanation { title: e.name, detail: e.msg, program, raw: raw.clone() });
+            if let Some(e) =
+                idl::fetch_idl_json(client, pid).and_then(|i| idl::error_for_code(&i, code))
+            {
+                return Some(Explanation {
+                    title: e.name,
+                    detail: e.msg,
+                    program,
+                    raw: raw.clone(),
+                });
             }
         }
     }
@@ -493,13 +580,24 @@ fn explain_error(client: &RpcClient, r: &replay::ReplayResult) -> Option<Explana
     let (title, detail) = if raw.contains("AccountNotFound") {
         ("Account not found", "An account the transaction needs doesn't exist (an account with zero lamports is treated as deleted).")
     } else if raw.contains("InsufficientFunds") {
-        ("Insufficient funds", "An account didn't have enough lamports for the transfer plus rent.")
+        (
+            "Insufficient funds",
+            "An account didn't have enough lamports for the transfer plus rent.",
+        )
     } else if raw.contains("InvalidAddressLookupTableIndex") {
         ("Lookup table index invalid", "The transaction referenced an address lookup table entry that isn't active at this slot.")
     } else {
-        ("Transaction failed", "The program returned an error. See the logs below for the failing instruction.")
+        (
+            "Transaction failed",
+            "The program returned an error. See the logs below for the failing instruction.",
+        )
     };
-    Some(Explanation { title: title.into(), detail: detail.into(), program, raw: raw.clone() })
+    Some(Explanation {
+        title: title.into(),
+        detail: detail.into(),
+        program,
+        raw: raw.clone(),
+    })
 }
 
 /// Decode raw before/after bytes into named field changes.
@@ -514,7 +612,9 @@ fn decode_diffs(client: &RpcClient, raw: Vec<replay::RawAccountDiff>) -> Vec<Acc
             let idl = idl_cache
                 .entry(d.owner.clone())
                 .or_insert_with(|| {
-                    Address::from_str(&d.owner).ok().and_then(|a| idl::fetch_idl_json(client, a))
+                    Address::from_str(&d.owner)
+                        .ok()
+                        .and_then(|a| idl::fetch_idl_json(client, a))
                 })
                 .clone();
             let decode_side = |bytes: &[u8]| -> Option<decode::DecodedAccount> {
@@ -571,7 +671,10 @@ pub fn decode_account_with(
     // inferred layout we may have fallen back to.
     if let Some(idl) = user_idl {
         let resp: serde_json::Value = client
-            .send(RpcRequest::GetAccountInfo, json!([address, { "encoding": "base64" }]))
+            .send(
+                RpcRequest::GetAccountInfo,
+                json!([address, { "encoding": "base64" }]),
+            )
             .map_err(|e| format!("RPC error: {e}"))?;
         if let Some(b64) = resp["value"]["data"][0].as_str() {
             use base64::Engine;
@@ -591,9 +694,12 @@ pub fn program_instructions(
     client: &RpcClient,
     program_id: &str,
 ) -> Result<Vec<idl::IdlInstruction>, String> {
-    let addr = Address::from_str(program_id.trim()).map_err(|_| format!("bad program id: {program_id}"))?;
+    let addr = Address::from_str(program_id.trim())
+        .map_err(|_| format!("bad program id: {program_id}"))?;
     let idl = idl::fetch_idl_json(client, addr).ok_or_else(|| {
-        format!("{program_id} publishes no on-chain Anchor IDL — paste the IDL JSON to use the builder")
+        format!(
+            "{program_id} publishes no on-chain Anchor IDL — paste the IDL JSON to use the builder"
+        )
     })?;
     Ok(idl::instructions(&idl))
 }
@@ -616,8 +722,8 @@ pub fn simulate_preflight(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(tx_b64.trim())
         .map_err(|e| format!("bad base64 transaction: {e}"))?;
-    let tx: solana_transaction::versioned::VersionedTransaction =
-        bincode::deserialize(&bytes).map_err(|e| format!("could not deserialize transaction: {e}"))?;
+    let tx: solana_transaction::versioned::VersionedTransaction = bincode::deserialize(&bytes)
+        .map_err(|e| format!("could not deserialize transaction: {e}"))?;
     let ctx = replay::preflight_context(client, tx)?;
     Ok(ctx.run(mutations))
 }
@@ -634,8 +740,8 @@ pub fn preflight_report(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(tx_b64.trim())
         .map_err(|e| format!("bad base64 transaction: {e}"))?;
-    let tx: solana_transaction::versioned::VersionedTransaction =
-        bincode::deserialize(&bytes).map_err(|e| format!("could not deserialize transaction: {e}"))?;
+    let tx: solana_transaction::versioned::VersionedTransaction = bincode::deserialize(&bytes)
+        .map_err(|e| format!("could not deserialize transaction: {e}"))?;
     let mut ctx = replay::preflight_context(client, tx)?;
     let warped = !time_travel.is_noop();
     ctx.set_time_travel(time_travel);
@@ -643,7 +749,9 @@ pub fn preflight_report(
     let (replay, raw_diffs) = ctx.run_with_diff(mutations);
     Ok(SimulationReport {
         clock: clock_desc,
-        explain: (!replay.success).then(|| explain_error(client, &replay)).flatten(),
+        explain: (!replay.success)
+            .then(|| explain_error(client, &replay))
+            .flatten(),
         diffs: decode_diffs(client, raw_diffs),
         replay,
     })
@@ -667,14 +775,17 @@ pub fn replay_report(
     }
     let account_keys = utils::resolve_account_keys(&tx);
     let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let mut ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
+    let mut ctx =
+        replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
     let warped = !time_travel.is_noop();
     ctx.set_time_travel(time_travel);
     let clock_desc = warped.then(|| ctx.describe_clock());
     let (replay, raw_diffs) = ctx.run_with_diff(mutations);
     Ok(SimulationReport {
         clock: clock_desc,
-        explain: (!replay.success).then(|| explain_error(client, &replay)).flatten(),
+        explain: (!replay.success)
+            .then(|| explain_error(client, &replay))
+            .flatten(),
         diffs: decode_diffs(client, raw_diffs),
         replay,
     })
@@ -700,7 +811,8 @@ pub fn simulate_suite(
     }
     let account_keys = utils::resolve_account_keys(&tx);
     let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let mut ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
+    let mut ctx =
+        replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
     ctx.set_time_travel(time_travel);
 
     // Named-field asserts resolve against the owner program's IDL, and this is
@@ -709,11 +821,19 @@ pub fn simulate_suite(
     let owners: std::collections::HashSet<String> = scenarios
         .iter()
         .flat_map(|s| &s.asserts)
-        .filter(|a| matches!(a.check, replay::StateCheck::Field { .. } | replay::StateCheck::FieldDelta { .. }))
+        .filter(|a| {
+            matches!(
+                a.check,
+                replay::StateCheck::Field { .. } | replay::StateCheck::FieldDelta { .. }
+            )
+        })
         .filter_map(|a| ctx.pre_owner(&a.address))
         .collect();
     for owner in owners {
-        if let Some(idl) = Address::from_str(&owner).ok().and_then(|a| idl::fetch_idl_json(client, a)) {
+        if let Some(idl) = Address::from_str(&owner)
+            .ok()
+            .and_then(|a| idl::fetch_idl_json(client, a))
+        {
             ctx.add_idl(owner, idl);
         }
     }
@@ -759,15 +879,30 @@ mod tests {
     #[test]
     fn resolve_rpc_precedence() {
         // Explicit URL beats everything.
-        assert_eq!(resolve_rpc(Some("devnet"), Some("http://my"), "http://def"), "http://my");
+        assert_eq!(
+            resolve_rpc(Some("devnet"), Some("http://my"), "http://def"),
+            "http://my"
+        );
         // Cluster names map to public endpoints.
-        assert_eq!(resolve_rpc(Some("devnet"), None, "http://def"), "https://api.devnet.solana.com");
-        assert_eq!(resolve_rpc(Some("m"), None, "http://def"), "https://api.mainnet-beta.solana.com");
-        assert_eq!(resolve_rpc(Some("localnet"), None, "http://def"), "http://127.0.0.1:8899");
+        assert_eq!(
+            resolve_rpc(Some("devnet"), None, "http://def"),
+            "https://api.devnet.solana.com"
+        );
+        assert_eq!(
+            resolve_rpc(Some("m"), None, "http://def"),
+            "https://api.mainnet-beta.solana.com"
+        );
+        assert_eq!(
+            resolve_rpc(Some("localnet"), None, "http://def"),
+            "http://127.0.0.1:8899"
+        );
         // Nothing specified → the default; unknown cluster → the default.
         assert_eq!(resolve_rpc(None, None, "http://def"), "http://def");
         assert_eq!(resolve_rpc(Some("nope"), None, "http://def"), "http://def");
         // A non-http "rpc" value is ignored, not used verbatim.
-        assert_eq!(resolve_rpc(None, Some("garbage"), "http://def"), "http://def");
+        assert_eq!(
+            resolve_rpc(None, Some("garbage"), "http://def"),
+            "http://def"
+        );
     }
 }

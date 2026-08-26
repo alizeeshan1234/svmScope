@@ -3,9 +3,9 @@
 use serde_json::Value;
 
 #[derive(serde::Serialize)]
-pub struct  CuUsage {
+pub struct CuUsage {
     pub program: String,
-    pub cu: u64
+    pub cu: u64,
 }
 
 /// Compute units per program, aggregated (a program invoked N times is summed
