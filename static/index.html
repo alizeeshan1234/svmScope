@@ -1104,13 +1104,10 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 .feat-head { font-size: 10px; font-weight: 700; letter-spacing: .7px; text-transform: uppercase; color: var(--text-3); margin: 10px 2px 4px; }
 .feat-head:first-child { margin-top: 2px; }
 .feat-row {
-  display: flex; align-items: center; gap: 11px; padding: 7px 8px; cursor: pointer;
+  display: flex; align-items: center; gap: 12px; padding: 8px 8px; cursor: pointer;
   border-radius: var(--r-sm); border: 1px solid transparent;
 }
 .feat-row:hover { background: var(--surface-2); }
-.feat-row input {
-  accent-color: var(--brand-strong); width: 16px; height: 16px; flex: 0 0 auto; margin: 0; cursor: pointer;
-}
 .feat-main { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
 .feat-name {
   font-size: 12.5px; font-weight: 600; color: var(--text-1);
@@ -1121,11 +1118,19 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .feat-row.off .feat-name { color: var(--text-2); }
-.feat-badge {
-  flex: 0 0 auto; font-size: 9.5px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase;
-  padding: 2px 6px; border-radius: 999px; background: var(--brand-soft); color: var(--brand-strong); min-width: 26px; text-align: center;
+/* iOS-style on/off toggle */
+.switch { position: relative; flex: 0 0 auto; width: 36px; height: 21px; }
+.switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; z-index: 1; }
+.slider {
+  position: absolute; inset: 0; border-radius: 999px; background: var(--line-2);
+  transition: background .16s ease;
 }
-.feat-row.off .feat-badge { background: rgba(248,113,113,.14); color: #f87171; }
+.slider::before {
+  content: ''; position: absolute; top: 2.5px; left: 2.5px; width: 16px; height: 16px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: transform .16s ease;
+}
+.switch input:checked + .slider { background: var(--brand-strong); }
+.switch input:checked + .slider::before { transform: translateX(15px); }
 
 /* ---------- time travel ---------- */
 .timetravel {
@@ -2980,10 +2985,9 @@ function gateRow(id, label, note, custom) {
   const isCustom = custom || (featState(id)?.active === true);
   const on = isCustom ? (featState(id)?.active === true) : !off;
   return `<label class="feat-row${on ? '' : ' off'}">
-    <input type="checkbox" data-fid="${id}" ${on ? 'checked' : ''}${isCustom ? ' data-custom="1"' : ''} />
     <span class="feat-main"><span class="feat-name">${esc(label)}</span>
       ${note ? `<span class="feat-note">${esc(note)}</span>` : ''}</span>
-    <span class="feat-badge">${on ? 'on' : 'off'}</span></label>`;
+    <span class="switch"><input type="checkbox" data-fid="${id}" ${on ? 'checked' : ''}${isCustom ? ' data-custom="1"' : ''} /><span class="slider"></span></span></label>`;
 }
 function renderFeatList() {
   const q = ($('featSearch')?.value || '').trim().toLowerCase();
