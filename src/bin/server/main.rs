@@ -141,11 +141,22 @@ fn custom_rpc_allowed() -> bool {
 /// The only `cluster` values a public instance will act on. Anything else — a
 /// URL-shaped cluster (`cluster=http://169.254.169.254/…`) or `localnet`
 /// (127.0.0.1) — is an SSRF vector, since `resolve_rpc` otherwise honors both
-/// verbatim. Self-hosters (custom RPC enabled) keep the full set.
+/// verbatim. Self-hosters (custom RPC enabled) additionally get `localnet`, but a
+/// URL-shaped cluster is *never* accepted — custom endpoints must come through the
+/// vetted `rpc` field, never through `cluster`.
 fn public_cluster_ok(c: &str) -> bool {
     matches!(
         c.trim().to_ascii_lowercase().as_str(),
         "mainnet" | "mainnet-beta" | "m" | "devnet" | "d" | "testnet" | "t"
+    )
+}
+
+/// A named localnet alias — allowed only when the operator has enabled custom RPC
+/// (local dev). Still a *name*, never a URL, so it can't be an SSRF vector.
+fn localnet_alias(c: &str) -> bool {
+    matches!(
+        c.trim().to_ascii_lowercase().as_str(),
+        "localnet" | "local" | "localhost" | "l"
     )
 }
 
@@ -156,9 +167,11 @@ fn public_cluster_ok(c: &str) -> bool {
 fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> String {
     // Only trust a caller-supplied RPC when the operator has opted in.
     let allow = custom_rpc_allowed();
-    // On a public instance, drop any cluster that isn't a known public preset, so a
-    // URL-shaped or localnet cluster can't be forwarded to resolve_rpc verbatim.
-    let cluster = cluster.filter(|c| allow || public_cluster_ok(c));
+    // Only ever act on named clusters: public presets always, plus localnet when
+    // the operator enabled custom RPC. A URL-shaped cluster is never honored — even
+    // by a self-hoster — so `cluster` can't be an SSRF vector; custom endpoints go
+    // through the vetted `rpc` field instead.
+    let cluster = cluster.filter(|c| public_cluster_ok(c) || (allow && localnet_alias(c)));
     if allow {
         if let Some(u) = rpc {
             if let Some(safe) = vet_custom_rpc(u) {
@@ -803,5 +816,15 @@ mod tests {
         assert!(public_cluster_ok("testnet"));
         assert!(!public_cluster_ok("localnet"));
         assert!(!public_cluster_ok("http://169.254.169.254"));
+    }
+
+    #[test]
+    fn localnet_alias_is_a_name_never_a_url() {
+        assert!(localnet_alias("localnet"));
+        assert!(localnet_alias("localhost"));
+        // A URL is never a localnet "alias" — so it can't slip through the
+        // custom-RPC-enabled branch as a cluster.
+        assert!(!localnet_alias("http://127.0.0.1:8899"));
+        assert!(!localnet_alias("http://169.254.169.254"));
     }
 }
