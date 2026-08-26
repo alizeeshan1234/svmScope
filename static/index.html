@@ -1096,21 +1096,34 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 }
 .clockbanner .rst:hover { color: var(--text-1); }
 /* feature-gate toggle list inside the Features popover */
-.feat-list { display: flex; flex-direction: column; gap: 6px; max-height: 300px; overflow-y: auto; }
-.feat-head { font-size: 10.5px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--text-3); margin: 6px 2px 2px; }
+/* wider popover so gate names fit on one line */
+#featPop { width: 440px; }
+#featPop .cp-custom #featCustom { flex: 1 1 auto; min-width: 0; }
+#featPop .cp-custom #featCustomState { flex: 0 0 auto; width: auto; }
+.feat-list { display: flex; flex-direction: column; max-height: 330px; overflow-y: auto; margin: 0 -4px; padding: 0 4px; }
+.feat-head { font-size: 10px; font-weight: 700; letter-spacing: .7px; text-transform: uppercase; color: var(--text-3); margin: 10px 2px 4px; }
+.feat-head:first-child { margin-top: 2px; }
 .feat-row {
-  display: flex; align-items: center; gap: 10px; padding: 8px 10px; cursor: pointer;
-  border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface-2);
+  display: flex; align-items: center; gap: 11px; padding: 7px 8px; cursor: pointer;
+  border-radius: var(--r-sm); border: 1px solid transparent;
 }
-.feat-row:hover { border-color: var(--line-2); }
-.feat-row.off { opacity: .62; }
-.feat-row input { accent-color: var(--brand-strong); width: 15px; height: 15px; }
+.feat-row:hover { background: var(--surface-2); }
+.feat-row input {
+  accent-color: var(--brand-strong); width: 16px; height: 16px; flex: 0 0 auto; margin: 0; cursor: pointer;
+}
 .feat-main { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
-.feat-name { font-size: 13px; font-weight: 600; color: var(--text-1); }
-.feat-note { font-size: 11.5px; color: var(--text-3); }
+.feat-name {
+  font-size: 12.5px; font-weight: 600; color: var(--text-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.feat-note {
+  font-size: 11px; color: var(--text-3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.feat-row.off .feat-name { color: var(--text-2); }
 .feat-badge {
-  font-size: 10.5px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase;
-  padding: 2px 7px; border-radius: 999px; background: var(--brand-soft); color: var(--brand-strong);
+  flex: 0 0 auto; font-size: 9.5px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 999px; background: var(--brand-soft); color: var(--brand-strong); min-width: 26px; text-align: center;
 }
 .feat-row.off .feat-badge { background: rgba(248,113,113,.14); color: #f87171; }
 
