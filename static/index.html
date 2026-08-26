@@ -2975,6 +2975,15 @@ const FEATURE_GATES = [
   { id: 'zkhiy5oLowR7HY4zogXjCjeMXyruLqBwSWH21qcFtnv',  name: 'ZK ElGamal proof program',          note: 'confidential-transfer proofs' },
   { id: '5x3825XS7M2A3Ekbn5VGGkvFoAg5qrRWkTrY4bARP1GL', name: 'loader SetAuthorityChecked ix',     note: 'safer program upgrade-authority change' },
 ];
+// Notable *pending* gates — not yet active on mainnet. These are OFF by default;
+// toggle one ON to activate it early and test "does my program survive this?".
+// direct mapping (virtual_address_space_adjustments) changes how account memory is
+// mapped into the VM — the runtime honors it, and a program with an unsafe write to
+// a readonly account will start failing once it's live.
+const PENDING_GATES = [
+  { id: '7VgiehxNxu53KdxgLspGQY8myE6f7UokaWa4jsGcaSz', name: 'direct mapping', note: 'account data mapped straight into the VM — activate to check your program still passes' },
+];
+const isPending = (id) => PENDING_GATES.some(g => g.id === id);
 // Sent as `features`; empty = mainnet as-is. Only holds gates flipped off default.
 let activeFeatures = [];
 const featState = (id) => activeFeatures.find(f => f.id === id);
@@ -2993,18 +3002,24 @@ function renderFeatList() {
   const q = ($('featSearch')?.value || '').trim().toLowerCase();
   let html = '';
   if (!q) {
-    // No search: show the curated "notable" gates with their notes.
+    // No search: curated "notable" active gates, then notable pending activations.
     html += `<div class="feat-head">Notable</div>`;
     html += FEATURE_GATES.map(g => gateRow(g.id, g.name, g.note)).join('');
-    // Plus any custom (pending) gates the user added by pubkey.
-    const customs = activeFeatures.filter(f => !ALL_GATES.some(g => g.id === f.id) && !FEATURE_GATES.some(g => g.id === f.id));
+    html += `<div class="feat-head">Pending activation · not yet on mainnet</div>`;
+    html += PENDING_GATES.map(g => gateRow(g.id, g.name, g.note, true)).join('');
+    // Plus any custom pending gates the user added by pubkey.
+    const known = new Set([...ALL_GATES, ...FEATURE_GATES, ...PENDING_GATES].map(g => g.id));
+    const customs = activeFeatures.filter(f => !known.has(f.id));
     if (customs.length) html += `<div class="feat-head">Custom</div>` +
       customs.map(f => gateRow(f.id, short(f.id), 'custom gate', true)).join('');
   } else {
-    // Searching: filter across ALL mainnet-active gates.
+    // Searching: mainnet-active gates + notable pending ones.
+    const pend = PENDING_GATES.filter(g => g.name.toLowerCase().includes(q) || g.id.toLowerCase().includes(q));
     const hits = ALL_GATES.filter(g => g.label.toLowerCase().includes(q) || g.id.toLowerCase().includes(q)).slice(0, 60);
-    html += `<div class="feat-head">${hits.length} match${hits.length === 1 ? '' : 'es'}</div>`;
-    html += hits.map(g => gateRow(g.id, g.label)).join('') || `<div class="feat-note" style="padding:8px 10px">no gate matches “${esc(q)}”</div>`;
+    html += `<div class="feat-head">${hits.length + pend.length} match${hits.length + pend.length === 1 ? '' : 'es'}</div>`;
+    html += pend.map(g => gateRow(g.id, g.name + ' · pending', g.note, true)).join('');
+    html += hits.map(g => gateRow(g.id, g.label)).join('');
+    if (!hits.length && !pend.length) html += `<div class="feat-note" style="padding:8px 10px">no gate matches “${esc(q)}”</div>`;
   }
   $('featList').innerHTML = html;
   $('featList').querySelectorAll('input[data-fid]').forEach(cb =>
