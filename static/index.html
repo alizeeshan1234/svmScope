@@ -1432,6 +1432,12 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
               </button>
             </div>
           </div>
+          <div id="idlFallback" class="hidden" style="margin-top:14px">
+            <label class="flabel">No on-chain IDL — paste the program's Anchor IDL JSON</label>
+            <textarea id="idlJson" class="ta" spellcheck="false"
+              placeholder="paste the IDL JSON — e.g. the contents of target/idl/&lt;program&gt;.json"></textarea>
+            <button class="btn ghost sm" id="useIdl" style="margin-top:8px">Load instructions from IDL</button>
+          </div>
           <div id="ixPicker" class="hidden">
             <label class="flabel" style="margin-top:14px">Instruction</label>
             <select id="ixSelect" class="finput"></select>
@@ -2586,14 +2592,42 @@ async function loadInstructions() {
     if (!res.ok) throw new Error(await res.text());
     loadedIx = await res.json();
     if (!loadedIx.length) throw new Error('this program publishes no instructions');
-    $('ixSelect').innerHTML = loadedIx.map((ix, i) => `<option value="${i}">${esc(ix.name)}</option>`).join('');
-    $('ixPicker').classList.remove('hidden');
-    $('ixHint').classList.add('hidden');
-    renderIxForm();
+    showLoadedInstructions();
+    $('idlFallback').classList.add('hidden');
   } catch (e) {
     $('simOut').innerHTML = `<div class="status err" style="text-align:left">${esc(e.message)}</div>`;
     $('ixPicker').classList.add('hidden');
+    // No on-chain IDL? Reveal the paste-your-own-IDL fallback the message promises.
+    if (/no on-chain Anchor IDL|no instructions/i.test(e.message)) $('idlFallback').classList.remove('hidden');
   } finally { btn.disabled = false; btn.textContent = 'Load instructions'; }
+}
+
+// Populate the instruction picker from whatever's in `loadedIx`.
+function showLoadedInstructions() {
+  $('ixSelect').innerHTML = loadedIx.map((ix, i) => `<option value="${i}">${esc(ix.name)}</option>`).join('');
+  $('ixPicker').classList.remove('hidden');
+  $('ixHint').classList.add('hidden');
+  renderIxForm();
+}
+
+// Load instructions from a pasted Anchor IDL (no on-chain publish needed).
+async function loadInstructionsFromIdl() {
+  const raw = ($('idlJson').value || '').trim();
+  if (!raw) { $('simOut').innerHTML = '<div class="status err" style="text-align:left">paste the IDL JSON first</div>'; return; }
+  let idl;
+  try { idl = JSON.parse(raw); } catch { $('simOut').innerHTML = '<div class="status err" style="text-align:left">that isn\'t valid JSON</div>'; return; }
+  const btn = $('useIdl'); btn.disabled = true; btn.textContent = 'Loading…';
+  $('simOut').innerHTML = '';
+  try {
+    const res = await api('/idl_instructions', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idl, ...clusterParams() }) });
+    if (!res.ok) throw new Error(await res.text());
+    loadedIx = await res.json();
+    if (!loadedIx.length) throw new Error('no instructions found in that IDL');
+    showLoadedInstructions();
+  } catch (e) {
+    $('simOut').innerHTML = `<div class="status err" style="text-align:left">${esc(e.message)}</div>`;
+  } finally { btn.disabled = false; btn.textContent = 'Load instructions from IDL'; }
 }
 
 // Render inputs for the selected instruction's accounts and args.
@@ -3081,6 +3115,7 @@ $('brand').addEventListener('click', () => {
 $('closeSim').addEventListener('click', () => showSim(false));
 $('runSim').addEventListener('click', runPreflight);
 $('loadIx').addEventListener('click', loadInstructions);
+$('useIdl').addEventListener('click', loadInstructionsFromIdl);
 document.querySelectorAll('.trychip').forEach(chip => chip.addEventListener('click', async () => {
   $('cluster').value = chip.dataset.cluster || 'devnet';
   $('buildProg').value = chip.dataset.prog;
