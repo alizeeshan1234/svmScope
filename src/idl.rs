@@ -6,25 +6,65 @@ use serde_json::{json, Value};
 use solana_address::Address;
 use solana_client::rpc_client::RpcClient;
 
+/// The Program Metadata program (`solana-program/program-metadata`) that Anchor
+/// 0.31+ and `anchor idl` publish IDLs to, and that Solana Explorer reads. A
+/// program's canonical IDL lives at a PDA of `[program, "idl"-padded-16]` under
+/// this program, with zlib-compressed JSON in its data.
+const PROGRAM_METADATA_PROGRAM: &str = "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S";
+
+/// Fetch a program's on-chain IDL. There are two publishing mechanisms and
+/// Explorer reads both, so we do too: the legacy Anchor IDL account
+/// (`anchor:idl` seed), then the newer Program Metadata program.
 pub fn fetch_idl_json(client: &RpcClient, program_id: Address) -> Option<Value> {
+    fetch_idl_anchor_account(client, program_id)
+        .or_else(|| fetch_idl_program_metadata(client, program_id))
+}
+
+/// Legacy: the Anchor IDL account, a `create_with_seed(..,"anchor:idl",..)`
+/// account holding `[8 disc][32 authority][u32 len][zlib(json)]`.
+fn fetch_idl_anchor_account(client: &RpcClient, program_id: Address) -> Option<Value> {
     let base = Address::find_program_address(&[], &program_id).0;
     let idl_addr = Address::create_with_seed(&base, "anchor:idl", &program_id).ok()?;
 
-    // Most programs don't publish an on-chain IDL — a missing account is the
-    // common case, not an error, so return None rather than panicking.
+    // Most programs don't publish here — a missing account is the common case.
     let idl_account = client.get_account_data(&idl_addr).ok()?;
 
     let len_bytes: [u8; 4] = idl_account.get(40..44)?.try_into().ok()?;
     let len = u32::from_le_bytes(len_bytes) as usize;
-
     let compressed = idl_account.get(44..44 + len)?;
 
     let mut decoder = ZlibDecoder::new(compressed);
     let mut out = Vec::new();
-
     decoder.read_to_end(&mut out).ok()?;
-
     serde_json::from_slice::<Value>(&out).ok()
+}
+
+/// Newer: the Program Metadata program's canonical `idl` account. Its inline
+/// data is zlib-compressed JSON after a small fixed header; we scan for the zlib
+/// magic and inflate (robust to header-size variants), falling back to raw JSON
+/// for the uncompressed (`--compression none`) case.
+fn fetch_idl_program_metadata(client: &RpcClient, program_id: Address) -> Option<Value> {
+    use std::str::FromStr;
+    let meta = Address::from_str(PROGRAM_METADATA_PROGRAM).ok()?;
+    let mut seed = b"idl".to_vec();
+    seed.resize(16, 0); // canonical seed is a fixed 16-byte buffer
+    let pda = Address::find_program_address(&[program_id.as_ref(), &seed], &meta).0;
+    let data = client.get_account_data(&pda).ok()?;
+
+    for off in 0..data.len().min(256) {
+        if data[off] == 0x78 && matches!(data.get(off + 1), Some(0x01 | 0x9c | 0xda)) {
+            let mut dec = ZlibDecoder::new(&data[off..]);
+            let mut out = Vec::new();
+            if dec.read_to_end(&mut out).is_ok() {
+                if let Ok(v) = serde_json::from_slice::<Value>(&out) {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    // Uncompressed fallback: parse from the first `{`.
+    let start = data.iter().position(|&b| b == b'{')?;
+    serde_json::from_slice::<Value>(&data[start..]).ok()
 }
 
 /// A program error resolved from an IDL's `errors[]` — the difference between
