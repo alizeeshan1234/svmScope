@@ -6059,6 +6059,7 @@ dependencies = [
  "solana-pubkey 4.2.1",
  "solana-reward-info",
  "solana-transaction",
+ "thiserror 2.0.20",
  "tokio",
  "tower-http",
 ]

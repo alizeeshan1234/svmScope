@@ -3,6 +3,7 @@
 //! Loads the transaction's accounts AND programs into an in-process SVM
 //! (LiteSVM) so the transaction can be re-executed locally.
 
+use crate::error::{Error, Result};
 use crate::fixture::{Fixture, FixtureEntry};
 use base64::Engine;
 use litesvm::types::TransactionResult;
@@ -69,17 +70,17 @@ type LoadedAccounts = (Vec<(Address, Loaded)>, HashMap<String, ()>);
 /// (non-null) — including programs whose ELF we couldn't resolve. The caller uses
 /// that set to tell a genuinely-closed account (safe to reconstruct) apart from a
 /// program that merely failed to load (must NOT be reconstructed as data).
-fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Result<LoadedAccounts, String> {
+fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Result<LoadedAccounts> {
     let resp: serde_json::Value = client
         .send(
             RpcRequest::GetMultipleAccounts,
             json!([account_keys, { "encoding": "base64" }]),
         )
-        .map_err(|e| format!("getMultipleAccounts failed: {e}"))?;
+        .map_err(Error::rpc)?;
 
-    let accounts = resp["value"]
-        .as_array()
-        .ok_or("unexpected getMultipleAccounts response (no value array)")?;
+    let accounts = resp["value"].as_array().ok_or_else(|| {
+        Error::MalformedRpcResponse("getMultipleAccounts: no value array".into())
+    })?;
     let mut out: Vec<(Address, Loaded)> = Vec::new();
     let mut existing: HashMap<String, ()> = HashMap::new();
 
@@ -407,14 +408,18 @@ impl ReplayContext {
 
     /// Replay the transaction after applying `mutations` to a fresh copy of the
     /// state. Repeatable and side-effect-free across calls.
-    pub fn run(&self, mutations: &[Mutation]) -> ReplayResult {
-        self.run_full(mutations).0
+    ///
+    /// A reverting transaction is **not** an `Err` — it comes back as a
+    /// `ReplayResult` with `success: false`. `Err` means the replay could not
+    /// run at all (e.g. a mutation targeted an account that isn't loaded).
+    pub fn run(&self, mutations: &[Mutation]) -> Result<ReplayResult> {
+        Ok(self.run_full(mutations)?.0)
     }
 
     /// Replay and report **what changed** — every touched account's lamports and
     /// raw data, before and after. The caller decodes the bytes into named fields.
-    pub fn run_with_diff(&self, mutations: &[Mutation]) -> (ReplayResult, Vec<RawAccountDiff>) {
-        let (result, svm) = self.run_full(mutations);
+    pub fn run_with_diff(&self, mutations: &[Mutation]) -> Result<(ReplayResult, Vec<RawAccountDiff>)> {
+        let (result, svm) = self.run_full(mutations)?;
         let mut diffs = Vec::new();
         for (addr, l) in &self.loaded {
             let Loaded::Data(before) = l else { continue };
@@ -433,7 +438,7 @@ impl ReplayContext {
                 data_after: after.data.clone(),
             });
         }
-        (result, diffs)
+        Ok((result, diffs))
     }
 
     /// The pre-transaction state of an account (for delta assertions).
@@ -460,19 +465,17 @@ impl ReplayContext {
     /// token & friends) first, then the owner program's registered IDL. The
     /// pre-state layout is authoritative for both sides of a delta — an assert
     /// shouldn't silently change meaning because the tx rewrote the account.
-    fn decode_pre(
-        &self,
-        address: &str,
-    ) -> Result<(crate::decode::DecodedAccount, &Account), String> {
+    fn decode_pre(&self, address: &str) -> Result<(crate::decode::DecodedAccount, &Account)> {
         let pre = self
             .pre_account(address)
-            .ok_or_else(|| format!("no pre-state for {address}"))?;
+            .ok_or_else(|| Error::AccountNotFound(format!("{address} (no pre-state)")))?;
         let owner = pre.owner.to_string();
         crate::decode::decode_bytes(&owner, &pre.data)
             .or_else(|| self.idls.get(&owner).and_then(|i| crate::idl::decode_with_idl(i, &pre.data)))
             .map(|dec| (dec, pre))
-            .ok_or_else(|| {
-                format!("can't decode {address} into named fields (no known layout, and no IDL for its program {owner})")
+            .ok_or_else(|| Error::UndecodableAccount {
+                address: address.to_string(),
+                owner,
             })
     }
 }
@@ -595,7 +598,7 @@ pub fn build_context(
     account_keys: &[String],
     _tx_slot: Option<u64>,
     pre_state: &PreState,
-) -> Result<ReplayContext, String> {
+) -> Result<ReplayContext> {
     // Replay runs against CURRENT account state — an RPC returns today's accounts,
     // not the tx-time snapshot. Anchoring the clock to the transaction's ORIGINAL
     // slot then contradicts that state: a program that checks the clock against an
@@ -696,7 +699,7 @@ fn resolve_alt_addresses(
 pub fn preflight_context(
     client: &RpcClient,
     tx: VersionedTransaction,
-) -> Result<ReplayContext, String> {
+) -> Result<ReplayContext> {
     let mut keys: Vec<String> = tx
         .message
         .static_account_keys()
@@ -738,8 +741,9 @@ impl ReplayContext {
     /// / `self.block_time`) — the exact clock the live replay ran with — so a
     /// reloaded fixture reproduces the live outcome instead of drifting to the
     /// transaction's original slot.
-    pub fn to_fixture(&self, signature: &str) -> Fixture {
-        let tx_bytes = bincode::serialize(&self.tx).expect("serialize tx");
+    pub fn to_fixture(&self, signature: &str) -> Result<Fixture> {
+        let tx_bytes = bincode::serialize(&self.tx)
+            .map_err(|e| Error::Fixture(format!("serialize transaction: {e}")))?;
         let entries = self
             .loaded
             .iter()
@@ -756,23 +760,23 @@ impl ReplayContext {
                 },
             })
             .collect();
-        Fixture {
+        Ok(Fixture {
             signature: signature.to_string(),
             captured_slot: self.slot,
             captured_block_time: self.block_time,
             tx_b64: b64_encode(&tx_bytes),
             entries,
-        }
+        })
     }
 
     /// Rebuild a replay context from a frozen fixture — **no network**. This is
     /// what makes fixture-backed suites deterministic and CI-safe.
-    pub fn from_fixture(fx: &Fixture) -> Result<ReplayContext, String> {
+    pub fn from_fixture(fx: &Fixture) -> Result<ReplayContext> {
         let tx_bytes = base64::engine::general_purpose::STANDARD
             .decode(&fx.tx_b64)
-            .map_err(|e| format!("bad tx base64: {e}"))?;
-        let tx: VersionedTransaction =
-            bincode::deserialize(&tx_bytes).map_err(|e| format!("deserialize tx: {e}"))?;
+            .map_err(|e| Error::Fixture(format!("bad tx base64: {e}")))?;
+        let tx: VersionedTransaction = bincode::deserialize(&tx_bytes)
+            .map_err(|e| Error::Fixture(format!("deserialize tx: {e}")))?;
 
         let mut loaded = Vec::with_capacity(fx.entries.len());
         for e in &fx.entries {
@@ -783,13 +787,13 @@ impl ReplayContext {
                     lamports,
                     data_b64,
                 } => {
-                    let addr =
-                        Address::from_str(address).map_err(|_| format!("bad address {address}"))?;
-                    let owner_addr =
-                        Address::from_str(owner).map_err(|_| format!("bad owner {owner}"))?;
+                    let addr = Address::from_str(address)
+                        .map_err(|_| Error::Fixture(format!("bad address {address}")))?;
+                    let owner_addr = Address::from_str(owner)
+                        .map_err(|_| Error::Fixture(format!("bad owner {owner}")))?;
                     let data = base64::engine::general_purpose::STANDARD
                         .decode(data_b64)
-                        .map_err(|e| format!("bad data base64 for {address}: {e}"))?;
+                        .map_err(|e| Error::Fixture(format!("bad data base64 for {address}: {e}")))?;
                     loaded.push((
                         addr,
                         Loaded::Data(Account {
@@ -802,11 +806,11 @@ impl ReplayContext {
                     ));
                 }
                 FixtureEntry::Program { address, elf_b64 } => {
-                    let addr =
-                        Address::from_str(address).map_err(|_| format!("bad address {address}"))?;
+                    let addr = Address::from_str(address)
+                        .map_err(|_| Error::Fixture(format!("bad address {address}")))?;
                     let elf = base64::engine::general_purpose::STANDARD
                         .decode(elf_b64)
-                        .map_err(|e| format!("bad elf base64 for {address}: {e}"))?;
+                        .map_err(|e| Error::Fixture(format!("bad elf base64 for {address}: {e}")))?;
                     loaded.push((addr, Loaded::Program(elf)));
                 }
             }
@@ -824,26 +828,28 @@ impl ReplayContext {
 }
 
 /// Fetch the raw transaction (base64 wire bytes) and deserialize it.
-fn fetch_transaction(client: &RpcClient, signature: &str) -> Result<VersionedTransaction, String> {
+fn fetch_transaction(client: &RpcClient, signature: &str) -> Result<VersionedTransaction> {
     let resp: serde_json::Value = client
         .send(
             RpcRequest::GetTransaction,
             json!([signature, { "encoding": "base64", "maxSupportedTransactionVersion": 0 }]),
         )
-        .map_err(|e| format!("getTransaction failed: {e}"))?;
-    let tx_b64 = resp["transaction"][0]
-        .as_str()
-        .ok_or_else(|| format!("no base64 transaction in response for {signature}"))?;
+        .map_err(Error::rpc)?;
+    if resp.is_null() {
+        return Err(Error::TransactionNotFound(signature.to_string()));
+    }
+    let tx_b64 = resp["transaction"][0].as_str().ok_or_else(|| {
+        Error::MalformedRpcResponse(format!("no base64 transaction in response for {signature}"))
+    })?;
     let bytes = b64_decode(tx_b64);
     bincode::deserialize::<VersionedTransaction>(&bytes)
-        .map_err(|e| format!("could not deserialize transaction {signature}: {e}"))
+        .map_err(|e| Error::TxDecode(format!("{signature}: {e}")))
 }
 
 /// A change to apply to an account before replaying.
 ///
 /// `Data` replaces an account's bytes wholesale; `DataPatch` overwrites a slice
 /// at an offset (how you'd flip a token balance or an oracle price in place).
-#[allow(dead_code)]
 pub enum Mutation {
     Lamports {
         address: String,
@@ -860,37 +866,72 @@ pub enum Mutation {
     },
 }
 
-/// Apply one mutation to the SVM, or explain why it can't be applied.
-fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<(), String> {
-    let (address, addr) = match m {
-        Mutation::Lamports { address, .. }
-        | Mutation::Data { address, .. }
-        | Mutation::DataPatch { address, .. } => (
-            address,
-            Address::from_str(address).map_err(|_| format!("invalid address: {address}"))?,
-        ),
-    };
+impl Mutation {
+    /// Set an account's lamports.
+    pub fn lamports(address: impl Into<String>, value: u64) -> Mutation {
+        Mutation::Lamports {
+            address: address.into(),
+            value,
+        }
+    }
+
+    /// Replace an account's data wholesale.
+    pub fn data(address: impl Into<String>, bytes: Vec<u8>) -> Mutation {
+        Mutation::Data {
+            address: address.into(),
+            bytes,
+        }
+    }
+
+    /// Overwrite a slice of an account's data at `offset`.
+    pub fn patch(address: impl Into<String>, offset: usize, bytes: Vec<u8>) -> Mutation {
+        Mutation::DataPatch {
+            address: address.into(),
+            offset,
+            bytes,
+        }
+    }
+
+    fn address(&self) -> &str {
+        match self {
+            Mutation::Lamports { address, .. }
+            | Mutation::Data { address, .. }
+            | Mutation::DataPatch { address, .. } => address,
+        }
+    }
+}
+
+/// Apply one mutation to the SVM. Callers validate first (see
+/// [`ReplayContext::validate_mutations`]), so a failure here is a hard error,
+/// never folded into a "failed replay" — a typo'd address must not satisfy an
+/// `expect: revert` scenario.
+fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
+    let address = m.address();
+    let addr = Address::from_str(address)
+        .map_err(|_| Error::InvalidAddress(address.to_string()))?;
     let mut account = svm
         .get_account(&addr)
-        .ok_or_else(|| format!("mutation target not loaded in SVM: {address}"))?;
+        .ok_or_else(|| Error::MutationTargetMissing(address.to_string()))?;
 
     match m {
         Mutation::Lamports { value, .. } => account.lamports = *value,
         Mutation::Data { bytes, .. } => account.data = bytes.clone(),
         Mutation::DataPatch { offset, bytes, .. } => {
-            let end = offset + bytes.len();
-            if end > account.data.len() {
-                return Err(format!(
-                    "patch out of range for {address}: offset {offset} + {} bytes > account size {}",
-                    bytes.len(),
-                    account.data.len()
-                ));
-            }
+            let end = offset
+                .checked_add(bytes.len())
+                .filter(|&e| e <= account.data.len())
+                .ok_or_else(|| Error::PatchOutOfRange {
+                    address: address.to_string(),
+                    offset: *offset,
+                    len: bytes.len(),
+                    size: account.data.len(),
+                })?;
             account.data[*offset..end].copy_from_slice(bytes);
         }
     }
-    svm.set_account(addr, account)
-        .map_err(|e| format!("set_account failed for {address}: {e:?}"))
+    svm.set_account(addr, account).map_err(|e| {
+        Error::MalformedRpcResponse(format!("set_account failed for {address}: {e:?}"))
+    })
 }
 
 /// Convert a raw transaction result into a `ReplayResult`.
@@ -912,45 +953,6 @@ fn to_replay_result(result: TransactionResult) -> ReplayResult {
             compute_units: failed.meta.compute_units_consumed,
             ..Default::default()
         },
-    }
-}
-
-/// A replay that never ran because state couldn't be reconstructed (RPC error,
-/// missing transaction) — reported as a failed result instead of a panic.
-fn failed_result(error: String) -> ReplayResult {
-    ReplayResult {
-        success: false,
-        error: Some(error),
-        ..Default::default()
-    }
-}
-
-/// Replay the transaction against the reconstructed state.
-pub fn replay_transaction(
-    client: &RpcClient,
-    signature: &str,
-    account_keys: &[String],
-    slot: Option<u64>,
-    pre_state: &PreState,
-) -> ReplayResult {
-    match build_context(client, signature, account_keys, slot, pre_state) {
-        Ok(ctx) => ctx.run(&[]),
-        Err(e) => failed_result(e),
-    }
-}
-
-/// Replay the transaction after applying the given mutations.
-pub fn mutate_and_replay(
-    client: &RpcClient,
-    signature: &str,
-    account_keys: &[String],
-    mutations: &[Mutation],
-    slot: Option<u64>,
-    pre_state: &PreState,
-) -> ReplayResult {
-    match build_context(client, signature, account_keys, slot, pre_state) {
-        Ok(ctx) => ctx.run(mutations),
-        Err(e) => failed_result(e),
     }
 }
 
@@ -1089,7 +1091,7 @@ fn read_u64_at(data: &[u8], offset: usize) -> u64 {
 pub(crate) fn find_field<'a>(
     dec: &'a crate::decode::DecodedAccount,
     name: &'a str,
-) -> Result<&'a crate::decode::Field, String> {
+) -> Result<&'a crate::decode::Field> {
     if let Some(f) = dec.fields.iter().find(|f| f.name == name) {
         return Ok(f);
     }
@@ -1101,49 +1103,43 @@ pub(crate) fn find_field<'a>(
         .collect();
     match hits.len() {
         1 => Ok(hits[0]),
-        0 => {
-            let avail: Vec<&str> = dec
-                .fields
-                .iter()
-                .map(|f| f.name.as_str())
-                .take(12)
-                .collect();
-            Err(format!(
-                "no field \"{name}\" on this {} (fields: {})",
-                dec.type_name,
-                avail.join(", ")
-            ))
-        }
-        _ => {
-            let names: Vec<&str> = hits.iter().map(|f| f.name.as_str()).collect();
-            Err(format!(
-                "\"{name}\" is ambiguous here — use one of: {}",
-                names.join(", ")
-            ))
-        }
+        0 => Err(Error::UnknownField {
+            field: name.to_string(),
+            type_name: dec.type_name.clone(),
+            available: dec.fields.iter().map(|f| f.name.clone()).take(12).collect(),
+        }),
+        _ => Err(Error::AmbiguousField {
+            field: name.to_string(),
+            candidates: hits.iter().map(|f| f.name.clone()).collect(),
+        }),
     }
 }
 
 /// Read a named integer field's bytes as a number. Unsigned ints zero-extend,
 /// signed ints sign-extend, bool reads as 0/1; anything else (pubkey, string,
 /// 128-bit ints) can't be compared numerically and says so.
-pub(crate) fn read_field_int(data: &[u8], f: &crate::decode::Field) -> Result<i128, String> {
-    let bytes = data
-        .get(f.offset..f.offset + f.size)
-        .ok_or_else(|| format!("{} @{} out of range (len {})", f.name, f.offset, data.len()))?;
+pub(crate) fn read_field_int(data: &[u8], f: &crate::decode::Field) -> Result<i128> {
+    let bytes = f
+        .offset
+        .checked_add(f.size)
+        .and_then(|end| data.get(f.offset..end))
+        .ok_or_else(|| Error::OutOfRange {
+            what: format!("{} @{}", f.name, f.offset),
+            len: data.len(),
+        })?;
     let le = |b: &[u8]| -> u128 { b.iter().rev().fold(0u128, |acc, &x| (acc << 8) | x as u128) };
     match (f.ty.as_str(), f.size) {
-        ("bool", _) => Ok((bytes[0] != 0) as i128),
+        ("bool", _) => Ok(bytes.first().is_some_and(|&b| b != 0) as i128),
         ("u8" | "u16" | "u32" | "u64", _) => Ok(le(bytes) as i128),
         ("i8" | "i16" | "i32" | "i64", n) => {
             let raw = le(bytes);
             let shift = 128 - 8 * n as u32;
             Ok(((raw as i128) << shift) >> shift) // sign-extend from n bytes
         }
-        (ty, _) => Err(format!(
-            "{} is a {ty} — only integer/bool fields can be asserted",
-            f.name
-        )),
+        (ty, _) => Err(Error::NonNumericField {
+            field: f.name.clone(),
+            ty: ty.to_string(),
+        }),
     }
 }
 
@@ -1168,21 +1164,21 @@ impl AccountAssert {
 
     /// Evaluate against the post-replay `svm`; `ctx` supplies pre-transaction values
     /// for the delta checks.
-    fn eval(&self, svm: &LiteSVM, ctx: &ReplayContext) -> Result<bool, String> {
+    fn eval(&self, svm: &LiteSVM, ctx: &ReplayContext) -> Result<bool> {
         let addr = Address::from_str(&self.address)
-            .map_err(|_| format!("bad address {}", self.address))?;
+            .map_err(|_| Error::InvalidAddress(self.address.clone()))?;
         let acc = svm.get_account(&addr);
         match &self.check {
             StateCheck::Lamports { op, value } => {
                 Ok(op.test(acc.map(|a| a.lamports).unwrap_or(0), *value))
             }
             StateCheck::U64At { offset, op, value } => {
-                let acc = acc.ok_or_else(|| format!("account not found: {}", self.address))?;
-                if offset + 8 > acc.data.len() {
-                    return Err(format!(
-                        "u64@{offset} out of range (len {})",
-                        acc.data.len()
-                    ));
+                let acc = acc.ok_or_else(|| Error::AccountNotFound(self.address.clone()))?;
+                if offset.checked_add(8).filter(|&e| e <= acc.data.len()).is_none() {
+                    return Err(Error::OutOfRange {
+                        what: format!("u64@{offset}"),
+                        len: acc.data.len(),
+                    });
                 }
                 Ok(op.test(read_u64_at(&acc.data, *offset), *value))
             }
@@ -1205,13 +1201,13 @@ impl AccountAssert {
             StateCheck::Field { name, op, value } => {
                 let (dec, _) = ctx.decode_pre(&self.address)?;
                 let f = find_field(&dec, name)?;
-                let acc = acc.ok_or_else(|| format!("account not found: {}", self.address))?;
+                let acc = acc.ok_or_else(|| Error::AccountNotFound(self.address.clone()))?;
                 Ok(op.test_i128(read_field_int(&acc.data, f)?, *value))
             }
             StateCheck::FieldDelta { name, op, value } => {
                 let (dec, pre) = ctx.decode_pre(&self.address)?;
                 let f = find_field(&dec, name)?;
-                let acc = acc.ok_or_else(|| format!("account not found: {}", self.address))?;
+                let acc = acc.ok_or_else(|| Error::AccountNotFound(self.address.clone()))?;
                 let delta = read_field_int(&acc.data, f)? - read_field_int(&pre.data, f)?;
                 Ok(op.test_i128(delta, *value))
             }
@@ -1257,31 +1253,61 @@ pub struct ScenarioOutcome {
 
 impl ReplayContext {
     /// Run mutations and keep the post-replay SVM so state can be inspected.
-    fn run_full(&self, mutations: &[Mutation]) -> (ReplayResult, LiteSVM) {
+    /// A mutation that can't be applied is a hard `Err`, never a failed replay.
+    fn run_full(&self, mutations: &[Mutation]) -> Result<(ReplayResult, LiteSVM)> {
         let mut svm = self.fresh_svm();
         for m in mutations {
-            if let Err(e) = apply_mutation(&mut svm, m) {
-                return (
-                    ReplayResult {
-                        success: false,
-                        error: Some(e),
-                        ..Default::default()
-                    },
-                    svm,
-                );
-            }
+            apply_mutation(&mut svm, m)?;
         }
         let result = to_replay_result(svm.send_transaction(self.tx.clone()));
-        (result, svm)
+        Ok((result, svm))
+    }
+
+    /// Check every mutation against the loaded state without running anything:
+    /// the address parses, the target account is loaded, and a patch stays in
+    /// bounds. Lets a suite fail fast — before any scenario executes.
+    pub fn validate_mutations(&self, mutations: &[Mutation]) -> Result<()> {
+        for m in mutations {
+            let address = m.address();
+            let addr = Address::from_str(address)
+                .map_err(|_| Error::InvalidAddress(address.to_string()))?;
+            let data_len = self
+                .loaded
+                .iter()
+                .find_map(|(a, l)| match l {
+                    Loaded::Data(acc) if *a == addr => Some(acc.data.len()),
+                    Loaded::Program(_) if *a == addr => Some(0),
+                    _ => None,
+                })
+                .ok_or_else(|| Error::MutationTargetMissing(address.to_string()))?;
+            if let Mutation::DataPatch { offset, bytes, .. } = m {
+                if offset.checked_add(bytes.len()).filter(|&e| e <= data_len).is_none() {
+                    return Err(Error::PatchOutOfRange {
+                        address: address.to_string(),
+                        offset: *offset,
+                        len: bytes.len(),
+                        size: data_len,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
 /// Run a suite of scenarios against one pre-fetched context and report pass/fail.
-pub fn run_suite(ctx: &ReplayContext, scenarios: &[ScenarioSpec]) -> Vec<ScenarioOutcome> {
+///
+/// Every scenario's mutations are validated **before anything runs** — a typo'd
+/// mutation address fails the whole suite with a hard error instead of showing
+/// up as a revert that an `expect: revert` scenario would silently accept.
+pub fn run_suite(ctx: &ReplayContext, scenarios: &[ScenarioSpec]) -> Result<Vec<ScenarioOutcome>> {
+    for s in scenarios {
+        ctx.validate_mutations(&s.mutations)?;
+    }
     scenarios
         .iter()
         .map(|s| {
-            let (actual, svm) = ctx.run_full(&s.mutations);
+            let (actual, svm) = ctx.run_full(&s.mutations)?;
             let outcome_pass = s.expect.matches(&actual);
 
             let asserts: Vec<AssertOutcome> = s
@@ -1302,13 +1328,13 @@ pub fn run_suite(ctx: &ReplayContext, scenarios: &[ScenarioSpec]) -> Vec<Scenari
                 .collect();
 
             let pass = outcome_pass && asserts.iter().all(|a| a.pass);
-            ScenarioOutcome {
+            Ok(ScenarioOutcome {
                 name: s.name.clone(),
                 expect: s.expect.describe(),
                 pass,
                 actual,
                 asserts,
-            }
+            })
         })
         .collect()
 }
@@ -1368,7 +1394,7 @@ mod tests {
     #[test]
     fn unknown_field_errors_and_lists_candidates() {
         let (dec, _) = token_decoded();
-        let e = find_field(&dec, "reserveA").unwrap_err();
+        let e = find_field(&dec, "reserveA").unwrap_err().to_string();
         assert!(e.contains("no field \"reserveA\""), "{e}");
         assert!(e.contains("amount"), "should list available fields: {e}");
     }
@@ -1377,7 +1403,10 @@ mod tests {
     fn non_integer_field_refuses_comparison() {
         let (dec, data) = token_decoded();
         let owner = find_field(&dec, "owner").unwrap();
-        assert!(read_field_int(&data, owner).unwrap_err().contains("pubkey"));
+        assert!(read_field_int(&data, owner)
+            .unwrap_err()
+            .to_string()
+            .contains("pubkey"));
     }
 
     #[test]
@@ -1396,6 +1425,76 @@ mod tests {
     }
 
     #[test]
+    fn typoed_mutation_is_a_hard_error_not_a_passing_revert() {
+        // The v0.1 hole: a mutation targeting an unloaded (typo'd) address was
+        // folded into ReplayResult{success:false}, which `expect: revert`
+        // scenarios happily accepted. It must be a hard Err now.
+        let ctx = ReplayContext {
+            tx: VersionedTransaction::default(),
+            loaded: Vec::new(),
+            slot: None,
+            block_time: None,
+            time_travel: TimeTravel::default(),
+            idls: HashMap::new(),
+            feature_toggles: Vec::new(),
+        };
+        // (Not the system program — that one exists as a builtin in a fresh SVM.)
+        let typo = Mutation::lamports(Address::from([7u8; 32]).to_string(), 0);
+
+        assert!(matches!(
+            ctx.run(std::slice::from_ref(&typo)),
+            Err(Error::MutationTargetMissing(_))
+        ));
+
+        // A whole suite fails fast — before any scenario executes.
+        let suite = [ScenarioSpec {
+            name: "drain".into(),
+            mutations: vec![typo],
+            expect: Expect::Revert,
+            asserts: vec![],
+        }];
+        assert!(matches!(
+            run_suite(&ctx, &suite),
+            Err(Error::MutationTargetMissing(_))
+        ));
+    }
+
+    #[test]
+    fn patch_bounds_are_validated_up_front() {
+        let addr = Address::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+        let ctx = ReplayContext {
+            tx: VersionedTransaction::default(),
+            loaded: vec![(
+                addr,
+                Loaded::Data(Account {
+                    lamports: 1,
+                    data: vec![0u8; 8],
+                    owner: Address::default(),
+                    executable: false,
+                    rent_epoch: 0,
+                }),
+            )],
+            slot: None,
+            block_time: None,
+            time_travel: TimeTravel::default(),
+            idls: HashMap::new(),
+            feature_toggles: Vec::new(),
+        };
+        // In range: fine. Out of range (offset 4 + 8 bytes > size 8): typed error.
+        assert!(ctx
+            .validate_mutations(&[Mutation::patch(addr.to_string(), 0, vec![0; 8])])
+            .is_ok());
+        assert!(matches!(
+            ctx.validate_mutations(&[Mutation::patch(addr.to_string(), 4, vec![0; 8])]),
+            Err(Error::PatchOutOfRange { offset: 4, len: 8, size: 8, .. })
+        ));
+        // usize overflow in offset + len must not panic either.
+        assert!(ctx
+            .validate_mutations(&[Mutation::patch(addr.to_string(), usize::MAX, vec![0; 8])])
+            .is_err());
+    }
+
+    #[test]
     fn fixture_roundtrip_preserves_slot_and_clock() {
         // The core fixture-fidelity invariant: freezing a context and reloading it
         // must reproduce the exact slot AND wall-clock the live replay ran at — not
@@ -1411,7 +1510,7 @@ mod tests {
             feature_toggles: Vec::new(),
         };
 
-        let fx = ctx.to_fixture("SIG");
+        let fx = ctx.to_fixture("SIG").unwrap();
         assert_eq!(fx.captured_slot, Some(295_000_123));
         assert_eq!(fx.captured_block_time, Some(1_787_600_325));
 

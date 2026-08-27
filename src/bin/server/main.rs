@@ -211,6 +211,20 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("../../../static/index.html"))
 }
 
+/// Map a library error onto an HTTP status + message. Not-found inputs are 404,
+/// upstream RPC trouble is 502, everything else the caller can fix is 400.
+fn lib_err(e: svmscope::Error) -> (StatusCode, String) {
+    use svmscope::Error as E;
+    let code = match &e {
+        E::TransactionNotFound(_) | E::NoSignatures(_) | E::AccountNotFound(_) => {
+            StatusCode::NOT_FOUND
+        }
+        E::Rpc(_) | E::MalformedRpcResponse(_) => StatusCode::BAD_GATEWAY,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    (code, e.to_string())
+}
+
 /// GET /analyze/:signature — decode + replay a transaction, return JSON.
 async fn analyze_handler(
     Path(signature): Path<String>,
@@ -233,7 +247,7 @@ async fn analyze_handler(
 
     match result {
         Ok(analysis) => Ok(Json(analysis)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 
@@ -246,10 +260,10 @@ async fn simulate_handler(
         .into_iter()
         .map(MutationInput::into_mutation)
         .collect::<Result<_, _>>()
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let features =
-        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || {
@@ -272,7 +286,7 @@ async fn simulate_handler(
 
     match result {
         Ok(replay) => Ok(Json(replay)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 
@@ -300,9 +314,9 @@ async fn suite_handler(
         .into_iter()
         .map(|s| s.into_spec())
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let features =
-        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let result = tokio::task::spawn_blocking(move || {
         let client = RpcClient::new(url);
@@ -318,7 +332,7 @@ async fn suite_handler(
 
     match result {
         Ok(outcomes) => Ok(Json(outcomes)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 
@@ -351,7 +365,7 @@ async fn preflight_handler(
         .into_iter()
         .map(MutationInput::into_mutation)
         .collect::<Result<_, _>>()
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || {
@@ -368,7 +382,7 @@ async fn preflight_handler(
 
     match result {
         Ok(r) => Ok(Json(r)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 
@@ -392,7 +406,7 @@ async fn account_handler(
 
     match result {
         Ok(ov) => Ok(Json(ov)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 
@@ -416,7 +430,7 @@ async fn signatures_handler(
 
     match result {
         Ok(sigs) => Ok(Json(sigs)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 
@@ -430,10 +444,10 @@ async fn preflight_report_handler(
         .into_iter()
         .map(MutationInput::into_mutation)
         .collect::<Result<_, _>>()
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let features =
-        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -448,7 +462,7 @@ async fn preflight_report_handler(
         )
     })?;
 
-    result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
+    result.map(Json).map_err(lib_err)
 }
 
 /// POST /replay_report — replay a landed tx (optionally mutated) with explanation
@@ -461,10 +475,10 @@ async fn replay_report_handler(
         .into_iter()
         .map(MutationInput::into_mutation)
         .collect::<Result<_, _>>()
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let features =
-        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -479,7 +493,7 @@ async fn replay_report_handler(
         )
     })?;
 
-    result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
+    result.map(Json).map_err(lib_err)
 }
 
 /// POST body for IDL-assisted decoding / instruction listing.
@@ -520,7 +534,7 @@ async fn decode_account_handler(
         )
     })?;
 
-    result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
+    result.map(Json).map_err(lib_err)
 }
 
 /// POST /idl_instructions — instructions from a supplied IDL (no on-chain publish needed).
@@ -549,7 +563,7 @@ async fn instructions_handler(
         )
     })?;
 
-    result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
+    result.map(Json).map_err(lib_err)
 }
 
 /// GET /replay/:signature — run the local replay on demand (analyze skips it).
@@ -572,7 +586,7 @@ async fn replay_handler(
 
     match result {
         Ok(replay) => Ok(Json(replay)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 
@@ -596,7 +610,7 @@ async fn freeze_handler(
 
     match result {
         Ok(fx) => Ok(Json(fx)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 

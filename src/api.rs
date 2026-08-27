@@ -8,6 +8,8 @@ use serde::Deserialize;
 use solana_address::Address;
 use std::str::FromStr;
 
+use crate::error::{Error, Result};
+
 use crate::replay::{
     AccountAssert, CmpOp, Expect, FeatureToggle, Mutation, ScenarioSpec, StateCheck, TimeTravel,
 };
@@ -23,9 +25,9 @@ pub struct FeatureInput {
 }
 
 impl FeatureInput {
-    pub fn into_toggle(self) -> Result<FeatureToggle, String> {
+    pub fn into_toggle(self) -> Result<FeatureToggle> {
         let id = Address::from_str(self.id.trim())
-            .map_err(|_| format!("bad feature id (not a pubkey): {}", self.id))?;
+            .map_err(|_| Error::InvalidSpec(format!("bad feature id (not a pubkey): {}", self.id)))?;
         Ok(FeatureToggle {
             id,
             active: self.active,
@@ -34,7 +36,7 @@ impl FeatureInput {
 }
 
 /// Convert a list of feature inputs into engine toggles, failing on the first bad id.
-pub fn feature_toggles(features: Vec<FeatureInput>) -> Result<Vec<FeatureToggle>, String> {
+pub fn feature_toggles(features: Vec<FeatureInput>) -> Result<Vec<FeatureToggle>> {
     features
         .into_iter()
         .map(FeatureInput::into_toggle)
@@ -59,19 +61,24 @@ pub enum MutationInput {
 }
 
 /// Decode a hex string, tolerating `0x`, spaces, and underscores.
-pub fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
+pub fn hex_decode(s: &str) -> Result<Vec<u8>> {
     let s = s.trim().trim_start_matches("0x").replace([' ', '_'], "");
     if s.is_empty() || !s.len().is_multiple_of(2) {
-        return Err("hex bytes must be a non-empty, even-length hex string".into());
+        return Err(Error::InvalidSpec(
+            "hex bytes must be a non-empty, even-length hex string".into(),
+        ));
     }
     (0..s.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| format!("invalid hex: {s}")))
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16)
+                .map_err(|_| Error::InvalidSpec(format!("invalid hex: {s}")))
+        })
         .collect()
 }
 
 impl MutationInput {
-    pub fn into_mutation(self) -> Result<Mutation, String> {
+    pub fn into_mutation(self) -> Result<Mutation> {
         Ok(match self {
             MutationInput::Lamports { address, lamports } => Mutation::Lamports {
                 address,
@@ -126,7 +133,7 @@ fn default_op() -> String {
 }
 
 impl AssertInput {
-    fn into_assert(self) -> Result<AccountAssert, String> {
+    fn into_assert(self) -> Result<AccountAssert> {
         let op = match self.op.as_str() {
             "==" | "eq" => CmpOp::Eq,
             "!=" | "ne" => CmpOp::Ne,
@@ -134,20 +141,21 @@ impl AssertInput {
             "<=" | "le" => CmpOp::Le,
             ">" | "gt" => CmpOp::Gt,
             ">=" | "ge" => CmpOp::Ge,
-            other => return Err(format!("unknown assert op: {other}")),
+            other => return Err(Error::InvalidSpec(format!("unknown assert op: {other}"))),
         };
         // Non-delta kinds compare against an unsigned value.
-        let unsigned = || -> Result<u64, String> {
-            u64::try_from(self.value).map_err(|_| format!("{} value must be ≥ 0", self.kind))
+        let unsigned = || -> Result<u64> {
+            u64::try_from(self.value)
+                .map_err(|_| Error::InvalidSpec(format!("{} value must be ≥ 0", self.kind)))
         };
         // Field kinds compare signed (an i64 timestamp is a legitimate target).
-        let field = || -> Result<String, String> {
+        let field = || -> Result<String> {
             match &self.field {
                 Some(f) if !f.trim().is_empty() => Ok(f.trim().to_string()),
-                _ => Err(format!(
+                _ => Err(Error::InvalidSpec(format!(
                     "assert kind \"{}\" needs a \"field\" name",
                     self.kind
-                )),
+                ))),
             }
         };
         let check = match self.kind.as_str() {
@@ -183,7 +191,7 @@ impl AssertInput {
                 op,
                 value: self.value as i128,
             },
-            other => return Err(format!("unknown assert kind: {other}")),
+            other => return Err(Error::InvalidSpec(format!("unknown assert kind: {other}"))),
         };
         Ok(AccountAssert {
             address: self.address,
@@ -215,7 +223,7 @@ fn default_expect() -> String {
 }
 
 impl ScenarioInput {
-    pub fn into_spec(self) -> Result<ScenarioSpec, String> {
+    pub fn into_spec(self) -> Result<ScenarioSpec> {
         let expect = match self.expect.as_str() {
             "success" | "pass" => Expect::Success,
             "revert" | "fail" => match self.contains {
@@ -228,12 +236,12 @@ impl ScenarioInput {
             .mutations
             .into_iter()
             .map(MutationInput::into_mutation)
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_>>()?;
         let asserts = self
             .asserts
             .into_iter()
             .map(AssertInput::into_assert)
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<_>>()?;
         Ok(ScenarioSpec {
             name: self.name,
             mutations,
@@ -344,7 +352,7 @@ mod tests {
     fn field_assert_requires_a_field_name() {
         let a: AssertInput =
             serde_json::from_str(r#"{"address":"X","kind":"field","value":1}"#).unwrap();
-        assert!(a.into_assert().unwrap_err().contains("field"));
+        assert!(a.into_assert().unwrap_err().to_string().contains("field"));
     }
 
     #[test]

@@ -36,7 +36,7 @@
 //!     vec![],
 //! )?;
 //! println!("mutated replay success: {}", what_if.success);
-//! # Ok::<(), String>(())
+//! # Ok::<(), svmscope::Error>(())
 //! ```
 //!
 //! # Hermetic testing
@@ -61,12 +61,15 @@ pub mod compute;
 pub mod cpi_tree;
 pub mod decode;
 pub mod diffs;
+pub mod error;
 pub mod fixture;
 pub mod idl;
 pub mod ixname;
 pub mod replay;
 pub mod report;
 pub mod utils;
+
+pub use error::{Error, Result};
 
 use serde::Serialize;
 use serde_json::json;
@@ -192,7 +195,7 @@ fn build_overview(
 /// parses as an address, so we resolve it to its most recent transaction; a
 /// 64-byte signature is used as-is. Lets a user paste a program ID and see its
 /// latest transaction.
-fn resolve_signature(client: &RpcClient, input: &str) -> Result<String, String> {
+fn resolve_signature(client: &RpcClient, input: &str) -> Result<String> {
     let input = input.trim();
     if Address::from_str(input).is_ok() {
         let resp: serde_json::Value = client
@@ -200,13 +203,13 @@ fn resolve_signature(client: &RpcClient, input: &str) -> Result<String, String> 
                 RpcRequest::GetSignaturesForAddress,
                 json!([input, { "limit": 1 }]),
             )
-            .map_err(|e| format!("RPC error: {e}"))?;
+            .map_err(Error::rpc)?;
         return resp
             .as_array()
             .and_then(|a| a.first())
             .and_then(|s| s["signature"].as_str())
             .map(String::from)
-            .ok_or_else(|| format!("no transactions found for address {input}"));
+            .ok_or_else(|| Error::NoSignatures(input.to_string()));
     }
     Ok(input.to_string())
 }
@@ -311,10 +314,10 @@ fn program_info(client: &RpcClient, program_data_bytes: &[u8], owner: &str) -> O
 }
 
 /// An explorer-style overview of any account or program address.
-pub fn account_overview(client: &RpcClient, address: &str) -> Result<AccountOverview, String> {
+pub fn account_overview(client: &RpcClient, address: &str) -> Result<AccountOverview> {
     let address = address.trim();
     if Address::from_str(address).is_err() {
-        return Err(format!("not a valid address: {address}"));
+        return Err(Error::InvalidAddress(address.to_string()));
     }
     let Some((owner, lamports, executable, data)) = get_account_raw(client, address) else {
         return Ok(AccountOverview {
@@ -381,18 +384,20 @@ pub fn recent_signatures(
     client: &RpcClient,
     address: &str,
     limit: u64,
-) -> Result<Vec<SigInfo>, String> {
+) -> Result<Vec<SigInfo>> {
     let address = address.trim();
     if Address::from_str(address).is_err() {
-        return Err(format!("not a valid address: {address}"));
+        return Err(Error::InvalidAddress(address.to_string()));
     }
     let resp: serde_json::Value = client
         .send(
             RpcRequest::GetSignaturesForAddress,
             json!([address, { "limit": limit }]),
         )
-        .map_err(|e| format!("RPC error: {e}"))?;
-    let arr = resp.as_array().ok_or("unexpected RPC response")?;
+        .map_err(Error::rpc)?;
+    let arr = resp
+        .as_array()
+        .ok_or_else(|| Error::MalformedRpcResponse("getSignaturesForAddress: not an array".into()))?;
     Ok(arr
         .iter()
         .map(|s| SigInfo {
@@ -407,17 +412,17 @@ pub fn recent_signatures(
 /// Fetch a transaction, decode it, and replay it — bundled into one `Analysis`.
 /// `input` may be a signature or an account/program address (resolved to its
 /// latest transaction).
-pub fn analyze(client: &RpcClient, input: &str) -> Result<Analysis, String> {
+pub fn analyze(client: &RpcClient, input: &str) -> Result<Analysis> {
     let signature = resolve_signature(client, input)?;
     let tx: serde_json::Value = client
         .send(
             RpcRequest::GetTransaction,
             json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
         )
-        .map_err(|e| format!("RPC error: {e}"))?;
+        .map_err(Error::rpc)?;
 
     if tx.is_null() {
-        return Err(format!("transaction not found: {signature}"));
+        return Err(Error::TransactionNotFound(signature.to_string()));
     }
 
     let account_keys = utils::resolve_account_keys(&tx);
@@ -463,20 +468,20 @@ pub fn analyze(client: &RpcClient, input: &str) -> Result<Analysis, String> {
 
 /// Replay a transaction against current on-chain state — the opt-in step that
 /// `analyze` no longer runs automatically.
-pub fn run_replay(client: &RpcClient, signature: &str) -> Result<replay::ReplayResult, String> {
+pub fn run_replay(client: &RpcClient, signature: &str) -> Result<replay::ReplayResult> {
     let tx: serde_json::Value = client
         .send(
             RpcRequest::GetTransaction,
             json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
         )
-        .map_err(|e| format!("RPC error: {e}"))?;
+        .map_err(Error::rpc)?;
     if tx.is_null() {
-        return Err(format!("transaction not found: {signature}"));
+        return Err(Error::TransactionNotFound(signature.to_string()));
     }
     let account_keys = utils::resolve_account_keys(&tx);
     let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let mut r =
-        replay::replay_transaction(client, signature, &account_keys, tx["slot"].as_u64(), &pre);
+    let ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
+    let mut r = ctx.run(&[])?;
     resolve_error_name(client, &mut r);
     Ok(r)
 }
@@ -499,16 +504,16 @@ pub fn simulate(
     mutations: &[replay::Mutation],
     time_travel: replay::TimeTravel,
     features: Vec<replay::FeatureToggle>,
-) -> Result<replay::ReplayResult, String> {
+) -> Result<replay::ReplayResult> {
     let tx: serde_json::Value = client
         .send(
             RpcRequest::GetTransaction,
             json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
         )
-        .map_err(|e| format!("RPC error: {e}"))?;
+        .map_err(Error::rpc)?;
 
     if tx.is_null() {
-        return Err(format!("transaction not found: {signature}"));
+        return Err(Error::TransactionNotFound(signature.to_string()));
     }
 
     let account_keys = utils::resolve_account_keys(&tx);
@@ -517,7 +522,7 @@ pub fn simulate(
         replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
     ctx.set_time_travel(time_travel);
     ctx.set_feature_toggles(features);
-    let mut r = ctx.run(mutations);
+    let mut r = ctx.run(mutations)?;
     resolve_error_name(client, &mut r);
     Ok(r)
 }
@@ -713,15 +718,15 @@ pub fn decode_account_with(
     client: &RpcClient,
     address: &str,
     user_idl: Option<&serde_json::Value>,
-) -> Result<decode::AccountInfo, String> {
+) -> Result<decode::AccountInfo> {
     let address = address.trim();
     if Address::from_str(address).is_err() {
-        return Err(format!("not a valid address: {address}"));
+        return Err(Error::InvalidAddress(address.to_string()));
     }
     let mut info = decode::describe_accounts(client, &[address.to_string()])
         .into_iter()
         .next()
-        .ok_or_else(|| format!("account not found: {address}"))?;
+        .ok_or_else(|| Error::AccountNotFound(address.to_string()))?;
 
     // A supplied IDL wins: it's authoritative for this program, and it beats the
     // inferred layout we may have fallen back to.
@@ -731,7 +736,7 @@ pub fn decode_account_with(
                 RpcRequest::GetAccountInfo,
                 json!([address, { "encoding": "base64" }]),
             )
-            .map_err(|e| format!("RPC error: {e}"))?;
+            .map_err(Error::rpc)?;
         if let Some(b64) = resp["value"]["data"][0].as_str() {
             use base64::Engine;
             if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
@@ -749,14 +754,11 @@ pub fn decode_account_with(
 pub fn program_instructions(
     client: &RpcClient,
     program_id: &str,
-) -> Result<Vec<idl::IdlInstruction>, String> {
+) -> Result<Vec<idl::IdlInstruction>> {
     let addr = Address::from_str(program_id.trim())
-        .map_err(|_| format!("bad program id: {program_id}"))?;
-    let idl = idl::fetch_idl_json(client, addr).ok_or_else(|| {
-        format!(
-            "{program_id} publishes no on-chain Anchor IDL — paste the IDL JSON to use the builder"
-        )
-    })?;
+        .map_err(|_| Error::InvalidAddress(program_id.to_string()))?;
+    let idl = idl::fetch_idl_json(client, addr)
+        .ok_or_else(|| Error::NoIdl(program_id.to_string()))?;
     Ok(idl::instructions(&idl))
 }
 
@@ -773,15 +775,15 @@ pub fn simulate_preflight(
     client: &RpcClient,
     tx_b64: &str,
     mutations: &[replay::Mutation],
-) -> Result<replay::ReplayResult, String> {
+) -> Result<replay::ReplayResult> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(tx_b64.trim())
-        .map_err(|e| format!("bad base64 transaction: {e}"))?;
-    let tx: solana_transaction::versioned::VersionedTransaction = bincode::deserialize(&bytes)
-        .map_err(|e| format!("could not deserialize transaction: {e}"))?;
+        .map_err(|e| Error::TxDecode(format!("bad base64: {e}")))?;
+    let tx: solana_transaction::versioned::VersionedTransaction =
+        bincode::deserialize(&bytes).map_err(|e| Error::TxDecode(e.to_string()))?;
     let ctx = replay::preflight_context(client, tx)?;
-    Ok(ctx.run(mutations))
+    ctx.run(mutations)
 }
 
 /// Pre-flight simulate and return the full developer report: outcome, a
@@ -792,19 +794,19 @@ pub fn preflight_report(
     mutations: &[replay::Mutation],
     time_travel: replay::TimeTravel,
     features: Vec<replay::FeatureToggle>,
-) -> Result<SimulationReport, String> {
+) -> Result<SimulationReport> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(tx_b64.trim())
-        .map_err(|e| format!("bad base64 transaction: {e}"))?;
-    let tx: solana_transaction::versioned::VersionedTransaction = bincode::deserialize(&bytes)
-        .map_err(|e| format!("could not deserialize transaction: {e}"))?;
+        .map_err(|e| Error::TxDecode(format!("bad base64: {e}")))?;
+    let tx: solana_transaction::versioned::VersionedTransaction =
+        bincode::deserialize(&bytes).map_err(|e| Error::TxDecode(e.to_string()))?;
     let mut ctx = replay::preflight_context(client, tx)?;
     let warped = !time_travel.is_noop();
     ctx.set_time_travel(time_travel);
     ctx.set_feature_toggles(features);
     let clock_desc = warped.then(|| ctx.describe_clock());
-    let (replay, raw_diffs) = ctx.run_with_diff(mutations);
+    let (replay, raw_diffs) = ctx.run_with_diff(mutations)?;
     Ok(SimulationReport {
         clock: clock_desc,
         explain: (!replay.success)
@@ -822,15 +824,15 @@ pub fn replay_report(
     mutations: &[replay::Mutation],
     time_travel: replay::TimeTravel,
     features: Vec<replay::FeatureToggle>,
-) -> Result<SimulationReport, String> {
+) -> Result<SimulationReport> {
     let tx: serde_json::Value = client
         .send(
             RpcRequest::GetTransaction,
             json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
         )
-        .map_err(|e| format!("RPC error: {e}"))?;
+        .map_err(Error::rpc)?;
     if tx.is_null() {
-        return Err(format!("transaction not found: {signature}"));
+        return Err(Error::TransactionNotFound(signature.to_string()));
     }
     let account_keys = utils::resolve_account_keys(&tx);
     let pre = replay::PreState::from_meta(&tx, &account_keys);
@@ -840,7 +842,7 @@ pub fn replay_report(
     ctx.set_time_travel(time_travel);
     ctx.set_feature_toggles(features);
     let clock_desc = warped.then(|| ctx.describe_clock());
-    let (replay, raw_diffs) = ctx.run_with_diff(mutations);
+    let (replay, raw_diffs) = ctx.run_with_diff(mutations)?;
     Ok(SimulationReport {
         clock: clock_desc,
         explain: (!replay.success)
@@ -860,15 +862,15 @@ pub fn simulate_suite(
     scenarios: Vec<replay::ScenarioSpec>,
     time_travel: replay::TimeTravel,
     features: Vec<replay::FeatureToggle>,
-) -> Result<Vec<replay::ScenarioOutcome>, String> {
+) -> Result<Vec<replay::ScenarioOutcome>> {
     let tx: serde_json::Value = client
         .send(
             RpcRequest::GetTransaction,
             json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
         )
-        .map_err(|e| format!("RPC error: {e}"))?;
+        .map_err(Error::rpc)?;
     if tx.is_null() {
-        return Err(format!("transaction not found: {signature}"));
+        return Err(Error::TransactionNotFound(signature.to_string()));
     }
     let account_keys = utils::resolve_account_keys(&tx);
     let pre = replay::PreState::from_meta(&tx, &account_keys);
@@ -900,20 +902,20 @@ pub fn simulate_suite(
         }
     }
 
-    Ok(replay::run_suite(&ctx, &scenarios))
+    replay::run_suite(&ctx, &scenarios)
 }
 
 /// Capture a transaction's full state into a portable, self-contained fixture.
 /// Freeze once, then replay deterministically forever with no RPC.
-pub fn capture_fixture(client: &RpcClient, signature: &str) -> Result<fixture::Fixture, String> {
+pub fn capture_fixture(client: &RpcClient, signature: &str) -> Result<fixture::Fixture> {
     let tx: serde_json::Value = client
         .send(
             RpcRequest::GetTransaction,
             json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
         )
-        .map_err(|e| format!("RPC error: {e}"))?;
+        .map_err(Error::rpc)?;
     if tx.is_null() {
-        return Err(format!("transaction not found: {signature}"));
+        return Err(Error::TransactionNotFound(signature.to_string()));
     }
     let slot = tx["slot"].as_u64();
     let account_keys = utils::resolve_account_keys(&tx);
@@ -922,7 +924,7 @@ pub fn capture_fixture(client: &RpcClient, signature: &str) -> Result<fixture::F
     // Freeze the exact slot/clock the context runs at (build_context anchors to
     // "now"), so a reloaded fixture reproduces this live replay rather than the
     // transaction's original slot.
-    Ok(ctx.to_fixture(signature))
+    ctx.to_fixture(signature)
 }
 
 /// Run a scenario suite against a frozen fixture — deterministic, offline, CI-safe.
@@ -932,11 +934,11 @@ pub fn run_fixture_suite(
     scenarios: Vec<replay::ScenarioSpec>,
     time_travel: replay::TimeTravel,
     features: Vec<replay::FeatureToggle>,
-) -> Result<Vec<replay::ScenarioOutcome>, String> {
+) -> Result<Vec<replay::ScenarioOutcome>> {
     let mut ctx = replay::ReplayContext::from_fixture(fx)?;
     ctx.set_time_travel(time_travel);
     ctx.set_feature_toggles(features);
-    Ok(replay::run_suite(&ctx, &scenarios))
+    replay::run_suite(&ctx, &scenarios)
 }
 
 #[cfg(test)]

@@ -277,7 +277,9 @@ fn decode_lookup_table(data: &[u8]) -> Option<DecodedAccount> {
 /// Stake account: 4-byte enum discriminant, then Meta (authorized + lockup) and,
 /// when delegated, the Stake struct.
 fn decode_stake(data: &[u8]) -> Option<DecodedAccount> {
-    if data.len() < 120 {
+    // Meta ends at 124 (lockup custodian pubkey at 92..124) — anything shorter
+    // can't be a well-formed stake account and must not be sliced.
+    if data.len() < 124 {
         return None;
     }
     let state = match read_u32(data, 0) {
@@ -519,8 +521,11 @@ pub fn describe_accounts(client: &RpcClient, account_keys: &[String]) -> Vec<Acc
                 .or_else(|| infer_layout(&data))
         };
 
+        let Some(address) = account_keys.get(i) else {
+            break; // RPC returned more entries than keys requested — stop, don't panic
+        };
         out.push(AccountInfo {
-            address: account_keys[i].clone(),
+            address: address.clone(),
             owner,
             lamports,
             executable,

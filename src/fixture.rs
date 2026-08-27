@@ -47,12 +47,15 @@ pub struct Fixture {
 }
 
 impl Fixture {
-    pub fn to_json(&self) -> Result<String, String> {
-        serde_json::to_string_pretty(self).map_err(|e| format!("serialize fixture: {e}"))
+    /// Serialize to pretty JSON — the on-disk fixture format.
+    pub fn to_json(&self) -> crate::error::Result<String> {
+        serde_json::to_string_pretty(self)
+            .map_err(|e| crate::error::Error::Fixture(format!("serialize: {e}")))
     }
 
-    pub fn from_json(s: &str) -> Result<Fixture, String> {
-        serde_json::from_str(s).map_err(|e| format!("parse fixture: {e}"))
+    /// Parse a fixture from its JSON form.
+    pub fn from_json(s: &str) -> crate::error::Result<Fixture> {
+        serde_json::from_str(s).map_err(|e| crate::error::Error::Fixture(format!("parse: {e}")))
     }
 
     /// A one-line human summary, e.g. for CLI output.
