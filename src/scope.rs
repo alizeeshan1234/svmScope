@@ -485,11 +485,12 @@ pub struct Replay {
 }
 
 impl Replay {
-    /// Rebuild a replay from a frozen fixture — fully offline, no RPC.
+    /// Rebuild a replay from a frozen fixture — fully offline, no RPC. A v2
+    /// fixture restores the recorded on-chain outcome and captured IDLs too.
     pub fn from_fixture(fx: &Fixture) -> Result<Replay> {
         Ok(Replay {
             ctx: ReplayContext::from_fixture(fx)?,
-            recorded: None,
+            recorded: fx.recorded.clone(),
             time_travel: TimeTravel::default(),
         })
     }
@@ -602,7 +603,7 @@ impl Replay {
     /// Run a suite of scenarios, each against a fresh copy of the state.
     /// Mutations across the whole suite are validated before anything executes.
     pub fn run_suite(&self, scenarios: &[Scenario]) -> Result<Vec<ScenarioOutcome>> {
-        crate::replay::run_suite(&self.ctx, scenarios)
+        crate::replay::run_suite(&self.ctx, self.recorded.as_ref(), scenarios)
     }
 
     /// Run one named scenario — mutations plus the checks that must hold —
@@ -623,8 +624,12 @@ impl Replay {
     }
 
     /// Freeze this world into a portable [`Fixture`] for offline CI replay.
+    /// Captures the loaded IDLs and the recorded on-chain outcome, so field
+    /// asserts and [`Check::matches_onchain`] work offline too.
     pub fn to_fixture(&self) -> Result<Fixture> {
-        self.ctx.to_fixture()
+        let mut fx = self.ctx.to_fixture()?;
+        fx.recorded = self.recorded.clone();
+        Ok(fx)
     }
 }
 

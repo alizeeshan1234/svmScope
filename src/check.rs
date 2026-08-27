@@ -60,6 +60,8 @@ pub(crate) enum CheckKind {
     LogContains(String),
     /// Compute units consumed satisfy the comparison.
     ComputeUnits(Cmp),
+    /// The local outcome (success/failure) matches the recorded on-chain one.
+    MatchesOnchain,
     /// Post-replay state checks on one account.
     Account(Vec<AccountAssert>),
 }
@@ -90,6 +92,13 @@ impl Check {
     /// A log line (or the error) contains this text.
     pub fn log_contains(text: impl Into<String>) -> Check {
         Check(CheckKind::LogContains(text.into()))
+    }
+
+    /// The local replay's outcome matches what actually happened on-chain —
+    /// the regression check for frozen fixtures. Needs a recorded outcome
+    /// ([`crate::Replay::recorded`]); fails with an explanation otherwise.
+    pub fn matches_onchain() -> Check {
+        Check(CheckKind::MatchesOnchain)
     }
 
     /// Compute units consumed satisfy the comparison —

@@ -793,11 +793,14 @@ impl ReplayContext {
             })
             .collect();
         Ok(Fixture {
+            version: crate::fixture::FIXTURE_VERSION,
             signature: self.signature.clone(),
             captured_slot: self.slot,
             captured_block_time: self.block_time,
             tx_b64: b64_encode(&tx_bytes),
             entries,
+            idls: self.idls.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            recorded: None, // the Replay layer fills this in — it knows the outcome
         })
     }
 
@@ -854,7 +857,9 @@ impl ReplayContext {
             slot: fx.captured_slot,
             block_time: fx.captured_block_time,
             time_travel: TimeTravel::default(),
-            idls: HashMap::new(),
+            // v2 fixtures carry their IDLs, so named-field asserts, error
+            // names, and decoded diffs resolve offline too.
+            idls: fx.idls.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             feature_toggles: Vec::new(),
         })
     }
@@ -1327,6 +1332,7 @@ impl ReplayContext {
 /// A scenario with no outcome check implicitly asserts success.
 pub(crate) fn run_suite(
     ctx: &ReplayContext,
+    recorded: Option<&crate::scope::OnchainRecord>,
     scenarios: &[crate::check::Scenario],
 ) -> Result<Vec<ScenarioOutcome>> {
     use crate::check::CheckKind;
@@ -1375,6 +1381,22 @@ pub(crate) fn run_suite(
                     CheckKind::ComputeUnits(c) => asserts.push(AssertOutcome {
                         description: format!("compute units {} {}", c.op.symbol(), c.value),
                         pass: c.op.test_i128(actual.compute_units as i128, c.value),
+                    }),
+                    CheckKind::MatchesOnchain => asserts.push(match recorded {
+                        Some(r) => AssertOutcome {
+                            description: format!(
+                                "matches the on-chain outcome ({})",
+                                if r.success { "success" } else { "failure" }
+                            ),
+                            pass: actual.success == r.success,
+                        },
+                        None => AssertOutcome {
+                            description:
+                                "matches the on-chain outcome — no recorded outcome available \
+                                 (pre-flight tx, or a v1 fixture; re-capture to record it)"
+                                    .into(),
+                            pass: false,
+                        },
                     }),
                     CheckKind::Account(list) => {
                         for a in list {
@@ -1521,7 +1543,7 @@ mod tests {
             .mutate(typo)
             .check(crate::check::Check::revert())];
         assert!(matches!(
-            run_suite(&ctx, &suite),
+            run_suite(&ctx, None, &suite),
             Err(Error::MutationTargetMissing(_))
         ));
     }

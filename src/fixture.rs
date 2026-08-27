@@ -7,10 +7,20 @@
 //! fixture is a real, hermetic regression test you can commit and run in CI.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+use crate::scope::OnchainRecord;
+
+/// The highest fixture schema version this build reads and writes.
+pub const FIXTURE_VERSION: u32 = 2;
+
+fn default_version() -> u32 {
+    1 // a fixture written before the version field existed
+}
 
 /// One captured account: either a data account (loaded verbatim) or a program
 /// (its resolved ELF bytecode, ready for LiteSVM's loader).
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum FixtureEntry {
     Data {
@@ -28,8 +38,12 @@ pub enum FixtureEntry {
 }
 
 /// A portable, self-contained snapshot of a transaction and its world.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Fixture {
+    /// Schema version. v1 files (no field) still load; this build writes v2,
+    /// which adds `idls` and `recorded`.
+    #[serde(default = "default_version")]
+    pub version: u32,
     pub signature: String,
     /// The slot the live context actually ran at — the SVM clock is set to this on
     /// reload, so a frozen replay uses the *same* slot the live one did (not the
@@ -44,6 +58,14 @@ pub struct Fixture {
     /// base64 of the bincode-serialized `VersionedTransaction`.
     pub tx_b64: String,
     pub entries: Vec<FixtureEntry>,
+    /// On-chain Anchor IDLs by program id, captured so named-field asserts,
+    /// error names, and decoded diffs all resolve **offline**. (v2+)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub idls: BTreeMap<String, serde_json::Value>,
+    /// The transaction's actual on-chain outcome, for comparing frozen replays
+    /// against reality (`Check::matches_onchain`). (v2+)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded: Option<OnchainRecord>,
 }
 
 impl Fixture {
@@ -53,9 +75,19 @@ impl Fixture {
             .map_err(|e| crate::error::Error::Fixture(format!("serialize: {e}")))
     }
 
-    /// Parse a fixture from its JSON form.
+    /// Parse a fixture from its JSON form. Reads any version up to
+    /// [`FIXTURE_VERSION`]; a newer file is an error, not a misread.
     pub fn from_json(s: &str) -> crate::error::Result<Fixture> {
-        serde_json::from_str(s).map_err(|e| crate::error::Error::Fixture(format!("parse: {e}")))
+        let fx: Fixture = serde_json::from_str(s)
+            .map_err(|e| crate::error::Error::Fixture(format!("parse: {e}")))?;
+        if fx.version > FIXTURE_VERSION {
+            return Err(crate::error::Error::Fixture(format!(
+                "unsupported fixture version {} (this build reads <= {FIXTURE_VERSION}) — \
+                 update svmscope, or re-capture the fixture",
+                fx.version
+            )));
+        }
+        Ok(fx)
     }
 
     /// A one-line human summary, e.g. for CLI output.

@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let signature = args
         .get(1)
-        .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]\n       svmscope freeze <transaction-signature> [-o fixture.json]\n       svmscope test <scenarios.json>")?;
+        .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]\n       svmscope freeze <transaction-signature> [-o fixture.json]\n       svmscope test <scenarios.json>\n       svmscope upgrade <fixture.json>")?;
 
     // Cluster/RPC selection: --cluster <mainnet|devnet|testnet|localnet> or --rpc <url>.
     let flag = |name: &str| {
@@ -57,6 +57,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             Some(j) => println!("{}", serde_json::to_string_pretty(&j)?),
             None => println!("no on-chain IDL for {prog}"),
         }
+        return Ok(());
+    }
+
+    // Upgrade mode: `svmscope upgrade <fixture.json>` re-captures an old
+    // fixture in the current schema (adds captured IDLs + the on-chain
+    // outcome), preserving the original signature. Needs live RPC.
+    if signature == "upgrade" {
+        let path = args.get(2).ok_or("usage: svmscope upgrade <fixture.json>")?;
+        let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        let old = svmscope::Fixture::from_json(&text)?;
+        eprintln!("re-capturing {}…", old.signature);
+        let fx = scope.capture(&old.signature)?;
+        std::fs::write(path, fx.to_json()?).map_err(|e| format!("write {path}: {e}"))?;
+        eprintln!("wrote {path} (v{}, {})", fx.version, fx.summary());
         return Ok(());
     }
 
