@@ -17,7 +17,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use svmscope::api::{MutationInput, SuiteRequest};
+use svmscope::spec::{MutationInput, SuiteRequest};
 use svmscope::replay::{Mutation, ReplayResult, ScenarioOutcome};
 use svmscope::{Analysis, Scope};
 
@@ -200,7 +200,7 @@ struct SimRequest {
     time_travel: svmscope::replay::TimeTravel,
     /// Optional runtime feature-gate toggles — replay as if a feature were (in)active.
     #[serde(default)]
-    features: Vec<svmscope::api::FeatureInput>,
+    features: Vec<svmscope::spec::FeatureInput>,
     #[serde(default)]
     cluster: Option<String>,
     #[serde(default)]
@@ -261,7 +261,7 @@ async fn simulate_handler(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let features =
-        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        svmscope::spec::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
@@ -306,11 +306,11 @@ async fn suite_handler(
     let scenarios = req
         .scenarios
         .into_iter()
-        .map(|s| s.into_spec())
+        .map(|s| s.into_scenario())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let features =
-        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        svmscope::spec::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let result = tokio::task::spawn_blocking(
         move || -> Result<Vec<ScenarioOutcome>, svmscope::Error> {
@@ -346,7 +346,7 @@ struct PreflightRequest {
     time_travel: svmscope::replay::TimeTravel,
     /// Optional runtime feature-gate toggles.
     #[serde(default)]
-    features: Vec<svmscope::api::FeatureInput>,
+    features: Vec<svmscope::spec::FeatureInput>,
     #[serde(default)]
     cluster: Option<String>,
     #[serde(default)]
@@ -439,7 +439,7 @@ async fn preflight_report_handler(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let features =
-        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        svmscope::spec::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(
@@ -474,7 +474,7 @@ async fn replay_report_handler(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let features =
-        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        svmscope::spec::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(

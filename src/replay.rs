@@ -883,6 +883,7 @@ fn fetch_transaction(client: &RpcClient, signature: &str) -> Result<VersionedTra
 ///
 /// `Data` replaces an account's bytes wholesale; `DataPatch` overwrites a slice
 /// at an offset (how you'd flip a token balance or an oracle price in place).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mutation {
     Lamports {
         address: String,
@@ -994,7 +995,8 @@ fn to_replay_result(result: TransactionResult) -> ReplayResult {
 // ---------------------------------------------------------------------------
 
 /// The outcome a scenario asserts.
-pub enum Expect {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Expect {
     /// The transaction must succeed.
     Success,
     /// The transaction must fail (any error).
@@ -1007,7 +1009,7 @@ pub enum Expect {
 }
 
 impl Expect {
-    fn matches(&self, r: &ReplayResult) -> bool {
+    pub(crate) fn matches(&self, r: &ReplayResult) -> bool {
         match self {
             Expect::Success => r.success,
             Expect::Revert => !r.success,
@@ -1020,7 +1022,7 @@ impl Expect {
         }
     }
 
-    fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         match self {
             Expect::Success => "succeeds".into(),
             Expect::Revert => "reverts".into(),
@@ -1031,8 +1033,8 @@ impl Expect {
 }
 
 /// A comparison operator for numeric state assertions.
-#[derive(Clone, Copy, Debug)]
-pub enum CmpOp {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CmpOp {
     Eq,
     Ne,
     Lt,
@@ -1042,10 +1044,7 @@ pub enum CmpOp {
 }
 
 impl CmpOp {
-    fn test(self, a: u64, b: u64) -> bool {
-        self.test_i128(a as i128, b as i128)
-    }
-    fn test_i128(self, a: i128, b: i128) -> bool {
+    pub(crate) fn test_i128(self, a: i128, b: i128) -> bool {
         match self {
             CmpOp::Eq => a == b,
             CmpOp::Ne => a != b,
@@ -1055,7 +1054,7 @@ impl CmpOp {
             CmpOp::Ge => a >= b,
         }
     }
-    pub fn symbol(self) -> &'static str {
+    pub(crate) fn symbol(self) -> &'static str {
         match self {
             CmpOp::Eq => "==",
             CmpOp::Ne => "!=",
@@ -1069,16 +1068,16 @@ impl CmpOp {
 
 /// A check on an account's state *after* the transaction replays. This is what
 /// makes a scenario a real test — asserting on resulting state, not just pass/fail.
-#[derive(Debug)]
-pub enum StateCheck {
+#[derive(Debug, Clone)]
+pub(crate) enum StateCheck {
     /// The account's lamports satisfy `op value`.
-    Lamports { op: CmpOp, value: u64 },
+    Lamports { op: CmpOp, value: i128 },
     /// The little-endian u64 at `offset` satisfies `op value`
     /// (e.g. an SPL token amount at offset 64).
     U64At {
         offset: usize,
         op: CmpOp,
-        value: u64,
+        value: i128,
     },
     /// The *change* in lamports (post - pre) satisfies `op value` (may be negative)
     /// — e.g. "the fee vault gained ≥ N": `LamportsDelta { Ge, N }`.
@@ -1103,10 +1102,10 @@ pub enum StateCheck {
 }
 
 /// A post-replay assertion targeting one account.
-#[derive(Debug)]
-pub struct AccountAssert {
-    pub address: String,
-    pub check: StateCheck,
+#[derive(Debug, Clone)]
+pub(crate) struct AccountAssert {
+    pub(crate) address: String,
+    pub(crate) check: StateCheck,
 }
 
 /// Read a little-endian u64 at `offset`, or 0 if out of range.
@@ -1203,7 +1202,7 @@ impl AccountAssert {
         let acc = svm.get_account(&addr);
         match &self.check {
             StateCheck::Lamports { op, value } => {
-                Ok(op.test(acc.map(|a| a.lamports).unwrap_or(0), *value))
+                Ok(op.test_i128(acc.map(|a| a.lamports).unwrap_or(0) as i128, *value))
             }
             StateCheck::U64At { offset, op, value } => {
                 let acc = acc.ok_or_else(|| Error::AccountNotFound(self.address.clone()))?;
@@ -1213,7 +1212,7 @@ impl AccountAssert {
                         len: acc.data.len(),
                     });
                 }
-                Ok(op.test(read_u64_at(&acc.data, *offset), *value))
+                Ok(op.test_i128(read_u64_at(&acc.data, *offset) as i128, *value))
             }
             StateCheck::LamportsDelta { op, value } => {
                 let pre = ctx
@@ -1254,15 +1253,6 @@ fn short(s: &str) -> String {
     } else {
         s.to_string()
     }
-}
-
-/// One named test case: mutations, the transaction-level outcome it asserts, and
-/// optional post-replay state assertions.
-pub struct ScenarioSpec {
-    pub name: String,
-    pub mutations: Vec<Mutation>,
-    pub expect: Expect,
-    pub asserts: Vec<AccountAssert>,
 }
 
 /// The result of one post-replay assertion.
@@ -1333,7 +1323,14 @@ impl ReplayContext {
 /// Every scenario's mutations are validated **before anything runs** — a typo'd
 /// mutation address fails the whole suite with a hard error instead of showing
 /// up as a revert that an `expect: revert` scenario would silently accept.
-pub fn run_suite(ctx: &ReplayContext, scenarios: &[ScenarioSpec]) -> Result<Vec<ScenarioOutcome>> {
+///
+/// A scenario with no outcome check implicitly asserts success.
+pub(crate) fn run_suite(
+    ctx: &ReplayContext,
+    scenarios: &[crate::check::Scenario],
+) -> Result<Vec<ScenarioOutcome>> {
+    use crate::check::CheckKind;
+
     for s in scenarios {
         ctx.validate_mutations(&s.mutations)?;
     }
@@ -1341,29 +1338,68 @@ pub fn run_suite(ctx: &ReplayContext, scenarios: &[ScenarioSpec]) -> Result<Vec<
         .iter()
         .map(|s| {
             let (actual, svm) = ctx.run_full(&s.mutations)?;
-            let outcome_pass = s.expect.matches(&actual);
 
-            let asserts: Vec<AssertOutcome> = s
-                .asserts
+            // Transaction-level outcome: every Outcome check must hold; a
+            // scenario that declares none implicitly asserts success.
+            let outcomes: Vec<&Expect> = s
+                .checks
                 .iter()
-                .map(|a| match a.eval(&svm, ctx) {
-                    Ok(pass) => AssertOutcome {
-                        description: a.describe(),
-                        pass,
-                    },
-                    // A failed eval (missing account, unknown field, bad offset)
-                    // is a failed assertion — and the description says why.
-                    Err(e) => AssertOutcome {
-                        description: format!("{} — {e}", a.describe()),
-                        pass: false,
-                    },
+                .filter_map(|c| match &c.0 {
+                    CheckKind::Outcome(e) => Some(e),
+                    _ => None,
                 })
                 .collect();
+            let implicit = [Expect::Success];
+            let effective: &[&Expect] = if outcomes.is_empty() {
+                &[&implicit[0]]
+            } else {
+                &outcomes
+            };
+            let outcome_pass = effective.iter().all(|e| e.matches(&actual));
+            let expect = effective
+                .iter()
+                .map(|e| e.describe())
+                .collect::<Vec<_>>()
+                .join(" & ");
+
+            // Result- and state-level checks all report as assert outcomes.
+            let mut asserts: Vec<AssertOutcome> = Vec::new();
+            for c in &s.checks {
+                match &c.0 {
+                    CheckKind::Outcome(_) => {}
+                    CheckKind::LogContains(t) => asserts.push(AssertOutcome {
+                        description: format!("logs contain \"{t}\""),
+                        pass: actual.error.as_deref().is_some_and(|e| e.contains(t))
+                            || actual.logs.iter().any(|l| l.contains(t)),
+                    }),
+                    CheckKind::ComputeUnits(c) => asserts.push(AssertOutcome {
+                        description: format!("compute units {} {}", c.op.symbol(), c.value),
+                        pass: c.op.test_i128(actual.compute_units as i128, c.value),
+                    }),
+                    CheckKind::Account(list) => {
+                        for a in list {
+                            asserts.push(match a.eval(&svm, ctx) {
+                                Ok(pass) => AssertOutcome {
+                                    description: a.describe(),
+                                    pass,
+                                },
+                                // A failed eval (missing account, unknown field,
+                                // bad offset) is a failed assertion — and the
+                                // description says why.
+                                Err(e) => AssertOutcome {
+                                    description: format!("{} — {e}", a.describe()),
+                                    pass: false,
+                                },
+                            });
+                        }
+                    }
+                }
+            }
 
             let pass = outcome_pass && asserts.iter().all(|a| a.pass);
             Ok(ScenarioOutcome {
                 name: s.name.clone(),
-                expect: s.expect.describe(),
+                expect,
                 pass,
                 actual,
                 asserts,
@@ -1481,12 +1517,9 @@ mod tests {
         ));
 
         // A whole suite fails fast — before any scenario executes.
-        let suite = [ScenarioSpec {
-            name: "drain".into(),
-            mutations: vec![typo],
-            expect: Expect::Revert,
-            asserts: vec![],
-        }];
+        let suite = [crate::check::Scenario::new("drain")
+            .mutate(typo)
+            .check(crate::check::Check::revert())];
         assert!(matches!(
             run_suite(&ctx, &suite),
             Err(Error::MutationTargetMissing(_))

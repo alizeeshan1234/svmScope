@@ -28,9 +28,9 @@ use crate::analyze::{
 };
 use crate::error::{Error, Result};
 use crate::fixture::Fixture;
+use crate::check::{Check, Scenario};
 use crate::replay::{
-    FeatureToggle, Mutation, PreState, ReplayContext, ReplayResult, ScenarioOutcome, ScenarioSpec,
-    TimeTravel,
+    FeatureToggle, Mutation, PreState, ReplayContext, ReplayResult, ScenarioOutcome, TimeTravel,
 };
 use crate::{cpi_tree, decode, diffs, idl, ixname, utils};
 
@@ -601,8 +601,25 @@ impl Replay {
 
     /// Run a suite of scenarios, each against a fresh copy of the state.
     /// Mutations across the whole suite are validated before anything executes.
-    pub fn run_suite(&self, scenarios: &[ScenarioSpec]) -> Result<Vec<ScenarioOutcome>> {
+    pub fn run_suite(&self, scenarios: &[Scenario]) -> Result<Vec<ScenarioOutcome>> {
         crate::replay::run_suite(&self.ctx, scenarios)
+    }
+
+    /// Run one named scenario — mutations plus the checks that must hold —
+    /// and report it. Sugar over [`Replay::run_suite`] for the single case.
+    pub fn verify(
+        &self,
+        name: impl Into<String>,
+        mutations: &[Mutation],
+        checks: &[Check],
+    ) -> Result<ScenarioOutcome> {
+        let scenario = Scenario {
+            name: name.into(),
+            mutations: mutations.to_vec(),
+            checks: checks.to_vec(),
+        };
+        let mut outcomes = self.run_suite(std::slice::from_ref(&scenario))?;
+        Ok(outcomes.remove(0))
     }
 
     /// Freeze this world into a portable [`Fixture`] for offline CI replay.

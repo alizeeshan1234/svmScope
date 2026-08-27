@@ -1,8 +1,9 @@
-//! Wire types shared by the web server and the CLI test-runner.
+//! The JSON suite-file format — the on-disk spec for `svmscope test`, and the
+//! wire types the web server and browser share.
 //!
 //! Mutations and scenarios arrive as JSON (from the browser, or a `.json` test
 //! file); these `Deserialize` types convert them into the strongly-typed
-//! `replay::{Mutation, ScenarioSpec}` the engine runs.
+//! [`crate::Scenario`] / [`crate::replay::Mutation`] the engine runs.
 
 use serde::Deserialize;
 use solana_address::Address;
@@ -10,9 +11,8 @@ use std::str::FromStr;
 
 use crate::error::{Error, Result};
 
-use crate::replay::{
-    AccountAssert, CmpOp, Expect, FeatureToggle, Mutation, ScenarioSpec, StateCheck, TimeTravel,
-};
+use crate::check::{Check, CheckKind, Scenario};
+use crate::replay::{AccountAssert, CmpOp, Expect, FeatureToggle, Mutation, StateCheck, TimeTravel};
 
 /// A runtime feature-gate toggle for a replay: `{"id":"<feature pubkey>","active":true}`.
 /// `active` true = activate the gate (e.g. test a not-yet-live feature early),
@@ -161,17 +161,17 @@ impl AssertInput {
         let check = match self.kind.as_str() {
             "lamports" => StateCheck::Lamports {
                 op,
-                value: unsigned()?,
+                value: unsigned()? as i128,
             },
             "u64" => StateCheck::U64At {
                 offset: self.offset,
                 op,
-                value: unsigned()?,
+                value: unsigned()? as i128,
             },
             "token_amount" => StateCheck::U64At {
                 offset: 64,
                 op,
-                value: unsigned()?,
+                value: unsigned()? as i128,
             },
             "lamports_delta" => StateCheck::LamportsDelta {
                 op,
@@ -223,7 +223,8 @@ fn default_expect() -> String {
 }
 
 impl ScenarioInput {
-    pub fn into_spec(self) -> Result<ScenarioSpec> {
+    /// Convert the JSON shape into an engine [`Scenario`].
+    pub fn into_scenario(self) -> Result<Scenario> {
         let expect = match self.expect.as_str() {
             "success" | "pass" => Expect::Success,
             "revert" | "fail" => match self.contains {
@@ -237,16 +238,14 @@ impl ScenarioInput {
             .into_iter()
             .map(MutationInput::into_mutation)
             .collect::<Result<_>>()?;
-        let asserts = self
-            .asserts
-            .into_iter()
-            .map(AssertInput::into_assert)
-            .collect::<Result<_>>()?;
-        Ok(ScenarioSpec {
+        let mut checks = vec![Check(CheckKind::Outcome(expect))];
+        for a in self.asserts {
+            checks.push(Check(CheckKind::Account(vec![a.into_assert()?])));
+        }
+        Ok(Scenario {
             name: self.name,
             mutations,
-            expect,
-            asserts,
+            checks,
         })
     }
 }
@@ -378,9 +377,10 @@ mod tests {
             r#"{"name":"drain","expect":"revert","contains":"Slippage","mutations":[],"asserts":[]}"#,
         )
         .unwrap();
-        match s.into_spec().unwrap().expect {
-            Expect::RevertContains(t) => assert_eq!(t, "Slippage"),
-            _ => panic!("expected RevertContains"),
+        let scenario = s.into_scenario().unwrap();
+        match &scenario.checks[0].0 {
+            CheckKind::Outcome(Expect::RevertContains(t)) => assert_eq!(t, "Slippage"),
+            other => panic!("expected RevertContains, got {other:?}"),
         }
     }
 }

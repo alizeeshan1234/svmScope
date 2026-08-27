@@ -63,7 +63,7 @@
 //! at <https://svmscope.vercel.app> — identical results in all four.
 
 pub mod analyze;
-pub mod api;
+pub mod check;
 pub mod compute;
 pub mod cpi_tree;
 pub mod decode;
@@ -75,12 +75,14 @@ pub mod ixname;
 pub mod replay;
 pub mod report;
 pub mod scope;
+pub mod spec;
 pub mod utils;
 
 pub use analyze::{
     AccountDiff, AccountOverview, Analysis, Explanation, FieldDiff, Overview, ProgramInfo, SigInfo,
     SimulationReport,
 };
+pub use check::{AccountCheck, Check, Cmp, Scenario};
 pub use error::{Error, Result};
 pub use fixture::Fixture;
 pub use replay::Mutation;

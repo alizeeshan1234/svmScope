@@ -7,7 +7,7 @@ use std::env;
 use std::error::Error;
 use std::str::FromStr;
 
-use svmscope::{api, replay, Replay, Scope};
+use svmscope::{replay, spec, Replay, Scope};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
@@ -155,15 +155,15 @@ fn load_and_run_suite(
     path: &str,
 ) -> Result<(String, Vec<replay::ScenarioOutcome>), Box<dyn Error>> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
-    let req: api::SuiteRequest =
+    let req: spec::SuiteRequest =
         serde_json::from_str(&text).map_err(|e| format!("bad scenario file: {e}"))?;
 
     let scenarios = req
         .scenarios
         .into_iter()
-        .map(|s| s.into_spec())
+        .map(|s| s.into_scenario())
         .collect::<Result<Vec<_>, _>>()?;
-    let features = svmscope::api::feature_toggles(req.features)?;
+    let features = svmscope::spec::feature_toggles(req.features)?;
 
     let (label, mut replay) = if let Some(fx_ref) = &req.fixture {
         // Fixture path is resolved relative to the suite file's directory.
