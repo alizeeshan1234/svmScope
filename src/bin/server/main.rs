@@ -16,11 +16,10 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use solana_client::rpc_client::RpcClient;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use svmscope::api::{MutationInput, SuiteRequest};
 use svmscope::replay::{Mutation, ReplayResult, ScenarioOutcome};
-use svmscope::Analysis;
+use svmscope::{Analysis, Scope};
 
 const DEFAULT_RPC: &str = "https://api.mainnet-beta.solana.com";
 
@@ -186,7 +185,9 @@ fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> String {
     // Never let a caller `rpc` reach resolve_rpc's verbatim-URL branch unless it's
     // both allowed and vetted. `cluster` is already sanitized above.
     let safe_rpc = rpc.filter(|u| allow && vet_custom_rpc(u).is_some());
-    svmscope::resolve_rpc(cluster, safe_rpc, &rpc_url())
+    // `cluster` is pre-sanitized above, so an unknown name can't reach here;
+    // fall back to the default endpoint defensively anyway.
+    svmscope::resolve_rpc_url(cluster, safe_rpc, &rpc_url()).unwrap_or_else(|_| rpc_url())
 }
 
 /// POST body for /simulate.
@@ -233,10 +234,7 @@ async fn analyze_handler(
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     // `analyze` does blocking I/O (RPC) and heavy CPU work (replay), so run it on
     // the blocking thread pool instead of stalling the async runtime.
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::analyze(&client, &signature)
-    })
+    let result = tokio::task::spawn_blocking(move || Scope::new(url).analyze(&signature))
     .await
     .map_err(|e| {
         (
@@ -266,15 +264,11 @@ async fn simulate_handler(
         svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::simulate(
-            &client,
-            &req.signature,
-            &mutations,
-            req.time_travel,
-            features,
-        )
+    let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
+        let mut replay = Scope::new(url).replay(&req.signature)?;
+        replay.set_time_travel(req.time_travel);
+        replay.set_features(features);
+        Ok(replay.simulate(&mutations)?.result)
     })
     .await
     .map_err(|e| {
@@ -318,10 +312,14 @@ async fn suite_handler(
     let features =
         svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::simulate_suite(&client, &signature, scenarios, req.time_travel, features)
-    })
+    let result = tokio::task::spawn_blocking(
+        move || -> Result<Vec<ScenarioOutcome>, svmscope::Error> {
+            let mut replay = Scope::new(url).replay(&signature)?;
+            replay.set_time_travel(req.time_travel);
+            replay.set_features(features);
+            replay.run_suite(&scenarios)
+        },
+    )
     .await
     .map_err(|e| {
         (
@@ -368,9 +366,9 @@ async fn preflight_handler(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::simulate_preflight(&client, &req.transaction, &mutations)
+    let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
+        let replay = Scope::new(url).preflight(&req.transaction)?;
+        Ok(replay.simulate(&mutations)?.result)
     })
     .await
     .map_err(|e| {
@@ -392,10 +390,7 @@ async fn account_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::AccountOverview>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::account_overview(&client, &address)
-    })
+    let result = tokio::task::spawn_blocking(move || Scope::new(url).account(&address))
     .await
     .map_err(|e| {
         (
@@ -416,10 +411,7 @@ async fn signatures_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::SigInfo>>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::recent_signatures(&client, &address, 25)
-    })
+    let result = tokio::task::spawn_blocking(move || Scope::new(url).signatures(&address, 25))
     .await
     .map_err(|e| {
         (
@@ -450,10 +442,14 @@ async fn preflight_report_handler(
         svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::preflight_report(&client, &req.transaction, &mutations, tt, features)
-    })
+    let result = tokio::task::spawn_blocking(
+        move || -> Result<svmscope::SimulationReport, svmscope::Error> {
+            let mut replay = Scope::new(url).preflight(&req.transaction)?;
+            replay.set_time_travel(tt);
+            replay.set_features(features);
+            Ok(replay.simulate(&mutations)?.into_report())
+        },
+    )
     .await
     .map_err(|e| {
         (
@@ -481,10 +477,14 @@ async fn replay_report_handler(
         svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::replay_report(&client, &req.signature, &mutations, tt, features)
-    })
+    let result = tokio::task::spawn_blocking(
+        move || -> Result<svmscope::SimulationReport, svmscope::Error> {
+            let mut replay = Scope::new(url).replay(&req.signature)?;
+            replay.set_time_travel(tt);
+            replay.set_features(features);
+            Ok(replay.simulate(&mutations)?.into_report())
+        },
+    )
     .await
     .map_err(|e| {
         (
@@ -522,10 +522,8 @@ async fn decode_account_handler(
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let idl = (!req.idl.is_null()).then_some(req.idl);
 
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::decode_account_with(&client, &address, idl.as_ref())
-    })
+    let result =
+        tokio::task::spawn_blocking(move || Scope::new(url).decode_account(&address, idl.as_ref()))
     .await
     .map_err(|e| {
         (
@@ -541,7 +539,7 @@ async fn decode_account_handler(
 async fn idl_instructions_handler(
     Json(req): Json<IdlRequest>,
 ) -> Json<Vec<svmscope::idl::IdlInstruction>> {
-    Json(svmscope::instructions_from_idl(&req.idl))
+    Json(svmscope::idl::instructions(&req.idl))
 }
 
 /// GET /instructions/:program — the instructions a program exposes (from its IDL),
@@ -551,10 +549,8 @@ async fn instructions_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::idl::IdlInstruction>>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::program_instructions(&client, &program)
-    })
+    let result =
+        tokio::task::spawn_blocking(move || Scope::new(url).program_instructions(&program))
     .await
     .map_err(|e| {
         (
@@ -572,9 +568,8 @@ async fn replay_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<ReplayResult>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::run_replay(&client, &signature)
+    let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
+        Ok(Scope::new(url).replay(&signature)?.run()?.result)
     })
     .await
     .map_err(|e| {
@@ -596,10 +591,7 @@ async fn freeze_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::fixture::Fixture>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::capture_fixture(&client, &signature)
-    })
+    let result = tokio::task::spawn_blocking(move || Scope::new(url).capture(&signature))
     .await
     .map_err(|e| {
         (

@@ -3,7 +3,7 @@
 use crate::utils::resolve_account_keys;
 use serde_json::Value;
 
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct BalanceChange {
     pub address: String,
     pub delta: i64,
@@ -13,7 +13,7 @@ pub struct BalanceChange {
 
 /// A change in an SPL token account's balance, in raw base units (client
 /// divides by 10^decimals for display).
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct TokenChange {
     pub address: String,
     pub owner: String,

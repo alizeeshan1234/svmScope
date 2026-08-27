@@ -22,7 +22,7 @@ const NATIVE_LOADER: &str = "NativeLoader1111111111111111111111111111111";
 const BPF_LOADER_2: &str = "BPFLoader2111111111111111111111111111111111";
 const BPF_LOADER_UPGRADEABLE: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
 
-#[derive(serde::Serialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Default)]
 pub struct ReplayResult {
     pub success: bool,
     pub error: Option<String>,
@@ -203,6 +203,8 @@ fn svm_from_loaded(loaded: &[(Address, Loaded)], features: &[FeatureToggle], slo
 /// The reconstructed world a transaction ran in, fetched once. Run any number of
 /// scenarios against it with [`ReplayContext::run`] — each gets a pristine SVM.
 pub struct ReplayContext {
+    /// The replayed transaction's signature (empty for pre-flight transactions).
+    signature: String,
     tx: VersionedTransaction,
     loaded: Vec<(Address, Loaded)>,
     /// The slot the transaction landed in. The SVM clock is set to this so
@@ -461,6 +463,33 @@ impl ReplayContext {
         self.idls.insert(owner, idl);
     }
 
+    /// The registered IDLs, by program id.
+    pub(crate) fn idl_map(&self) -> &HashMap<String, serde_json::Value> {
+        &self.idls
+    }
+
+    /// Every program whose IDL could matter here: loaded programs (error-name
+    /// resolution) plus each distinct data-account owner (named-field decode).
+    pub(crate) fn interesting_programs(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        for (addr, l) in &self.loaded {
+            match l {
+                Loaded::Program(_) => {
+                    seen.insert(addr.to_string());
+                }
+                Loaded::Data(acc) => {
+                    seen.insert(acc.owner.to_string());
+                }
+            }
+        }
+        seen.into_iter().collect()
+    }
+
+    /// Add one feature toggle on top of those already set.
+    pub(crate) fn push_feature_toggle(&mut self, t: FeatureToggle) {
+        self.feature_toggles.push(t);
+    }
+
     /// Decode an account's pre-state into named fields: built-in layouts (SPL
     /// token & friends) first, then the owner program's registered IDL. The
     /// pre-state layout is authoritative for both sides of a delta — an assert
@@ -644,6 +673,7 @@ pub fn build_context(
     }
 
     Ok(ReplayContext {
+        signature: signature.to_string(),
         tx,
         loaded,
         slot,
@@ -722,7 +752,9 @@ pub fn preflight_context(
     // Real wall-clock time for that slot — a pre-flight simulation should run
     // "now", and any date-based program logic depends on this being accurate.
     let block_time = slot.and_then(|s| client.get_block_time(s).ok());
+    let signature = tx.signatures.first().map(|s| s.to_string()).unwrap_or_default();
     Ok(ReplayContext {
+        signature,
         tx,
         loaded,
         slot,
@@ -741,7 +773,7 @@ impl ReplayContext {
     /// / `self.block_time`) — the exact clock the live replay ran with — so a
     /// reloaded fixture reproduces the live outcome instead of drifting to the
     /// transaction's original slot.
-    pub fn to_fixture(&self, signature: &str) -> Result<Fixture> {
+    pub fn to_fixture(&self) -> Result<Fixture> {
         let tx_bytes = bincode::serialize(&self.tx)
             .map_err(|e| Error::Fixture(format!("serialize transaction: {e}")))?;
         let entries = self
@@ -761,7 +793,7 @@ impl ReplayContext {
             })
             .collect();
         Ok(Fixture {
-            signature: signature.to_string(),
+            signature: self.signature.clone(),
             captured_slot: self.slot,
             captured_block_time: self.block_time,
             tx_b64: b64_encode(&tx_bytes),
@@ -816,6 +848,7 @@ impl ReplayContext {
             }
         }
         Ok(ReplayContext {
+            signature: fx.signature.clone(),
             tx,
             loaded,
             slot: fx.captured_slot,
@@ -1233,14 +1266,14 @@ pub struct ScenarioSpec {
 }
 
 /// The result of one post-replay assertion.
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AssertOutcome {
     pub description: String,
     pub pass: bool,
 }
 
 /// The result of running one scenario.
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ScenarioOutcome {
     pub name: String,
     /// Human description of the transaction-level expectation.
@@ -1430,6 +1463,7 @@ mod tests {
         // folded into ReplayResult{success:false}, which `expect: revert`
         // scenarios happily accepted. It must be a hard Err now.
         let ctx = ReplayContext {
+            signature: String::new(),
             tx: VersionedTransaction::default(),
             loaded: Vec::new(),
             slot: None,
@@ -1463,6 +1497,7 @@ mod tests {
     fn patch_bounds_are_validated_up_front() {
         let addr = Address::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
         let ctx = ReplayContext {
+            signature: String::new(),
             tx: VersionedTransaction::default(),
             loaded: vec![(
                 addr,
@@ -1501,6 +1536,7 @@ mod tests {
         // drop the block time (which used to happen, so time-gated programs behaved
         // differently after freezing).
         let ctx = ReplayContext {
+            signature: "SIG".into(),
             tx: VersionedTransaction::default(),
             loaded: Vec::new(),
             slot: Some(295_000_123),
@@ -1510,7 +1546,7 @@ mod tests {
             feature_toggles: Vec::new(),
         };
 
-        let fx = ctx.to_fixture("SIG").unwrap();
+        let fx = ctx.to_fixture().unwrap();
         assert_eq!(fx.captured_slot, Some(295_000_123));
         assert_eq!(fx.captured_block_time, Some(1_787_600_325));
 

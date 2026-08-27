@@ -4,7 +4,7 @@ use crate::utils::resolve_account_keys;
 use serde_json::Value;
 
 /// One account an instruction touches, with its IDL role name where known.
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct IxAccount {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -12,7 +12,7 @@ pub struct IxAccount {
 }
 
 /// One decoded instruction argument.
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct IxArg {
     pub name: String,
     #[serde(rename = "type")]
@@ -20,7 +20,7 @@ pub struct IxArg {
     pub value: String,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct CpiEntry {
     pub index: usize,
     pub program: String,

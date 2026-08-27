@@ -13,7 +13,7 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CuUsage {
     pub program: String,
     pub cu: u64,

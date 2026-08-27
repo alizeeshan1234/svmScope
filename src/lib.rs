@@ -11,42 +11,48 @@
 //!
 //! # Quickstart
 //!
-//! ```no_run
-//! use solana_client::rpc_client::RpcClient;
-//! use svmscope::replay::{Mutation, TimeTravel};
+//! Two nouns: a [`Scope`] fetches and caches, a [`Replay`] is one transaction's
+//! reconstructed world. All RPC happens in [`Scope::replay`]; every run after
+//! that is local and free.
 //!
-//! let rpc = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
+//! ```no_run
+//! use svmscope::{Scope, replay::Mutation};
+//!
+//! let scope = Scope::new("https://api.mainnet-beta.solana.com");
 //! let sig = "your transaction signature";
 //!
 //! // 1. Decode: CPI tree, named instructions, balance/token diffs, CU per program.
-//! let analysis = svmscope::analyze(&rpc, sig)?;
+//! let analysis = scope.analyze(sig)?;
 //! println!("fee: {} lamports, {} top-level instructions",
 //!          analysis.overview.fee, analysis.cpi_tree.len());
 //!
 //! // 2. Replay the real programs locally in LiteSVM.
-//! let replay = svmscope::run_replay(&rpc, &analysis.signature)?;
-//! println!("replay success: {}", replay.success);
+//! let mut replay = scope.replay(sig)?;
+//! println!("replay success: {}", replay.run()?.result.success);
 //!
-//! // 3. What-if: zero out an account and jump 30 days ahead, then replay.
-//! let what_if = svmscope::simulate(
-//!     &rpc,
-//!     &analysis.signature,
-//!     &[Mutation::Lamports { address: "SomeAccount111...".into(), value: 0 }],
-//!     TimeTravel { seconds: Some(30 * 86_400), ..Default::default() },
-//!     vec![],
-//! )?;
-//! println!("mutated replay success: {}", what_if.success);
+//! // 3. What-if: zero out an account, jump 30 days ahead, and replay again —
+//! //    zero further RPC.
+//! replay.advance_seconds(30 * 86_400);
+//! let what_if = replay.simulate(&[Mutation::lamports("SomeAccount111...", 0)])?;
+//! println!("mutated replay success: {}", what_if.result.success);
 //! # Ok::<(), svmscope::Error>(())
 //! ```
 //!
 //! # Hermetic testing
 //!
 //! Replays against live RPC state drift as the chain moves on. To pin a
-//! transaction's world forever, [`capture_fixture`] snapshots the transaction,
+//! transaction's world forever, [`Scope::capture`] snapshots the transaction,
 //! every account it touched, and every program ELF into a [`fixture::Fixture`];
-//! [`run_fixture_suite`] then executes what-if scenario suites (mutations +
-//! expectations + named-field assertions) against that frozen state — offline,
-//! deterministic, CI-friendly.
+//! [`Replay::from_fixture`] then rebuilds the world and runs what-if scenario
+//! suites (mutations + expectations + named-field assertions) against that
+//! frozen state — offline, deterministic, CI-friendly.
+//!
+//! # Errors
+//!
+//! A **reverting replay is not an error** — it comes back as a successful
+//! observation with `result.success == false`. [`Error`] always means svmscope
+//! itself couldn't do what was asked (RPC failure, unknown transaction, a
+//! mutation targeting an account that isn't loaded, an unknown field name…).
 //!
 //! # Feature flags
 //!
@@ -56,6 +62,7 @@
 //! This same library powers the svmscope CLI, the HTTP API, and the hosted UI
 //! at <https://svmscope.vercel.app> — identical results in all four.
 
+pub mod analyze;
 pub mod api;
 pub mod compute;
 pub mod cpi_tree;
@@ -67,878 +74,45 @@ pub mod idl;
 pub mod ixname;
 pub mod replay;
 pub mod report;
+pub mod scope;
 pub mod utils;
 
+pub use analyze::{
+    AccountDiff, AccountOverview, Analysis, Explanation, FieldDiff, Overview, ProgramInfo, SigInfo,
+    SimulationReport,
+};
 pub use error::{Error, Result};
+pub use fixture::Fixture;
+pub use replay::Mutation;
+pub use scope::{OnchainRecord, Replay, Replayed, Scope};
 
-use serde::Serialize;
-use serde_json::json;
-use solana_address::Address;
-use solana_client::rpc_client::RpcClient;
-use solana_client::rpc_request::RpcRequest;
-use std::str::FromStr;
-
-/// Resolve a cluster name or explicit RPC URL to an endpoint, so one instance
-/// serves every cluster. Precedence: explicit `rpc` URL > `cluster` name > `default`.
+/// Resolve a cluster name or explicit RPC URL to an endpoint. Precedence:
+/// explicit `rpc` URL > `cluster` name > `default`.
 ///
 /// Clusters: `mainnet`, `devnet`, `testnet`, `localnet` (127.0.0.1:8899). A value
-/// starting with `http` in either field is used verbatim.
-pub fn resolve_rpc(cluster: Option<&str>, rpc: Option<&str>, default: &str) -> String {
+/// starting with `http` in either field is used verbatim; an unknown cluster
+/// name is an error.
+pub fn resolve_rpc_url(cluster: Option<&str>, rpc: Option<&str>, default: &str) -> Result<String> {
     if let Some(u) = rpc {
         if u.starts_with("http") {
-            return u.to_string();
+            return Ok(u.to_string());
         }
     }
     match cluster.map(|c| c.trim().to_ascii_lowercase()).as_deref() {
-        None | Some("") => default.to_string(),
+        None | Some("") => Ok(default.to_string()),
         Some("mainnet") | Some("mainnet-beta") | Some("m") => {
-            "https://api.mainnet-beta.solana.com".into()
+            Ok("https://api.mainnet-beta.solana.com".into())
         }
-        Some("devnet") | Some("d") => "https://api.devnet.solana.com".into(),
-        Some("testnet") | Some("t") => "https://api.testnet.solana.com".into(),
+        Some("devnet") | Some("d") => Ok("https://api.devnet.solana.com".into()),
+        Some("testnet") | Some("t") => Ok("https://api.testnet.solana.com".into()),
         Some("localnet") | Some("local") | Some("localhost") | Some("l") => {
-            "http://127.0.0.1:8899".into()
+            Ok("http://127.0.0.1:8899".into())
         }
-        Some(other) if other.starts_with("http") => other.to_string(),
-        Some(other) => {
-            eprintln!("warn: unknown cluster '{other}', using default");
-            default.to_string()
-        }
+        Some(other) if other.starts_with("http") => Ok(other.to_string()),
+        Some(other) => Err(Error::InvalidSpec(format!(
+            "unknown cluster '{other}' (expected mainnet, devnet, testnet, or localnet)"
+        ))),
     }
-}
-
-/// The full analysis of a transaction — the payload the CLI prints and the API serves.
-#[derive(Serialize)]
-pub struct Analysis {
-    /// The resolved transaction signature (echoed back — useful when the input
-    /// was an address that we resolved to its latest transaction).
-    pub signature: String,
-    pub overview: Overview,
-    pub cpi_tree: Vec<cpi_tree::CpiEntry>,
-    pub balance_change: Vec<diffs::BalanceChange>,
-    pub token_change: Vec<diffs::TokenChange>,
-    pub compute: Vec<compute::CuUsage>,
-    /// The program logs the transaction actually produced on-chain. Available
-    /// immediately from the transaction metadata — no replay needed.
-    pub logs: Vec<String>,
-    /// Local replay is opt-in (it's the slow, drift-prone part) — `analyze` leaves
-    /// this `None` and the client runs it on demand via `run_replay` / `/replay`.
-    pub replay: Option<replay::ReplayResult>,
-    /// The transaction's accounts, with decoded fields where the layout is known.
-    /// Drives the what-if editor: pick an account, edit named fields.
-    pub accounts: Vec<decode::AccountInfo>,
-}
-
-/// Headline facts about the transaction as it actually ran on-chain.
-#[derive(Serialize)]
-pub struct Overview {
-    /// The transaction succeeded on-chain (meta.err is null).
-    pub success: bool,
-    /// Fee paid, in lamports.
-    pub fee: u64,
-    /// Slot the transaction landed in, if reported.
-    pub slot: Option<u64>,
-    /// On-chain compute units consumed, if reported.
-    pub compute_units: Option<u64>,
-    /// The account that paid the fee (the first signer).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fee_payer: Option<String>,
-    /// Transaction version — "legacy" or "v0".
-    pub version: String,
-    /// Block time (unix seconds), when the RPC reports it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub block_time: Option<i64>,
-    /// The recent blockhash the transaction was signed against.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub recent_blockhash: Option<String>,
-    /// Number of accounts the transaction touched (static + lookup-table loaded).
-    pub account_count: usize,
-    /// Top-level programs invoked, in order (the instruction programs).
-    pub top_programs: Vec<String>,
-}
-
-fn build_overview(
-    tx: &serde_json::Value,
-    cpi_tree: &[cpi_tree::CpiEntry],
-    account_count: usize,
-) -> Overview {
-    let top_programs = cpi_tree
-        .iter()
-        .filter(|e| e.stack_height == 1)
-        .map(|e| e.program.clone())
-        .collect();
-    // `version` is a number (0) for v0, or the string "legacy".
-    let version = match &tx["version"] {
-        serde_json::Value::Number(n) => format!("v{n}"),
-        serde_json::Value::String(s) => s.clone(),
-        _ => "legacy".to_string(),
-    };
-    Overview {
-        success: tx["meta"]["err"].is_null(),
-        fee: tx["meta"]["fee"].as_u64().unwrap_or(0),
-        slot: tx["slot"].as_u64(),
-        compute_units: tx["meta"]["computeUnitsConsumed"].as_u64(),
-        fee_payer: tx["transaction"]["message"]["accountKeys"][0]
-            .as_str()
-            .map(String::from),
-        version,
-        block_time: tx["blockTime"].as_i64(),
-        recent_blockhash: tx["transaction"]["message"]["recentBlockhash"]
-            .as_str()
-            .map(String::from),
-        account_count,
-        top_programs,
-    }
-}
-
-/// Accept a transaction signature OR an account/program address. A 32-byte value
-/// parses as an address, so we resolve it to its most recent transaction; a
-/// 64-byte signature is used as-is. Lets a user paste a program ID and see its
-/// latest transaction.
-fn resolve_signature(client: &RpcClient, input: &str) -> Result<String> {
-    let input = input.trim();
-    if Address::from_str(input).is_ok() {
-        let resp: serde_json::Value = client
-            .send(
-                RpcRequest::GetSignaturesForAddress,
-                json!([input, { "limit": 1 }]),
-            )
-            .map_err(Error::rpc)?;
-        return resp
-            .as_array()
-            .and_then(|a| a.first())
-            .and_then(|s| s["signature"].as_str())
-            .map(String::from)
-            .ok_or_else(|| Error::NoSignatures(input.to_string()));
-    }
-    Ok(input.to_string())
-}
-
-/// An account/program's on-chain overview — what an explorer's address page shows.
-#[derive(Serialize)]
-pub struct AccountOverview {
-    pub address: String,
-    pub exists: bool,
-    pub owner: String,
-    pub lamports: u64,
-    pub executable: bool,
-    pub data_len: usize,
-    /// Program deployment details, when the address is an executable program.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub program: Option<ProgramInfo>,
-    /// The program's name from its on-chain Anchor IDL, if published.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub idl_name: Option<String>,
-    /// Decoded fields for a recognized data account (SPL or IDL).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub decoded: Option<decode::DecodedAccount>,
-}
-
-#[derive(Serialize)]
-pub struct ProgramInfo {
-    pub program_data: String,
-    pub upgradeable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upgrade_authority: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_deployed_slot: Option<u64>,
-}
-
-/// Fetch an account's raw state: (owner, lamports, executable, data). None if it
-/// doesn't exist.
-fn get_account_raw(client: &RpcClient, address: &str) -> Option<(String, u64, bool, Vec<u8>)> {
-    use base64::Engine;
-    let resp: serde_json::Value = client
-        .send(
-            RpcRequest::GetAccountInfo,
-            json!([address, { "encoding": "base64" }]),
-        )
-        .ok()?;
-    let v = &resp["value"];
-    if v.is_null() {
-        return None;
-    }
-    let owner = v["owner"].as_str()?.to_string();
-    let lamports = v["lamports"].as_u64()?;
-    let executable = v["executable"].as_bool().unwrap_or(false);
-    let data = v["data"][0]
-        .as_str()
-        .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
-        .unwrap_or_default();
-    Some((owner, lamports, executable, data))
-}
-
-/// Program deployment details from the (upgradeable) loader accounts.
-fn program_info(client: &RpcClient, program_data_bytes: &[u8], owner: &str) -> Option<ProgramInfo> {
-    const UPGRADEABLE: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
-    const LOADER_V2: &str = "BPFLoader2111111111111111111111111111111111";
-
-    if owner == UPGRADEABLE && program_data_bytes.len() >= 36 {
-        // Program account: [0..4]=variant, [4..36]=programdata address.
-        let pd_bytes: [u8; 32] = program_data_bytes[4..36].try_into().ok()?;
-        let pd_addr = Address::from(pd_bytes).to_string();
-        if let Some((_, _, _, pd)) = get_account_raw(client, &pd_addr) {
-            // ProgramData: [0..4]=variant, [4..12]=slot, [12]=Option tag, [13..45]=authority.
-            let slot = pd
-                .get(4..12)
-                .map(|s| u64::from_le_bytes(s.try_into().unwrap()));
-            let (upgradeable, authority) = if pd.len() >= 45 && pd[12] == 1 {
-                let a: [u8; 32] = pd[13..45].try_into().unwrap();
-                (true, Some(Address::from(a).to_string()))
-            } else {
-                (false, None)
-            };
-            return Some(ProgramInfo {
-                program_data: pd_addr,
-                upgradeable,
-                upgrade_authority: authority,
-                last_deployed_slot: slot,
-            });
-        }
-        return Some(ProgramInfo {
-            program_data: pd_addr,
-            upgradeable: true,
-            upgrade_authority: None,
-            last_deployed_slot: None,
-        });
-    }
-    if owner == LOADER_V2 {
-        return Some(ProgramInfo {
-            program_data: String::new(),
-            upgradeable: false,
-            upgrade_authority: None,
-            last_deployed_slot: None,
-        });
-    }
-    None
-}
-
-/// An explorer-style overview of any account or program address.
-pub fn account_overview(client: &RpcClient, address: &str) -> Result<AccountOverview> {
-    let address = address.trim();
-    if Address::from_str(address).is_err() {
-        return Err(Error::InvalidAddress(address.to_string()));
-    }
-    let Some((owner, lamports, executable, data)) = get_account_raw(client, address) else {
-        return Ok(AccountOverview {
-            address: address.to_string(),
-            exists: false,
-            owner: String::new(),
-            lamports: 0,
-            executable: false,
-            data_len: 0,
-            program: None,
-            idl_name: None,
-            decoded: None,
-        });
-    };
-
-    let mut ov = AccountOverview {
-        address: address.to_string(),
-        exists: true,
-        owner: owner.clone(),
-        lamports,
-        executable,
-        data_len: data.len(),
-        program: None,
-        idl_name: None,
-        decoded: None,
-    };
-
-    if executable {
-        ov.program = program_info(client, &data, &owner);
-        ov.idl_name = Address::from_str(address)
-            .ok()
-            .and_then(|a| idl::fetch_idl_json(client, a))
-            .and_then(|idl| {
-                idl.get("metadata")
-                    .and_then(|m| m.get("name"))
-                    .or_else(|| idl.get("name"))
-                    .and_then(|n| n.as_str())
-                    .map(String::from)
-            });
-    } else {
-        // Reuse the decoder for recognized data accounts (SPL / IDL).
-        ov.decoded = decode::describe_accounts(client, &[address.to_string()])
-            .into_iter()
-            .next()
-            .and_then(|a| a.decoded);
-    }
-    Ok(ov)
-}
-
-/// One entry in an address's recent transaction history.
-#[derive(Serialize)]
-pub struct SigInfo {
-    pub signature: String,
-    pub slot: Option<u64>,
-    /// Whether the transaction failed on-chain.
-    pub err: bool,
-    /// Unix timestamp, when the RPC reports it.
-    pub block_time: Option<i64>,
-}
-
-/// Recent transactions that touched an account or program — what an explorer
-/// shows on an address page. Newest first.
-pub fn recent_signatures(
-    client: &RpcClient,
-    address: &str,
-    limit: u64,
-) -> Result<Vec<SigInfo>> {
-    let address = address.trim();
-    if Address::from_str(address).is_err() {
-        return Err(Error::InvalidAddress(address.to_string()));
-    }
-    let resp: serde_json::Value = client
-        .send(
-            RpcRequest::GetSignaturesForAddress,
-            json!([address, { "limit": limit }]),
-        )
-        .map_err(Error::rpc)?;
-    let arr = resp
-        .as_array()
-        .ok_or_else(|| Error::MalformedRpcResponse("getSignaturesForAddress: not an array".into()))?;
-    Ok(arr
-        .iter()
-        .map(|s| SigInfo {
-            signature: s["signature"].as_str().unwrap_or_default().to_string(),
-            slot: s["slot"].as_u64(),
-            err: !s["err"].is_null(),
-            block_time: s["blockTime"].as_i64(),
-        })
-        .collect())
-}
-
-/// Fetch a transaction, decode it, and replay it — bundled into one `Analysis`.
-/// `input` may be a signature or an account/program address (resolved to its
-/// latest transaction).
-pub fn analyze(client: &RpcClient, input: &str) -> Result<Analysis> {
-    let signature = resolve_signature(client, input)?;
-    let tx: serde_json::Value = client
-        .send(
-            RpcRequest::GetTransaction,
-            json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
-        )
-        .map_err(Error::rpc)?;
-
-    if tx.is_null() {
-        return Err(Error::TransactionNotFound(signature.to_string()));
-    }
-
-    let account_keys = utils::resolve_account_keys(&tx);
-
-    let mut cpi_tree = cpi_tree::build_cpi_tree(&tx);
-    // Decode each instruction — name, arguments, and named accounts — from native
-    // layouts (always) or the program's on-chain Anchor IDL (one fetch per program,
-    // cached). This is what turns the call trace from bare ids into a debuggable view.
-    let mut idl_cache: std::collections::HashMap<String, Option<serde_json::Value>> =
-        std::collections::HashMap::new();
-    for e in &mut cpi_tree {
-        let (name, args, accounts) = ixname::enrich(
-            client,
-            &mut idl_cache,
-            &e.program,
-            &e.data,
-            &e.account_indexes,
-            &account_keys,
-        );
-        e.name = name;
-        e.args = args;
-        e.accounts = accounts;
-    }
-    Ok(Analysis {
-        signature,
-        overview: build_overview(&tx, &cpi_tree, account_keys.len()),
-        cpi_tree,
-        balance_change: diffs::account_diffs(&tx),
-        token_change: diffs::token_diffs(&tx),
-        compute: compute::cu_per_program(&tx),
-        logs: tx["meta"]["logMessages"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|l| l.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        replay: None, // run on demand — see run_replay
-        accounts: decode::describe_accounts(client, &account_keys),
-    })
-}
-
-/// Replay a transaction against current on-chain state — the opt-in step that
-/// `analyze` no longer runs automatically.
-pub fn run_replay(client: &RpcClient, signature: &str) -> Result<replay::ReplayResult> {
-    let tx: serde_json::Value = client
-        .send(
-            RpcRequest::GetTransaction,
-            json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
-        )
-        .map_err(Error::rpc)?;
-    if tx.is_null() {
-        return Err(Error::TransactionNotFound(signature.to_string()));
-    }
-    let account_keys = utils::resolve_account_keys(&tx);
-    let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let ctx = replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
-    let mut r = ctx.run(&[])?;
-    resolve_error_name(client, &mut r);
-    Ok(r)
-}
-
-/// Resolve a failed replay's bare error (`Custom(6001)`) to its human name from
-/// the program's IDL (e.g. "SlippageToleranceExceeded"), so callers — and the UI's
-/// drift hint — can reason about *what* failed, not just a numeric code.
-fn resolve_error_name(client: &RpcClient, r: &mut replay::ReplayResult) {
-    if r.success || r.error_name.is_some() {
-        return;
-    }
-    r.error_name = explain_error(client, r).map(|e| e.title);
-}
-
-/// Replay a transaction after applying what-if mutations (optionally with the
-/// clock warped), returning just the result.
-pub fn simulate(
-    client: &RpcClient,
-    signature: &str,
-    mutations: &[replay::Mutation],
-    time_travel: replay::TimeTravel,
-    features: Vec<replay::FeatureToggle>,
-) -> Result<replay::ReplayResult> {
-    let tx: serde_json::Value = client
-        .send(
-            RpcRequest::GetTransaction,
-            json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
-        )
-        .map_err(Error::rpc)?;
-
-    if tx.is_null() {
-        return Err(Error::TransactionNotFound(signature.to_string()));
-    }
-
-    let account_keys = utils::resolve_account_keys(&tx);
-    let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let mut ctx =
-        replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
-    ctx.set_time_travel(time_travel);
-    ctx.set_feature_toggles(features);
-    let mut r = ctx.run(mutations)?;
-    resolve_error_name(client, &mut r);
-    Ok(r)
-}
-
-/// A simulation result enriched with what a developer actually needs: a
-/// human-readable failure reason and the field-level account diff.
-#[derive(Serialize)]
-pub struct SimulationReport {
-    pub replay: replay::ReplayResult,
-    /// Where the clock was warped to, when time travel was requested.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub clock: Option<String>,
-    /// The failure explained in plain language, resolved from the program's IDL
-    /// when possible ("Overflow — counter overflowed") instead of Custom(6000).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub explain: Option<Explanation>,
-    /// Every account the transaction changed, before → after.
-    pub diffs: Vec<AccountDiff>,
-}
-
-#[derive(Serialize)]
-pub struct Explanation {
-    /// e.g. "Overflow" (from the IDL) or "InsufficientFunds".
-    pub title: String,
-    /// The human message, e.g. "counter overflowed".
-    pub detail: String,
-    /// Which program raised it, when we can attribute it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub program: Option<String>,
-    /// The raw error, kept for reference.
-    pub raw: String,
-}
-
-/// One account's before → after, with named field changes where the layout is known.
-#[derive(Serialize)]
-pub struct AccountDiff {
-    pub address: String,
-    pub owner: String,
-    pub lamports_before: u64,
-    pub lamports_after: u64,
-    /// Named fields that changed (empty when the layout isn't recognized).
-    pub fields: Vec<FieldDiff>,
-    /// True when data changed but we couldn't decode it into fields.
-    pub raw_data_changed: bool,
-}
-
-#[derive(Serialize)]
-pub struct FieldDiff {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub ty: String,
-    pub before: String,
-    pub after: String,
-}
-
-/// Turn a program error into a human explanation using the invoking program's IDL.
-fn explain_error(client: &RpcClient, r: &replay::ReplayResult) -> Option<Explanation> {
-    let raw = r.error.as_ref()?;
-
-    // Which program failed? The last "Program <id> failed" line names it.
-    let program = r
-        .logs
-        .iter()
-        .rev()
-        .find_map(|l| {
-            l.strip_prefix("Program ")
-                .and_then(|s| s.split(" failed").next())
-        })
-        .map(|s| s.trim().to_string())
-        .filter(|s| Address::from_str(s).is_ok());
-
-    // Anchor prints the resolved error itself — prefer that, it's already human.
-    if let Some(line) = r.logs.iter().rev().find(|l| l.contains("Error Message:")) {
-        let detail = line
-            .split("Error Message:")
-            .nth(1)
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let title = line
-            .split("Error Code:")
-            .nth(1)
-            .and_then(|s| s.split('.').next())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "Program error".into());
-        return Some(Explanation {
-            title,
-            detail,
-            program,
-            raw: raw.clone(),
-        });
-    }
-
-    // Otherwise resolve the custom code against the program's IDL.
-    if let Some(code) = raw
-        .split("Custom(")
-        .nth(1)
-        .and_then(|s| s.split(')').next())
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        if let Some(pid) = program.as_ref().and_then(|p| Address::from_str(p).ok()) {
-            if let Some(e) =
-                idl::fetch_idl_json(client, pid).and_then(|i| idl::error_for_code(&i, code))
-            {
-                return Some(Explanation {
-                    title: e.name,
-                    detail: e.msg,
-                    program,
-                    raw: raw.clone(),
-                });
-            }
-        }
-    }
-
-    // Fall back to a friendly reading of the common runtime errors.
-    let (title, detail) = if raw.contains("AccountNotFound") {
-        ("Account not found", "An account the transaction needs doesn't exist (an account with zero lamports is treated as deleted).")
-    } else if raw.contains("InsufficientFunds") {
-        (
-            "Insufficient funds",
-            "An account didn't have enough lamports for the transfer plus rent.",
-        )
-    } else if raw.contains("InvalidAddressLookupTableIndex") {
-        ("Lookup table index invalid", "The transaction referenced an address lookup table entry that isn't active at this slot.")
-    } else {
-        (
-            "Transaction failed",
-            "The program returned an error. See the logs below for the failing instruction.",
-        )
-    };
-    Some(Explanation {
-        title: title.into(),
-        detail: detail.into(),
-        program,
-        raw: raw.clone(),
-    })
-}
-
-/// Decode raw before/after bytes into named field changes.
-fn decode_diffs(client: &RpcClient, raw: Vec<replay::RawAccountDiff>) -> Vec<AccountDiff> {
-    // One IDL fetch per distinct owner program.
-    let mut idl_cache: std::collections::HashMap<String, Option<serde_json::Value>> =
-        std::collections::HashMap::new();
-
-    raw.into_iter()
-        .map(|d| {
-            // Fetch this owner's IDL once, then decode both sides with it.
-            let idl = idl_cache
-                .entry(d.owner.clone())
-                .or_insert_with(|| {
-                    Address::from_str(&d.owner)
-                        .ok()
-                        .and_then(|a| idl::fetch_idl_json(client, a))
-                })
-                .clone();
-            let decode_side = |bytes: &[u8]| -> Option<decode::DecodedAccount> {
-                decode::decode_bytes(&d.owner, bytes)
-                    .or_else(|| idl.as_ref().and_then(|i| idl::decode_with_idl(i, bytes)))
-            };
-            let (before, after) = (decode_side(&d.data_before), decode_side(&d.data_after));
-            let mut fields = Vec::new();
-            if let (Some(b), Some(a)) = (&before, &after) {
-                for (fb, fa) in b.fields.iter().zip(a.fields.iter()) {
-                    if fb.value != fa.value {
-                        fields.push(FieldDiff {
-                            name: fa.name.clone(),
-                            ty: fa.ty.clone(),
-                            before: fb.value.clone(),
-                            after: fa.value.clone(),
-                        });
-                    }
-                }
-            }
-            let raw_data_changed = d.data_before != d.data_after && fields.is_empty();
-            AccountDiff {
-                address: d.address,
-                owner: d.owner,
-                lamports_before: d.lamports_before,
-                lamports_after: d.lamports_after,
-                fields,
-                raw_data_changed,
-            }
-        })
-        .collect()
-}
-
-/// Decode one account, optionally with a caller-supplied IDL.
-///
-/// The on-chain IDL is the happy path, but plenty of programs never publish one —
-/// including your own during development. Passing the IDL JSON (from
-/// `target/idl/<program>.json`) gives full named-field decoding anyway.
-pub fn decode_account_with(
-    client: &RpcClient,
-    address: &str,
-    user_idl: Option<&serde_json::Value>,
-) -> Result<decode::AccountInfo> {
-    let address = address.trim();
-    if Address::from_str(address).is_err() {
-        return Err(Error::InvalidAddress(address.to_string()));
-    }
-    let mut info = decode::describe_accounts(client, &[address.to_string()])
-        .into_iter()
-        .next()
-        .ok_or_else(|| Error::AccountNotFound(address.to_string()))?;
-
-    // A supplied IDL wins: it's authoritative for this program, and it beats the
-    // inferred layout we may have fallen back to.
-    if let Some(idl) = user_idl {
-        let resp: serde_json::Value = client
-            .send(
-                RpcRequest::GetAccountInfo,
-                json!([address, { "encoding": "base64" }]),
-            )
-            .map_err(Error::rpc)?;
-        if let Some(b64) = resp["value"]["data"][0].as_str() {
-            use base64::Engine;
-            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
-                if let Some(d) = idl::decode_with_idl(idl, &bytes) {
-                    info.decoded = Some(d);
-                }
-            }
-        }
-    }
-    Ok(info)
-}
-
-/// The instructions a program exposes, from its on-chain IDL — the input to the
-/// transaction builder.
-pub fn program_instructions(
-    client: &RpcClient,
-    program_id: &str,
-) -> Result<Vec<idl::IdlInstruction>> {
-    let addr = Address::from_str(program_id.trim())
-        .map_err(|_| Error::InvalidAddress(program_id.to_string()))?;
-    let idl = idl::fetch_idl_json(client, addr)
-        .ok_or_else(|| Error::NoIdl(program_id.to_string()))?;
-    Ok(idl::instructions(&idl))
-}
-
-/// Instructions from a caller-supplied IDL, for programs with nothing published.
-pub fn instructions_from_idl(idl: &serde_json::Value) -> Vec<idl::IdlInstruction> {
-    idl::instructions(idl)
-}
-
-/// Pre-flight simulate an **unsigned** transaction (base64 wire bytes) against
-/// current on-chain state — "what will this do if I send it now?" This is the
-/// primitive a wallet or bot calls before signing. Optional what-if `mutations`
-/// let a caller preview the tx against edited state too.
-pub fn simulate_preflight(
-    client: &RpcClient,
-    tx_b64: &str,
-    mutations: &[replay::Mutation],
-) -> Result<replay::ReplayResult> {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(tx_b64.trim())
-        .map_err(|e| Error::TxDecode(format!("bad base64: {e}")))?;
-    let tx: solana_transaction::versioned::VersionedTransaction =
-        bincode::deserialize(&bytes).map_err(|e| Error::TxDecode(e.to_string()))?;
-    let ctx = replay::preflight_context(client, tx)?;
-    ctx.run(mutations)
-}
-
-/// Pre-flight simulate and return the full developer report: outcome, a
-/// human-readable failure explanation, and the field-level account diff.
-pub fn preflight_report(
-    client: &RpcClient,
-    tx_b64: &str,
-    mutations: &[replay::Mutation],
-    time_travel: replay::TimeTravel,
-    features: Vec<replay::FeatureToggle>,
-) -> Result<SimulationReport> {
-    use base64::Engine;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(tx_b64.trim())
-        .map_err(|e| Error::TxDecode(format!("bad base64: {e}")))?;
-    let tx: solana_transaction::versioned::VersionedTransaction =
-        bincode::deserialize(&bytes).map_err(|e| Error::TxDecode(e.to_string()))?;
-    let mut ctx = replay::preflight_context(client, tx)?;
-    let warped = !time_travel.is_noop();
-    ctx.set_time_travel(time_travel);
-    ctx.set_feature_toggles(features);
-    let clock_desc = warped.then(|| ctx.describe_clock());
-    let (replay, raw_diffs) = ctx.run_with_diff(mutations)?;
-    Ok(SimulationReport {
-        clock: clock_desc,
-        explain: (!replay.success)
-            .then(|| explain_error(client, &replay))
-            .flatten(),
-        diffs: decode_diffs(client, raw_diffs),
-        replay,
-    })
-}
-
-/// Replay a landed transaction and return the same enriched report.
-pub fn replay_report(
-    client: &RpcClient,
-    signature: &str,
-    mutations: &[replay::Mutation],
-    time_travel: replay::TimeTravel,
-    features: Vec<replay::FeatureToggle>,
-) -> Result<SimulationReport> {
-    let tx: serde_json::Value = client
-        .send(
-            RpcRequest::GetTransaction,
-            json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
-        )
-        .map_err(Error::rpc)?;
-    if tx.is_null() {
-        return Err(Error::TransactionNotFound(signature.to_string()));
-    }
-    let account_keys = utils::resolve_account_keys(&tx);
-    let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let mut ctx =
-        replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
-    let warped = !time_travel.is_noop();
-    ctx.set_time_travel(time_travel);
-    ctx.set_feature_toggles(features);
-    let clock_desc = warped.then(|| ctx.describe_clock());
-    let (replay, raw_diffs) = ctx.run_with_diff(mutations)?;
-    Ok(SimulationReport {
-        clock: clock_desc,
-        explain: (!replay.success)
-            .then(|| explain_error(client, &replay))
-            .flatten(),
-        diffs: decode_diffs(client, raw_diffs),
-        replay,
-    })
-}
-
-/// Run a suite of test scenarios against one transaction. State is fetched once
-/// and every scenario replays against a fresh copy — the core of the tester.
-/// `time_travel` warps the clock for every scenario in the suite.
-pub fn simulate_suite(
-    client: &RpcClient,
-    signature: &str,
-    scenarios: Vec<replay::ScenarioSpec>,
-    time_travel: replay::TimeTravel,
-    features: Vec<replay::FeatureToggle>,
-) -> Result<Vec<replay::ScenarioOutcome>> {
-    let tx: serde_json::Value = client
-        .send(
-            RpcRequest::GetTransaction,
-            json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
-        )
-        .map_err(Error::rpc)?;
-    if tx.is_null() {
-        return Err(Error::TransactionNotFound(signature.to_string()));
-    }
-    let account_keys = utils::resolve_account_keys(&tx);
-    let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let mut ctx =
-        replay::build_context(client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
-    ctx.set_time_travel(time_travel);
-    ctx.set_feature_toggles(features);
-
-    // Named-field asserts resolve against the owner program's IDL, and this is
-    // the layer with RPC access — fetch one IDL per distinct owner up front.
-    // (The fixture path can't do this; there, built-in layouts still resolve.)
-    let owners: std::collections::HashSet<String> = scenarios
-        .iter()
-        .flat_map(|s| &s.asserts)
-        .filter(|a| {
-            matches!(
-                a.check,
-                replay::StateCheck::Field { .. } | replay::StateCheck::FieldDelta { .. }
-            )
-        })
-        .filter_map(|a| ctx.pre_owner(&a.address))
-        .collect();
-    for owner in owners {
-        if let Some(idl) = Address::from_str(&owner)
-            .ok()
-            .and_then(|a| idl::fetch_idl_json(client, a))
-        {
-            ctx.add_idl(owner, idl);
-        }
-    }
-
-    replay::run_suite(&ctx, &scenarios)
-}
-
-/// Capture a transaction's full state into a portable, self-contained fixture.
-/// Freeze once, then replay deterministically forever with no RPC.
-pub fn capture_fixture(client: &RpcClient, signature: &str) -> Result<fixture::Fixture> {
-    let tx: serde_json::Value = client
-        .send(
-            RpcRequest::GetTransaction,
-            json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
-        )
-        .map_err(Error::rpc)?;
-    if tx.is_null() {
-        return Err(Error::TransactionNotFound(signature.to_string()));
-    }
-    let slot = tx["slot"].as_u64();
-    let account_keys = utils::resolve_account_keys(&tx);
-    let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let ctx = replay::build_context(client, signature, &account_keys, slot, &pre)?;
-    // Freeze the exact slot/clock the context runs at (build_context anchors to
-    // "now"), so a reloaded fixture reproduces this live replay rather than the
-    // transaction's original slot.
-    ctx.to_fixture(signature)
-}
-
-/// Run a scenario suite against a frozen fixture — deterministic, offline, CI-safe.
-/// `time_travel` warps the clock for every scenario in the suite.
-pub fn run_fixture_suite(
-    fx: &fixture::Fixture,
-    scenarios: Vec<replay::ScenarioSpec>,
-    time_travel: replay::TimeTravel,
-    features: Vec<replay::FeatureToggle>,
-) -> Result<Vec<replay::ScenarioOutcome>> {
-    let mut ctx = replay::ReplayContext::from_fixture(fx)?;
-    ctx.set_time_travel(time_travel);
-    ctx.set_feature_toggles(features);
-    replay::run_suite(&ctx, &scenarios)
 }
 
 #[cfg(test)]
@@ -946,31 +120,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_rpc_precedence() {
+    fn resolve_rpc_url_precedence() {
         // Explicit URL beats everything.
         assert_eq!(
-            resolve_rpc(Some("devnet"), Some("http://my"), "http://def"),
+            resolve_rpc_url(Some("devnet"), Some("http://my"), "http://def").unwrap(),
             "http://my"
         );
         // Cluster names map to public endpoints.
         assert_eq!(
-            resolve_rpc(Some("devnet"), None, "http://def"),
+            resolve_rpc_url(Some("devnet"), None, "http://def").unwrap(),
             "https://api.devnet.solana.com"
         );
         assert_eq!(
-            resolve_rpc(Some("m"), None, "http://def"),
+            resolve_rpc_url(Some("m"), None, "http://def").unwrap(),
             "https://api.mainnet-beta.solana.com"
         );
         assert_eq!(
-            resolve_rpc(Some("localnet"), None, "http://def"),
+            resolve_rpc_url(Some("localnet"), None, "http://def").unwrap(),
             "http://127.0.0.1:8899"
         );
-        // Nothing specified → the default; unknown cluster → the default.
-        assert_eq!(resolve_rpc(None, None, "http://def"), "http://def");
-        assert_eq!(resolve_rpc(Some("nope"), None, "http://def"), "http://def");
+        // Nothing specified → the default; an unknown cluster is an error.
+        assert_eq!(resolve_rpc_url(None, None, "http://def").unwrap(), "http://def");
+        assert!(matches!(
+            resolve_rpc_url(Some("nope"), None, "http://def"),
+            Err(Error::InvalidSpec(_))
+        ));
         // A non-http "rpc" value is ignored, not used verbatim.
         assert_eq!(
-            resolve_rpc(None, Some("garbage"), "http://def"),
+            resolve_rpc_url(None, Some("garbage"), "http://def").unwrap(),
             "http://def"
         );
     }

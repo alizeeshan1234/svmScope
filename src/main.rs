@@ -3,14 +3,11 @@
 //! `--json` emits the whole analysis as JSON; `--mutate <addr>:<lamports>` applies
 //! a what-if mutation before replaying.
 
-use serde_json::json;
-use solana_client::rpc_client::RpcClient;
-use solana_client::rpc_request::RpcRequest;
 use std::env;
 use std::error::Error;
 use std::str::FromStr;
 
-use svmscope::{analyze, api, compute, cpi_tree, diffs, replay, simulate_suite, utils};
+use svmscope::{api, replay, Replay, Scope};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
@@ -26,18 +23,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
-    let rpc = svmscope::resolve_rpc(
+    let rpc = svmscope::resolve_rpc_url(
         flag("--cluster").as_deref(),
         flag("--rpc").as_deref(),
         "https://api.mainnet-beta.solana.com",
-    );
-    let client = RpcClient::new(rpc);
+    )?;
+    let scope = Scope::new(rpc);
 
     // Test-runner mode: `svmscope test <scenarios.json>` runs a scenario suite
     // and exits non-zero if any assertion fails — drop it straight into CI.
     if signature == "test" {
         let path = args.get(2).ok_or("usage: svmscope test <scenarios.json>")?;
-        return run_tests(&client, path);
+        return run_tests(&scope, path);
     }
 
     // Report mode: run a suite and render a shareable HTML report.
@@ -49,14 +46,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             .iter()
             .position(|a| a == "-o")
             .and_then(|i| args.get(i + 1));
-        return run_report(&client, path, out);
+        return run_report(&scope, path, out);
     }
 
     // IDL probe: `svmscope idl <program_id>` prints a program's on-chain Anchor IDL.
     if signature == "idl" {
         let prog = args.get(2).ok_or("usage: svmscope idl <program_id>")?;
         let id = solana_address::Address::from_str(prog).map_err(|_| "bad program id")?;
-        match svmscope::idl::fetch_idl_json(&client, id) {
+        match svmscope::idl::fetch_idl_json(scope.client(), id) {
             Some(j) => println!("{}", serde_json::to_string_pretty(&j)?),
             None => println!("no on-chain IDL for {prog}"),
         }
@@ -74,7 +71,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .position(|a| a == "-o")
             .and_then(|i| args.get(i + 1));
         eprintln!("freezing {sig}…");
-        let fx = svmscope::capture_fixture(&client, sig)?;
+        let fx = scope.capture(sig)?;
         let json = fx.to_json()?;
         match out {
             Some(path) => {
@@ -90,45 +87,38 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // JSON mode: emit the whole analysis as one JSON blob and stop.
     if json_mode {
-        let analysis = analyze(&client, signature)?;
+        let analysis = scope.analyze(signature)?;
         println!("{}", serde_json::to_string_pretty(&analysis)?);
         return Ok(());
     }
 
     // --- human-readable output ---
-    let tx: serde_json::Value = client.send(
-        RpcRequest::GetTransaction,
-        json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
-    )?;
-    if tx.is_null() {
-        return Err(format!("transaction not found: {signature}").into());
-    }
+    let analysis = scope.analyze(signature)?;
 
-    let account_keys = utils::resolve_account_keys(&tx);
-
-    for e in &cpi_tree::build_cpi_tree(&tx) {
+    for e in &analysis.cpi_tree {
+        let name = e.name.as_deref().unwrap_or(&e.program);
         if e.stack_height == 1 {
-            println!("#{}  {}", e.index, e.program);
+            println!("#{}  {}  ({})", e.index, name, e.program);
         } else {
             let indent = "    ".repeat((e.stack_height - 2) as usize);
-            println!("{}└─ [{}] {}", indent, e.stack_height, e.program);
+            println!("{}└─ [{}] {}  ({})", indent, e.stack_height, name, e.program);
         }
     }
 
     println!("\n-- account balance changes --");
-    for c in &diffs::account_diffs(&tx) {
+    for c in &analysis.balance_change {
         println!("{:<44} {:+} lamports", c.address, c.delta);
     }
 
     println!("\n-- compute units per program --");
-    for c in &compute::cu_per_program(&tx) {
+    for c in &analysis.compute {
         println!("{:<44} {} CU", c.program, c.cu);
     }
 
     println!("\n-- replay --");
-    let pre = replay::PreState::from_meta(&tx, &account_keys);
-    let ctx = replay::build_context(&client, signature, &account_keys, tx["slot"].as_u64(), &pre)?;
-    print_replay("REPLAY", &ctx.run(&[])?);
+    // One fetch pass; the mutated replay below reuses the same world for free.
+    let replay_session = scope.replay(&analysis.signature)?;
+    print_replay("REPLAY", &replay_session.run()?.result);
 
     // Mutations come only from the CLI (`--mutate <address>:<lamports>`).
     let mut mutations: Vec<replay::Mutation> = Vec::new();
@@ -137,15 +127,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         if args[i] == "--mutate" {
             let spec = args
                 .get(i + 1)
-                .expect("--mutate needs <address>:<lamports>");
+                .ok_or("--mutate needs <address>:<lamports>")?;
             let (addr, lamports_str) = spec
                 .split_once(':')
-                .expect("mutation must look like <address>:<lamports>");
-            let value: u64 = lamports_str.parse().expect("lamports must be a number");
-            mutations.push(replay::Mutation::Lamports {
-                address: addr.to_string(),
-                value,
-            });
+                .ok_or("mutation must look like <address>:<lamports>")?;
+            let value: u64 = lamports_str
+                .parse()
+                .map_err(|_| "lamports must be a number")?;
+            mutations.push(replay::Mutation::lamports(addr, value));
             i += 2;
         } else {
             i += 1;
@@ -153,8 +142,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if !mutations.is_empty() {
-        // The context is reusable — the mutated replay costs zero extra RPC.
-        print_replay("MUTATED REPLAY", &ctx.run(&mutations)?);
+        print_replay("MUTATED REPLAY", &replay_session.simulate(&mutations)?.result);
     }
 
     Ok(())
@@ -163,7 +151,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 /// Load a suite file and run it, preferring a frozen `fixture` (deterministic,
 /// offline) over a live `signature`. Returns a human label + the outcomes.
 fn load_and_run_suite(
-    client: &RpcClient,
+    scope: &Scope,
     path: &str,
 ) -> Result<(String, Vec<replay::ScenarioOutcome>), Box<dyn Error>> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
@@ -177,7 +165,7 @@ fn load_and_run_suite(
         .collect::<Result<Vec<_>, _>>()?;
     let features = svmscope::api::feature_toggles(req.features)?;
 
-    if let Some(fx_ref) = &req.fixture {
+    let (label, mut replay) = if let Some(fx_ref) = &req.fixture {
         // Fixture path is resolved relative to the suite file's directory.
         let fx_path = std::path::Path::new(path)
             .parent()
@@ -185,30 +173,28 @@ fn load_and_run_suite(
             .unwrap_or_else(|| std::path::PathBuf::from(fx_ref));
         let fx_text = std::fs::read_to_string(&fx_path)
             .map_err(|e| format!("cannot read fixture {}: {e}", fx_path.display()))?;
-        let fx = svmscope::fixture::Fixture::from_json(&fx_text)?;
+        let fx = svmscope::Fixture::from_json(&fx_text)?;
         let label = format!(
             "fixture {} ({}) [deterministic, offline]",
             fx.signature,
             fx.summary()
         );
-        Ok((
-            label,
-            svmscope::run_fixture_suite(&fx, scenarios, req.time_travel, features)?,
-        ))
+        (label, Replay::from_fixture(&fx)?)
     } else if let Some(sig) = &req.signature {
         let label = format!("{sig} [live RPC — may drift]");
-        Ok((
-            label,
-            simulate_suite(client, sig, scenarios, req.time_travel, features)?,
-        ))
+        (label, scope.replay(sig)?)
     } else {
-        Err("suite must specify either \"fixture\" or \"signature\"".into())
-    }
+        return Err("suite must specify either \"fixture\" or \"signature\"".into());
+    };
+
+    replay.set_time_travel(req.time_travel);
+    replay.set_features(features);
+    Ok((label, replay.run_suite(&scenarios)?))
 }
 
 /// Run a scenario suite and render a shareable, self-contained HTML report.
-fn run_report(client: &RpcClient, path: &str, out: Option<&String>) -> Result<(), Box<dyn Error>> {
-    let (label, outcomes) = load_and_run_suite(client, path)?;
+fn run_report(scope: &Scope, path: &str, out: Option<&String>) -> Result<(), Box<dyn Error>> {
+    let (label, outcomes) = load_and_run_suite(scope, path)?;
     let html = svmscope::report::render_html(&label, &outcomes);
     match out {
         Some(p) => {
@@ -227,8 +213,8 @@ fn run_report(client: &RpcClient, path: &str, out: Option<&String>) -> Result<()
 
 /// Run a scenario suite from a JSON file and print a test-runner report.
 /// Exits the process with code 1 if any scenario fails its assertion.
-fn run_tests(client: &RpcClient, path: &str) -> Result<(), Box<dyn Error>> {
-    let (label, outcomes) = load_and_run_suite(client, path)?;
+fn run_tests(scope: &Scope, path: &str) -> Result<(), Box<dyn Error>> {
+    let (label, outcomes) = load_and_run_suite(scope, path)?;
     println!("svmscope test — {label}\n");
 
     let mut passed = 0;

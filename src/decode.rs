@@ -18,7 +18,7 @@ const SPL_TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const SPL_TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
 /// A recognized account, broken into named fields.
-#[derive(Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DecodedAccount {
     /// Human label, e.g. "SPL Token Account".
     pub type_name: String,
@@ -26,7 +26,7 @@ pub struct DecodedAccount {
 }
 
 /// One field within a decoded account.
-#[derive(Serialize, Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Field {
     pub name: String,
     pub offset: usize,
@@ -46,7 +46,7 @@ pub struct Field {
 }
 
 /// One account's summary plus (if recognized) its decoded fields.
-#[derive(Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AccountInfo {
     pub address: String,
     pub owner: String,
