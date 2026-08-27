@@ -3,6 +3,7 @@
 //! Run with `cargo run --bin server`, then open http://127.0.0.1:3000.
 
 mod guard;
+mod stats;
 
 use axum::{
     body::Body,
@@ -639,17 +640,11 @@ async fn rate_limit(
     next: Next,
 ) -> Response {
     // Only meter the work-doing API; serving the page itself is cheap.
-    let path = req.uri().path();
-    let metered = path.starts_with("/analyze")
-        || path.starts_with("/replay")
-        || path.starts_with("/simulate")
-        || path.starts_with("/preflight")
-        || path.starts_with("/freeze")
-        || path.starts_with("/account")
-        || path.starts_with("/signatures");
+    let path = req.uri().path().to_string();
 
-    if metered {
-        if let Err(retry) = guard::rate_check(&client_id(&req, Some(peer))) {
+    if let Some(label) = endpoint_label(&path) {
+        let cid = client_id(&req, Some(peer));
+        if let Err(retry) = guard::rate_check(&cid) {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 [(header::RETRY_AFTER, retry.to_string())],
@@ -657,8 +652,35 @@ async fn rate_limit(
             )
                 .into_response();
         }
+        // Count real usage (allowed, work-doing requests) so the operator can see
+        // whether anyone is using svmscope. Private — read via the /stats token.
+        stats::record(label, &cid);
     }
     next.run(req).await
+}
+
+/// The usage bucket for a path, or `None` if it isn't a metered, work-doing route.
+fn endpoint_label(path: &str) -> Option<&'static str> {
+    // `simulate_suite` must be checked before `simulate` (prefix overlap).
+    if path.starts_with("/analyze") {
+        Some("analyze")
+    } else if path.starts_with("/replay") {
+        Some("replay")
+    } else if path.starts_with("/simulate_suite") {
+        Some("simulate_suite")
+    } else if path.starts_with("/simulate") {
+        Some("simulate")
+    } else if path.starts_with("/preflight") {
+        Some("preflight")
+    } else if path.starts_with("/freeze") {
+        Some("freeze")
+    } else if path.starts_with("/account") {
+        Some("account")
+    } else if path.starts_with("/signatures") {
+        Some("signatures")
+    } else {
+        None
+    }
 }
 
 /// Serve repeat GETs of the same URL from a short-lived cache. Demo traffic means
@@ -711,8 +733,34 @@ async fn cache_layer(req: Request, next: Next) -> Response {
     Response::from_parts(parts, Body::from(bytes))
 }
 
+/// The private stats query: `/stats?token=<secret>`.
+#[derive(Deserialize)]
+struct StatsQuery {
+    token: Option<String>,
+}
+
+/// GET /stats — private usage numbers, gated by the `SVMSCOPE_STATS_TOKEN` secret.
+///
+/// If the token isn't configured, or the caller's `?token=` doesn't match, this
+/// returns a plain 404 — so the endpoint is invisible to anyone who doesn't hold
+/// the secret, and never exposes usage data publicly.
+async fn stats_handler(Query(q): Query<StatsQuery>) -> Response {
+    let configured = std::env::var("SVMSCOPE_STATS_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
+    match configured {
+        Some(expected) if q.token.as_deref() == Some(expected.as_str()) => {
+            Json(stats::snapshot_json()).into_response()
+        }
+        _ => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    // Restore any persisted usage tally before serving.
+    stats::load();
+
     // Permissive CORS so any web app can call the API cross-origin — this is what
     // turns the engine from a local binary into infrastructure others build on.
     let cors = tower_http::cors::CorsLayer::permissive();
@@ -733,6 +781,7 @@ async fn main() {
         .route("/signatures/{address}", get(signatures_handler))
         .route("/replay/{signature}", get(replay_handler))
         .route("/freeze/{signature}", get(freeze_handler))
+        .route("/stats", get(stats_handler))
         // Order matters: rate limit first (cheapest rejection), then serve from
         // cache, then CORS headers on whatever comes back.
         .layer(middleware::from_fn(cache_layer))
