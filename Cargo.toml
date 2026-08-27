@@ -1,6 +1,6 @@
 [package]
 name = "svmscope"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Transaction autopsy for Solana — decode any mainnet transaction, replay it locally in an embedded SVM, and mutate state to see what happens."
 license = "MIT"
@@ -15,7 +15,7 @@ categories = [
 ]
 # Publish only the library + binaries; keeps the demo video, web frontend, and
 # TS SDK out of the crates.io package (10MB cap).
-include = ["/src/**", "/static/index.html", "/README.md", "/LICENSE"]
+include = ["/src/**", "/examples/**", "/static/index.html", "/README.md", "/LICENSE"]
 
 [features]
 default = []

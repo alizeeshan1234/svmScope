@@ -38,7 +38,8 @@ pub struct Field {
     pub size: usize,
     /// Current value, formatted for display and to prefill the editor.
     pub value: String,
-    /// Whether the UI should let the user change this field.
+    /// Whether this is a fixed-width scalar that's safe to patch in place
+    /// (the natural target for a `Mutation::patch`).
     pub editable: bool,
     /// Optional human hint (e.g. what a numeric state code means).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -415,7 +416,7 @@ fn decode_nonce(data: &[u8]) -> Option<DecodedAccount> {
 /// the current unix time are timestamps. Everything is reported as `@offset` so
 /// it stays honest about being inferred, and stays editable so it's still useful
 /// for what-ifs.
-pub fn infer_layout(data: &[u8]) -> Option<DecodedAccount> {
+pub(crate) fn infer_layout(data: &[u8]) -> Option<DecodedAccount> {
     if data.len() < 8 {
         return None;
     }
@@ -470,7 +471,7 @@ pub fn infer_layout(data: &[u8]) -> Option<DecodedAccount> {
 /// Fetch each account's on-chain state and decode any recognized layouts.
 ///
 /// Parallel to `account_keys`; accounts that don't exist are skipped.
-pub fn describe_accounts(client: &RpcClient, account_keys: &[String]) -> Vec<AccountInfo> {
+pub(crate) fn describe_accounts(client: &RpcClient, account_keys: &[String]) -> Vec<AccountInfo> {
     let resp: serde_json::Value = match client.send(
         RpcRequest::GetMultipleAccounts,
         json!([account_keys, { "encoding": "base64" }]),

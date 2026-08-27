@@ -71,12 +71,12 @@ pub mod diffs;
 pub mod error;
 pub mod fixture;
 pub mod idl;
-pub mod ixname;
+pub(crate) mod ixname;
 pub mod replay;
 pub mod report;
 pub mod scope;
 pub mod spec;
-pub mod utils;
+pub(crate) mod utils;
 
 pub use analyze::{
     AccountDiff, AccountOverview, Analysis, Explanation, FieldDiff, Overview, ProgramInfo, SigInfo,

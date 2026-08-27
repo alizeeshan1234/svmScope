@@ -77,7 +77,7 @@ pub struct IdlError {
 }
 
 /// Look up a custom error code in an IDL.
-pub fn error_for_code(idl: &Value, code: u64) -> Option<IdlError> {
+pub(crate) fn error_for_code(idl: &Value, code: u64) -> Option<IdlError> {
     idl.get("errors")?.as_array()?.iter().find_map(|e| {
         (e.get("code")?.as_u64()? == code).then(|| IdlError {
             code,
@@ -259,7 +259,7 @@ pub fn find_ix<'a>(idl: &'a Value, data: &[u8]) -> Option<&'a Value> {
 /// discriminator — using the IDL instruction's `args`. Returns `(name, type,
 /// value)` per arg, stopping at the first variable-length arg (offsets past it
 /// are no longer trustworthy), same rule as the account-field walker.
-pub fn decode_ix_args(idl_ix: &Value, data: &[u8]) -> Vec<(String, String, String)> {
+pub(crate) fn decode_ix_args(idl_ix: &Value, data: &[u8]) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     let Some(args) = idl_ix.get("args").and_then(|a| a.as_array()) else {
         return out;
@@ -668,7 +668,7 @@ fn walk_fields(
 /// Returns `None` if the leading 8-byte discriminator doesn't match any account
 /// type in the IDL. Fields are walked from offset 8 (Anchor prepends the
 /// discriminator) and stop at the first variable-length field.
-pub fn decode_with_idl(idl: &Value, data: &[u8]) -> Option<DecodedAccount> {
+pub(crate) fn decode_with_idl(idl: &Value, data: &[u8]) -> Option<DecodedAccount> {
     if data.len() < 8 {
         return None;
     }
