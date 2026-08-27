@@ -5,7 +5,6 @@
 # endpoint on a schedule keeps it warm at no cost (Actions minutes are free for
 # public repos).
 name: keep demo awake
-
 on:
   schedule:
     # Every 5 minutes. NOTE: GitHub throttles scheduled crons heavily (often to

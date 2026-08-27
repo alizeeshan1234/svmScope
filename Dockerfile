@@ -14,7 +14,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
 COPY static ./static
 
-RUN cargo build --release --bin server
+RUN cargo build --release --bin server --features server
 
 # ---- runtime ----
 FROM debian:bookworm-slim

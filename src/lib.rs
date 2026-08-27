@@ -1,6 +1,60 @@
-//! svmscope library: decode, reconstruct, replay, and mutate Solana transactions.
+//! Decode, reconstruct, replay, and mutate Solana transactions.
 //!
-//! Shared by the CLI (`main.rs`) and the web server (`bin/server.rs`).
+//! Point svmscope at a mainnet signature and it (1) **decodes** the transaction —
+//! the full cross-program invocation tree with every instruction named from its
+//! on-chain Anchor IDL or known native layout, balance and token changes, and
+//! compute units per program; (2) **replays** it locally in an embedded SVM
+//! ([LiteSVM](https://docs.rs/litesvm)), re-executing the real program binaries
+//! against the transaction's reconstructed state; and (3) **mutates** — change an
+//! account's lamports or data, warp the clock, flip feature gates, then replay
+//! again to ask *"what if this had been different?"*.
+//!
+//! # Quickstart
+//!
+//! ```no_run
+//! use solana_client::rpc_client::RpcClient;
+//! use svmscope::replay::{Mutation, TimeTravel};
+//!
+//! let rpc = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
+//! let sig = "your transaction signature";
+//!
+//! // 1. Decode: CPI tree, named instructions, balance/token diffs, CU per program.
+//! let analysis = svmscope::analyze(&rpc, sig)?;
+//! println!("fee: {} lamports, {} top-level instructions",
+//!          analysis.overview.fee, analysis.cpi_tree.len());
+//!
+//! // 2. Replay the real programs locally in LiteSVM.
+//! let replay = svmscope::run_replay(&rpc, &analysis.signature)?;
+//! println!("replay success: {}", replay.success);
+//!
+//! // 3. What-if: zero out an account and jump 30 days ahead, then replay.
+//! let what_if = svmscope::simulate(
+//!     &rpc,
+//!     &analysis.signature,
+//!     &[Mutation::Lamports { address: "SomeAccount111...".into(), value: 0 }],
+//!     TimeTravel { seconds: Some(30 * 86_400), ..Default::default() },
+//!     vec![],
+//! )?;
+//! println!("mutated replay success: {}", what_if.success);
+//! # Ok::<(), String>(())
+//! ```
+//!
+//! # Hermetic testing
+//!
+//! Replays against live RPC state drift as the chain moves on. To pin a
+//! transaction's world forever, [`capture_fixture`] snapshots the transaction,
+//! every account it touched, and every program ELF into a [`fixture::Fixture`];
+//! [`run_fixture_suite`] then executes what-if scenario suites (mutations +
+//! expectations + named-field assertions) against that frozen state — offline,
+//! deterministic, CI-friendly.
+//!
+//! # Feature flags
+//!
+//! - `server` — builds the HTTP API server binary (axum); library consumers
+//!   don't need it and it is off by default.
+//!
+//! This same library powers the svmscope CLI, the HTTP API, and the hosted UI
+//! at <https://svmscope.vercel.app> — identical results in all four.
 
 pub mod api;
 pub mod compute;

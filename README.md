@@ -91,11 +91,49 @@ cargo run -- <SIGNATURE>
 cargo run -- <SIGNATURE> --mutate <ADDRESS>:<LAMPORTS>
 
 # web UI (decode + replay + scenario tests)
-cargo run --bin server        # → http://127.0.0.1:3000
+cargo run --bin server --features server        # → http://127.0.0.1:3000
 ```
 
 Uses the public `https://api.mainnet-beta.solana.com` endpoint, which only retains
 recent transactions. For older transactions, point it at an archival RPC.
+
+## Use it as a crate
+
+The CLI, the HTTP API, and the hosted UI are all thin layers over one Rust
+library — `svmscope` on crates.io. Embed the engine directly in your own tests
+or tools:
+
+```toml
+[dependencies]
+svmscope = "0.1"
+```
+
+```rust
+use solana_client::rpc_client::RpcClient;
+use svmscope::replay::{Mutation, TimeTravel};
+
+let rpc = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
+
+// Decode: CPI tree, named instructions, balance/token diffs, CU per program.
+let analysis = svmscope::analyze(&rpc, signature)?;
+
+// Replay the real programs locally in LiteSVM.
+let replay = svmscope::run_replay(&rpc, &analysis.signature)?;
+
+// What-if: mutate state and/or warp the clock, then replay.
+let what_if = svmscope::simulate(
+    &rpc,
+    &analysis.signature,
+    &[Mutation::Lamports { address: pool.into(), value: 0 }],
+    TimeTravel { seconds: Some(30 * 86_400), ..Default::default() },
+    vec![],
+)?;
+
+// Hermetic: freeze the tx's whole world, then run scenario suites offline.
+let fixture = svmscope::capture_fixture(&rpc, &analysis.signature)?;
+```
+
+The `server` feature (off by default) additionally builds the HTTP API binary.
 
 ## Scenario testing — the hermetic part
 
@@ -209,7 +247,7 @@ talk over HTTP — point the UI at any engine with `?api=<url>`.
 
 ## API & SDK
 
-`cargo run --bin server` exposes the engine over HTTP (CORS-enabled; `GET /api`
+`cargo run --bin server --features server` exposes the engine over HTTP (CORS-enabled; `GET /api`
 lists the surface):
 
 | Endpoint | Description |

@@ -20,11 +20,15 @@ jobs:
       - name: Format
         run: cargo fmt --check
       - name: Build
-        run: cargo build --all-targets
+        run: cargo build --all-targets --features server
       - name: Test
-        run: cargo test
+        run: cargo test --features server
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --features server -- -D warnings
+      - name: Build (library consumers, no server feature)
+        run: cargo build
+      - name: Package (crates.io dry run)
+        run: cargo publish --dry-run
       - name: SDK build
         run: |
           cd sdk

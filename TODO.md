@@ -171,6 +171,6 @@ what happens under each edge case."
 3. Verify in UI: an Anchor account shows named editable fields.
 4. Then #2 (field/delta assertions) → #3 (report) → #4 (agent docs, then MCP).
 
-Run the app while iterating: `cargo run --bin server` → http://127.0.0.1:3000.
+Run the app while iterating: `cargo run --bin server --features server` → http://127.0.0.1:3000.
 Good test program to start with: pick a tx touching a well-known Anchor program
 that publishes its IDL on-chain (verify the IDL account exists first).
