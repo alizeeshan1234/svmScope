@@ -92,6 +92,18 @@ pub enum Error {
         ty: String,
     },
 
+    /// A named-field mutation's value doesn't fit the field's declared type.
+    /// A hard error rather than a silent truncation.
+    #[error("{value} does not fit field {field} ({ty})")]
+    FieldValueOutOfRange {
+        /// The field being mutated.
+        field: String,
+        /// The field's declared type (e.g. `u32`).
+        ty: String,
+        /// The rejected value.
+        value: i128,
+    },
+
     /// A field or offset read fell outside the account's data.
     #[error("{what} out of range (account data is {len} bytes)")]
     OutOfRange {

@@ -104,27 +104,32 @@ types as `svmscope::Type`; implementation modules are intentionally private.
 The `idl`, `report`, and `spec` modules are public for IDL inspection, HTML
 reports, and the JSON scenario format respectively.
 
-## Three ways to mutate state
+## Four ways to mutate state
 
-A what-if is one or more `Mutation`s applied before the replay. There are three,
-from coarse to surgical — editing account *bytes* is where most of the power is
-(flip an oracle price, a token balance, a vesting cliff, a config flag):
+A what-if is one or more `Mutation`s applied before the replay. Named-field
+mutations are the headline — flip an oracle price, a token balance, a vesting
+cliff *by name*, with no byte offsets, resolved through the same SPL-layout/IDL
+decoding the assertion DSL uses:
 
 ```rust,no_run
 use svmscope::{Mutation, Scope};
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 # let scope = Scope::new("https://api.mainnet-beta.solana.com");
 # let mut replay = scope.replay("<signature>")?;
-# let (vault, oracle, config) = ("<vault>", "<oracle>", "<config>");
+# let (pool, vault, oracle, config) = ("<pool>", "<vault>", "<oracle>", "<config>");
 let out = replay.simulate(&[
-    // 1. Set an account's SOL balance.
+    // 1. Set a NAMED field — the mutation-side twin of
+    //    Check::account(pool).field("reserve_a", …). A typo'd name errors
+    //    listing the real fields; an out-of-range value is a hard error.
+    Mutation::field(pool, "reserve_a", 1_000_000),
+
+    // 2. Set an account's SOL balance.
     Mutation::lamports(vault, 0),
 
-    // 2. Patch a slice at a byte offset — the usual surgical what-if.
-    //    e.g. overwrite a u64 price/amount in place with little-endian bytes.
+    // 3. Patch a slice at a raw byte offset (when no layout is known).
     Mutation::patch(oracle, 8, 1_000_000_u64.to_le_bytes().to_vec()),
 
-    // 3. Replace an account's data wholesale.
+    // 4. Replace an account's data wholesale.
     Mutation::data(config, vec![0u8; 128]),
 ])?;
 assert!(out.result.success || out.result.error.is_some());
@@ -132,11 +137,9 @@ assert!(out.result.success || out.result.error.is_some());
 # }
 ```
 
-Prefer named-field mutations to raw offsets where a layout is known — decode the
-account (`scope.decode_account` or a fixture's IDL) to find a field's offset, or
-assert on it directly with `Check::account(addr).field("amount", Cmp::gt(0))`.
-The JSON [scenario suites](#scenario-suites-json) below express the same patches
-declaratively with `{"kind":"data","offset":…,"bytes_hex":…}`.
+The JSON [scenario suites](#scenario-suites-json) below express the same
+mutations declaratively: `{"kind":"field","field":"reserve_a","value":…}`,
+`{"kind":"lamports",…}`, and `{"kind":"data","offset":…,"bytes_hex":…}`.
 
 ## Build and send the transaction inside the Rust test
 

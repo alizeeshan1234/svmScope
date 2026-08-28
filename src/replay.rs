@@ -918,7 +918,8 @@ fn fetch_transaction(client: &RpcClient, signature: &str) -> Result<VersionedTra
 /// A change to apply to an account before replaying.
 ///
 /// `Data` replaces an account's bytes wholesale; `DataPatch` overwrites a slice
-/// at an offset (how you'd flip a token balance or an oracle price in place).
+/// at an offset; `Field` sets a *named* field with no offsets at all (how you'd
+/// flip a token balance, an oracle price, or a vesting timestamp by name).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mutation {
     /// Set an account's lamport balance.
@@ -943,6 +944,21 @@ pub enum Mutation {
         offset: usize,
         /// The bytes to write at that offset.
         bytes: Vec<u8>,
+    },
+    /// Set a **named** integer/bool field — no byte offsets. The field resolves
+    /// through the account's decoded layout (SPL layouts, or the owner
+    /// program's IDL) exactly like [`crate::Check`]'s named-field asserts:
+    /// matched by exact name or unambiguous final dot-segment, with unknown
+    /// names erroring and listing the fields that do exist.
+    Field {
+        /// The account to mutate.
+        address: String,
+        /// The field's name (e.g. `"amount"`, or a dotted path like
+        /// `"pool.reserve_a"`).
+        field: String,
+        /// The new value. Must fit the field's declared type — an
+        /// out-of-range value is a hard error, never a silent truncation.
+        value: i128,
     },
 }
 
@@ -972,12 +988,74 @@ impl Mutation {
         }
     }
 
+    /// Set a named integer/bool field of a decoded account — the mutation-side
+    /// twin of `Check::account(addr).field(name, …)`. Resolved through SPL
+    /// layouts or the program's IDL; the value must fit the field's type.
+    ///
+    /// ```no_run
+    /// # use svmscope::Mutation;
+    /// let m = Mutation::field("CounterPda111", "count", 99);
+    /// ```
+    pub fn field(
+        address: impl Into<String>,
+        field: impl Into<String>,
+        value: impl Into<i128>,
+    ) -> Mutation {
+        Mutation::Field {
+            address: address.into(),
+            field: field.into(),
+            value: value.into(),
+        }
+    }
+
     fn address(&self) -> &str {
         match self {
             Mutation::Lamports { address, .. }
             | Mutation::Data { address, .. }
-            | Mutation::DataPatch { address, .. } => address,
+            | Mutation::DataPatch { address, .. }
+            | Mutation::Field { address, .. } => address,
         }
+    }
+}
+
+/// Encode `value` as the little-endian bytes of the field's declared type,
+/// rejecting anything that doesn't fit exactly. Supports the same fixed-width
+/// integer/bool set the named-field *asserts* can read, so the two sides of the
+/// DSL stay symmetric.
+fn encode_field_value(f: &crate::decode::Field, value: i128) -> Result<Vec<u8>> {
+    let out_of_range = || Error::FieldValueOutOfRange {
+        field: f.name.clone(),
+        ty: f.ty.clone(),
+        value,
+    };
+    match (f.ty.as_str(), f.size) {
+        ("bool", _) => match value {
+            0 | 1 => Ok(vec![value as u8]),
+            _ => Err(out_of_range()),
+        },
+        ("u8" | "u16" | "u32" | "u64", n @ 1..=8) => {
+            let v = u64::try_from(value).map_err(|_| out_of_range())?;
+            if n < 8 && (v >> (8 * n)) != 0 {
+                return Err(out_of_range());
+            }
+            Ok(v.to_le_bytes()[..n].to_vec())
+        }
+        ("i8" | "i16" | "i32" | "i64", n @ 1..=8) => {
+            let v = i64::try_from(value).map_err(|_| out_of_range())?;
+            if n < 8 {
+                let bound = 1i64 << (8 * n - 1);
+                if v < -bound || v >= bound {
+                    return Err(out_of_range());
+                }
+            }
+            // Two's-complement truncation: the low n bytes of the i64 are the
+            // iN encoding for any value already checked to be in range.
+            Ok((v as u64).to_le_bytes()[..n].to_vec())
+        }
+        (ty, _) => Err(Error::NonNumericField {
+            field: f.name.clone(),
+            ty: ty.to_string(),
+        }),
     }
 }
 
@@ -1007,6 +1085,14 @@ fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
                     size: account.data.len(),
                 })?;
             account.data[*offset..end].copy_from_slice(bytes);
+        }
+        // Named-field mutations are resolved into concrete patches by the
+        // context (which holds the layouts/IDLs) before application; reaching
+        // here unresolved is a caller bug, reported rather than guessed at.
+        Mutation::Field { field, .. } => {
+            return Err(Error::InvalidSpec(format!(
+                "field mutation \"{field}\" was not resolved before application"
+            )));
         }
     }
     svm.set_account(addr, account).map_err(|e| {
@@ -1345,12 +1431,37 @@ pub struct ScenarioOutcome {
 }
 
 impl ReplayContext {
+    /// Resolve a named-field mutation into a concrete byte patch using the
+    /// account's decoded layout — the same resolution (exact name or
+    /// unambiguous final dot-segment) the Check DSL's named-field asserts use.
+    /// Offsets come from the *pre-transaction* layout; a preceding `Data`
+    /// mutation that replaces the account with a different layout is on the
+    /// caller.
+    fn resolve_mutation(&self, m: &Mutation) -> Result<Mutation> {
+        let Mutation::Field {
+            address,
+            field,
+            value,
+        } = m
+        else {
+            return Ok(m.clone());
+        };
+        let (decoded, _pre) = self.decode_pre(address)?;
+        let f = find_field(&decoded, field)?;
+        let bytes = encode_field_value(f, *value)?;
+        Ok(Mutation::DataPatch {
+            address: address.clone(),
+            offset: f.offset,
+            bytes,
+        })
+    }
+
     /// Run mutations and keep the post-replay SVM so state can be inspected.
     /// A mutation that can't be applied is a hard `Err`, never a failed replay.
     fn run_full(&self, mutations: &[Mutation]) -> Result<(ReplayResult, LiteSVM)> {
         let mut svm = self.fresh_svm();
         for m in mutations {
-            apply_mutation(&mut svm, m)?;
+            apply_mutation(&mut svm, &self.resolve_mutation(m)?)?;
         }
         let result = to_replay_result(svm.send_transaction(self.tx.clone()));
         Ok((result, svm))
@@ -1373,7 +1484,10 @@ impl ReplayContext {
                     _ => None,
                 })
                 .ok_or_else(|| Error::MutationTargetMissing(address.to_string()))?;
-            if let Mutation::DataPatch { offset, bytes, .. } = m {
+            // A named-field mutation validates by fully resolving: the account
+            // decodes, the field exists unambiguously, and the value fits.
+            let m = self.resolve_mutation(m)?;
+            if let Mutation::DataPatch { offset, bytes, .. } = &m {
                 if offset
                     .checked_add(bytes.len())
                     .filter(|&e| e <= data_len)
@@ -1513,6 +1627,74 @@ pub(crate) fn run_suite(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn f(name: &str, ty: &str, size: usize) -> crate::decode::Field {
+        crate::decode::Field {
+            name: name.into(),
+            offset: 0,
+            ty: ty.into(),
+            size,
+            value: String::new(),
+            editable: true,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn field_values_encode_le_at_exact_width() {
+        assert_eq!(
+            encode_field_value(&f("c", "u8", 1), 255).unwrap(),
+            vec![255]
+        );
+        assert_eq!(
+            encode_field_value(&f("c", "u64", 8), u64::MAX as i128).unwrap(),
+            u64::MAX.to_le_bytes().to_vec()
+        );
+        assert_eq!(
+            encode_field_value(&f("c", "i32", 4), -5).unwrap(),
+            (-5i32).to_le_bytes().to_vec()
+        );
+        assert_eq!(
+            encode_field_value(&f("c", "i64", 8), i64::MIN as i128).unwrap(),
+            i64::MIN.to_le_bytes().to_vec()
+        );
+        assert_eq!(encode_field_value(&f("c", "bool", 1), 1).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn field_values_out_of_range_are_hard_errors_not_truncations() {
+        for (ty, size, value) in [
+            ("u8", 1usize, 256i128),
+            ("u8", 1, -1),
+            ("u16", 2, 65_536),
+            ("u64", 8, -1),
+            ("u64", 8, u64::MAX as i128 + 1),
+            ("i8", 1, 128),
+            ("i8", 1, -129),
+            ("i64", 8, i64::MAX as i128 + 1),
+            ("bool", 1, 2),
+        ] {
+            assert!(
+                matches!(
+                    encode_field_value(&f("c", ty, size), value),
+                    Err(Error::FieldValueOutOfRange { .. })
+                ),
+                "{ty} should reject {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_numeric_field_mutations_are_rejected() {
+        assert!(matches!(
+            encode_field_value(&f("owner", "pubkey", 32), 1),
+            Err(Error::NonNumericField { .. })
+        ));
+        assert!(matches!(
+            encode_field_value(&f("x", "coption-u64", 8), 1),
+            Err(Error::NonNumericField { .. })
+        ));
+    }
 
     /// A real SPL token account layout (165 bytes) with amount 1234 @ offset 64,
     /// decoded through the same path named-field assertions use.

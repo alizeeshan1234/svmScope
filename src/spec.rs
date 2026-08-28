@@ -50,8 +50,9 @@ pub fn feature_toggles(features: Vec<FeatureInput>) -> Result<Vec<FeatureToggle>
 }
 
 /// One what-if mutation. `kind` selects the variant:
-/// `{"kind":"lamports","address":..,"lamports":..}` or
-/// `{"kind":"data","address":..,"offset":..,"bytes_hex":".."}` (patch at offset).
+/// `{"kind":"lamports","address":..,"lamports":..}`,
+/// `{"kind":"data","address":..,"offset":..,"bytes_hex":".."}` (patch at offset), or
+/// `{"kind":"field","address":..,"field":..,"value":..}` (set a named field).
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum MutationInput {
@@ -70,6 +71,16 @@ pub enum MutationInput {
         offset: usize,
         /// The bytes to write, as hex (`0x`, spaces, underscores tolerated).
         bytes_hex: String,
+    },
+    /// Set a named integer/bool field, resolved through the account's decoded
+    /// layout (SPL layouts or the owner program's IDL) — no byte offsets.
+    Field {
+        /// The account to mutate.
+        address: String,
+        /// The field's name (exact, or an unambiguous final dot-segment).
+        field: String,
+        /// The new value; must fit the field's declared type.
+        value: i64,
     },
 }
 
@@ -110,6 +121,15 @@ impl MutationInput {
                 address,
                 offset,
                 bytes: hex_decode(&bytes_hex)?,
+            },
+            MutationInput::Field {
+                address,
+                field,
+                value,
+            } => Mutation::Field {
+                address,
+                field,
+                value: i128::from(value),
             },
         })
     }
@@ -319,6 +339,26 @@ mod tests {
         let s: ScenarioInput =
             serde_json::from_str(r#"{"name":"typo","expect":"sucess"}"#).unwrap();
         assert!(matches!(s.into_scenario(), Err(Error::InvalidSpec(_))));
+    }
+
+    #[test]
+    fn field_mutation_parses() {
+        let m: MutationInput =
+            serde_json::from_str(r#"{"kind":"field","address":"X","field":"count","value":-5}"#)
+                .unwrap();
+        match m.into_mutation().unwrap() {
+            Mutation::Field {
+                address,
+                field,
+                value,
+            } => {
+                assert_eq!(
+                    (address.as_str(), field.as_str(), value),
+                    ("X", "count", -5)
+                );
+            }
+            other => panic!("expected Field, got {other:?}"),
+        }
     }
 
     #[test]
