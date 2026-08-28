@@ -7,6 +7,8 @@
 
 **Start from a real transaction.** Decode it, replay it locally in an embedded SVM, mutate state and time-travel, freeze it into a fixture, and assert on it forever.
 
+> 📦 **Full working example:** [github.com/alizeeshan1234/svmscope_example](https://github.com/alizeeshan1234/svmscope_example) — an Anchor program plus a Rust project that consumes the published crate end-to-end.
+
 The Solana testing stack has unit testing ([LiteSVM](https://github.com/LiteSVM/litesvm)), instruction testing ([Mollusk](https://github.com/anza-xyz/mollusk)), and integration testing from current mainnet state ([Surfpool](https://github.com/txtx/surfpool)). svmscope covers the fourth quadrant: **post-mortem and regression testing from a historical transaction** — a real signature already encodes its entire world (accounts, programs, state), so one signature replaces a hundred lines of test setup.
 
 ## Add it to a Rust project
