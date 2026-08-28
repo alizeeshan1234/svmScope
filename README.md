@@ -299,6 +299,12 @@ cargo run --example what_if    -- <signature> <account>
 cargo run --example fixture_ci -- <signature>
 ```
 
+For a full real-world consumer — an Anchor program (counter + SOL vesting) plus a
+standalone Rust project that depends on the published crate and drives the entire
+build → submit → capture → replay → mutate → time-travel → freeze workflow, with a
+129-test offline suite and validator-gated online tests — see
+[`examples/svmscope_crate/`](./examples/svmscope_crate).
+
 ## The CLI
 
 The same engine, on the command line:

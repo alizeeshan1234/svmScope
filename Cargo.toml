@@ -13,11 +13,13 @@ categories = [
     "cryptography::cryptocurrencies",
     "simulation",
 ]
-# Publish only the library + binaries; keeps the demo video, web frontend, and
-# TS SDK out of the crates.io package (10MB cap).
+# Publish only the library + binaries; keeps the demo video, web frontend,
+# TS SDK, and the vendored example project out of the crates.io package (10MB
+# cap). Only the top-level `.rs` example files are packaged, not the nested
+# `examples/svmscope_crate/` reference project.
 include = [
     "/src/**",
-    "/examples/**",
+    "/examples/*.rs",
     "/tests/**",
     "/static/index.html",
     "/README.md",

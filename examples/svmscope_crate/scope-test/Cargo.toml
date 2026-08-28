@@ -1,0 +1,16 @@
+[package]
+name = "scope-test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+svmscope = "0.2"
+serde_json = "1"
+solana-address = { version = "=2.6.1", features = ["curve25519", "sha2"] }
+solana-keypair = "=3.1.2"
+solana-signer = "=3.0.1"
+
+[dev-dependencies]
+# Used by tests/builder_encoding.rs to independently derive the legacy Anchor
+# instruction discriminator: sha256("global:<snake_case>")[..8].
+sha2 = "0.10"
