@@ -2,6 +2,9 @@
 name = "svmscope"
 version = "0.2.2"
 edition = "2021"
+# Verified: the full test suite and all targets compile on 1.91, and the
+# dependency tree requires nothing newer.
+rust-version = "1.91"
 description = "Transaction autopsy for Solana — decode any mainnet transaction, replay it locally in an embedded SVM, and mutate state to see what happens."
 license = "MIT"
 repository = "https://github.com/alizeeshan1234/svmScope"
@@ -21,6 +24,7 @@ include = [
     "/tests/**",
     "/static/index.html",
     "/README.md",
+    "/CHANGELOG.md",
     "/LICENSE",
 ]
 
