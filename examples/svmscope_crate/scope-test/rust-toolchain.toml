@@ -1,0 +1,4 @@
+# Overrides the repo root's 1.89.0 pin (kept for Anchor): the solana 4.x
+# client crates svmscope pulls in need a newer compiler.
+[toolchain]
+channel = "stable"
