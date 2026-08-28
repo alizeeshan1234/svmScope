@@ -1,5 +1,10 @@
 # svmscope
 
+[![crates.io](https://img.shields.io/crates/v/svmscope.svg)](https://crates.io/crates/svmscope)
+[![docs.rs](https://img.shields.io/docsrs/svmscope)](https://docs.rs/svmscope)
+[![CI](https://github.com/alizeeshan1234/svmScope/actions/workflows/ci.yml/badge.svg)](https://github.com/alizeeshan1234/svmScope/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/crates/l/svmscope.svg)](./LICENSE)
+
 **Start from a real transaction.** Decode it, replay it locally in an embedded SVM, mutate state and time-travel, freeze it into a fixture, and assert on it forever.
 
 The Solana testing stack has unit testing ([LiteSVM](https://github.com/LiteSVM/litesvm)), instruction testing ([Mollusk](https://github.com/anza-xyz/mollusk)), and integration testing from current mainnet state ([Surfpool](https://github.com/txtx/surfpool)). svmscope covers the fourth quadrant: **post-mortem and regression testing from a historical transaction** — a real signature already encodes its entire world (accounts, programs, state), so one signature replaces a hundred lines of test setup.
@@ -99,10 +104,11 @@ reports, and the JSON scenario format respectively.
 
 ## Build and send the transaction inside the Rust test
 
-You no longer need to run the TypeScript tests, copy a signature, and then start
-svmscope. The Rust test can build the Anchor instruction from the program IDL,
-sign it, send it to `solana-test-validator`, wait for it to land, and immediately
-receive a replay of the exact pre-transaction state.
+You can also start from scratch instead of an existing signature. A Rust test can
+build an Anchor instruction from the program IDL, sign it, send it to a local
+`solana-test-validator`, wait for it to land, and immediately receive a replay of
+the exact pre-transaction state — no copying signatures out of a separate test
+suite.
 
 ### 1. Build and deploy the Anchor program
 
@@ -134,7 +140,7 @@ initialize that state/PDA first and put its address in
 
 ```toml
 [dev-dependencies]
-svmscope = { path = "../svmscope" }
+svmscope = "0.2"
 serde_json = "1"
 solana-address = "2.6"
 solana-keypair = "3.1"
@@ -326,24 +332,24 @@ Assert kinds: `lamports`, `u64` (at an offset), `token_amount`, `lamports_delta`
 - **Replay** — everything loads into a pristine LiteSVM per run (sigverify/blockhash checks off — the original blockhash can't be valid in a fresh SVM), the clock anchored to the transaction's real slot and block time. There is no validator to wait for, so runs are microseconds and trivially parallel.
 - **Time travel** — programs read time from the Clock sysvar; we own it. Warps move slot, epoch, and timestamp *coherently* (432k slots/epoch, ~400ms/slot), so a program checking all three sees a consistent world.
 
-## Live app
+## Live demo
 
-| | |
-| --- | --- |
-| **App** | https://svmscope.vercel.app |
-| **Engine (API)** | https://svmscope.onrender.com |
+A hosted web UI over this same library — paste a signature, click through the CPI
+tree, edit named account fields, run suites, freeze fixtures — is at
+**[svmscope.vercel.app](https://svmscope.vercel.app)**.
 
-The web UI is a visual layer over this same library — paste a signature, click through the CPI tree, edit named account fields, run suites, freeze fixtures. The `server` feature (off by default — library consumers never compile axum) builds the HTTP API: `cargo run --bin server --features server` → `http://127.0.0.1:3000`, `GET /api` lists the surface. A typed TypeScript client lives in [`sdk/`](./sdk).
+## Optional HTTP server
 
-## Deploy your own
-
-The server reads `HOST`, `PORT`, and `SVMSCOPE_RPC_URL` from the environment:
+The `server` feature (off by default — library consumers never compile axum)
+builds a small HTTP API over the engine, reading `HOST`, `PORT`, and
+`SVMSCOPE_RPC_URL` from the environment:
 
 ```bash
-docker build -t svmscope . && docker run -p 3000:3000 -e SVMSCOPE_RPC_URL=https://your-rpc svmscope
+cargo run --bin server --features server   # → http://127.0.0.1:3000, GET /api lists the surface
 ```
 
-Or on [render.com](https://render.com): **New → Blueprint** → connect the repo (reads [`render.yaml`](./render.yaml)) → deploy. The public mainnet RPC is heavily rate-limited; use your own endpoint for anything hosted.
+A typed TypeScript client lives in [`sdk/`](./sdk). Point it at your own RPC
+endpoint — the public mainnet RPC is heavily rate-limited.
 
 ## Roadmap
 
@@ -362,3 +368,7 @@ See [VISION.md](./VISION.md) for the full architecture.
 ## Built with
 
 Rust · [`litesvm`](https://crates.io/crates/litesvm) · [`solana-client`](https://crates.io/crates/solana-client) · [`thiserror`](https://crates.io/crates/thiserror) · [`serde_json`](https://crates.io/crates/serde_json)
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
