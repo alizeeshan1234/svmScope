@@ -9,6 +9,10 @@ use svmscope::{Check, Cmp, Fixture, Mutation, Replay, Scenario};
 const FIXTURE: &str = include_str!("fixtures/counter_increment.json");
 const COUNTER_PDA: &str = "FLFUsWEUjARKvDrFf9WtF7k1tCxHqtCpfJU2krL6z7vY";
 
+/// A frozen pre-cliff vesting claim that reverted on-chain (Anchor error 6003).
+/// Guards `matches_onchain` fidelity for a *reverting* recorded outcome offline.
+const REVERT_FIXTURE: &str = include_str!("fixtures/vesting_precliff_revert.json");
+
 fn replay() -> Replay {
     Replay::from_fixture(&Fixture::from_json(FIXTURE).expect("fixture parses"))
         .expect("fixture loads")
@@ -90,6 +94,36 @@ fn a_typoed_mutation_address_is_a_hard_error_not_a_passing_revert() {
         ),
         "{err}"
     );
+}
+
+#[test]
+fn matches_onchain_alone_holds_for_a_reverting_recorded_outcome() {
+    // The recorded outcome here is a revert. `matches_onchain` on its own must
+    // pass when the offline replay also reverts — it must NOT be sabotaged by the
+    // implicit "expect success" default that applies when no outcome check is
+    // present. (Regression: previously this failed because the implicit success
+    // expectation contradicted the faithful revert.)
+    let replay = Replay::from_fixture(&Fixture::from_json(REVERT_FIXTURE).unwrap()).unwrap();
+    let alone = replay
+        .verify("matches on-chain", &[], &[Check::matches_onchain()])
+        .unwrap();
+    assert!(
+        alone.pass,
+        "matches_onchain alone should pass on a revert: {alone:?}"
+    );
+
+    // And pairing it with an explicit revert() still passes.
+    let paired = replay
+        .verify(
+            "revert + match",
+            &[],
+            &[Check::revert(), Check::matches_onchain()],
+        )
+        .unwrap();
+    assert!(paired.pass, "{paired:?}");
+
+    // Sanity: the recorded outcome really is a failure.
+    assert!(replay.recorded().is_some_and(|r| !r.success));
 }
 
 #[test]

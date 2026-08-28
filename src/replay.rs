@@ -1415,7 +1415,10 @@ pub(crate) fn run_suite(
             let (actual, svm) = ctx.run_full(&s.mutations)?;
 
             // Transaction-level outcome: every Outcome check must hold; a
-            // scenario that declares none implicitly asserts success.
+            // scenario that declares none implicitly asserts success — unless it
+            // carries a `matches_onchain` check, which is itself the outcome
+            // assertion (and would otherwise be contradicted for a transaction
+            // whose recorded outcome is a revert).
             let outcomes: Vec<&Expect> = s
                 .checks
                 .iter()
@@ -1424,7 +1427,15 @@ pub(crate) fn run_suite(
                     _ => None,
                 })
                 .collect();
-            let implicit = [Expect::Success];
+            let has_matches_onchain = s
+                .checks
+                .iter()
+                .any(|c| matches!(&c.0, CheckKind::MatchesOnchain));
+            let implicit = [if has_matches_onchain {
+                Expect::Any
+            } else {
+                Expect::Success
+            }];
             let effective: &[&Expect] = if outcomes.is_empty() {
                 &[&implicit[0]]
             } else {
@@ -1744,6 +1755,21 @@ mod tests {
         tt.apply(&mut c);
         assert_eq!(c.unix_timestamp, 2_000_000_040);
         assert_eq!(c.slot, clock().slot + 100); // 40s / 0.4s per slot
+    }
+
+    #[test]
+    fn extreme_warp_saturates_instead_of_overflowing() {
+        // A single absurd jump, and the applied clock, must clamp rather than
+        // panic (debug) or wrap (release).
+        let tt = TimeTravel {
+            epochs: Some(i64::MAX),
+            seconds: Some(i64::MAX),
+            slots: Some(i64::MAX),
+            ..Default::default()
+        };
+        let mut c = clock();
+        tt.apply(&mut c); // must not panic
+        assert!(c.unix_timestamp >= clock().unix_timestamp);
     }
 
     #[test]

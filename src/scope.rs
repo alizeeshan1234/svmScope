@@ -670,20 +670,22 @@ impl Replay {
 
     /// Jump forward `n` slots (additive with other jumps).
     pub fn advance_slots(&mut self, n: i64) {
-        self.time_travel.slots = Some(self.time_travel.slots.unwrap_or(0) + n);
+        // Saturating so repeated extreme jumps clamp instead of overflow-panicking
+        // in debug builds; the clock application saturates too.
+        self.time_travel.slots = Some(self.time_travel.slots.unwrap_or(0).saturating_add(n));
         self.apply_tt();
     }
 
     /// Jump forward `n` epochs (additive with other jumps).
     pub fn advance_epochs(&mut self, n: i64) {
-        self.time_travel.epochs = Some(self.time_travel.epochs.unwrap_or(0) + n);
+        self.time_travel.epochs = Some(self.time_travel.epochs.unwrap_or(0).saturating_add(n));
         self.apply_tt();
     }
 
     /// Jump forward `n` seconds (additive with other jumps) — vesting cliffs,
     /// cooldowns, auction deadlines.
     pub fn advance_seconds(&mut self, n: i64) {
-        self.time_travel.seconds = Some(self.time_travel.seconds.unwrap_or(0) + n);
+        self.time_travel.seconds = Some(self.time_travel.seconds.unwrap_or(0).saturating_add(n));
         self.apply_tt();
     }
 
