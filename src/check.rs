@@ -207,8 +207,11 @@ impl AccountCheck {
 /// A scenario with no outcome check implicitly asserts [`Check::success`].
 #[derive(Debug, Clone)]
 pub struct Scenario {
+    /// The scenario's name, shown in outcomes.
     pub name: String,
+    /// Mutations applied to the world before replaying.
     pub mutations: Vec<Mutation>,
+    /// Checks that must hold after the replay.
     pub checks: Vec<Check>,
 }
 

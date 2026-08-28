@@ -6,24 +6,33 @@ use serde_json::Value;
 /// One account an instruction touches, with its IDL role name where known.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IxAccount {
+    /// The account's IDL role name (e.g. "authority"), where known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The account's address, as base58.
     pub address: String,
 }
 
 /// One decoded instruction argument.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct IxArg {
+    /// The argument's IDL name.
     pub name: String,
+    /// The argument's type label (e.g. "u64").
     #[serde(rename = "type")]
     pub ty: String,
+    /// The decoded value, formatted for display.
     pub value: String,
 }
 
+/// One instruction in the transaction's cross-program invocation tree.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CpiEntry {
+    /// Zero-based position among the top-level instructions.
     pub index: usize,
+    /// The invoked program's address, as base58.
     pub program: String,
+    /// Invocation depth: 1 = top-level, 2+ = invoked by another program.
     pub stack_height: u64,
     /// Decoded instruction name (e.g. "Route V2"), filled in by `analyze` where an
     /// IDL or a known native layout lets us name it. `None` = couldn't decode.

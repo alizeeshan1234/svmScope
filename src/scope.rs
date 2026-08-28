@@ -12,27 +12,30 @@
 //! println!("success: {}", out.result.success);
 //! # Ok::<(), svmscope::Error>(())
 //! ```
-
 use serde::Serialize;
 use serde_json::json;
 use solana_address::Address;
 use solana_client::rpc_client::RpcClient;
+use solana_client::rpc_config::RpcSendTransactionConfig;
 use solana_client::rpc_request::RpcRequest;
+use solana_transaction::versioned::VersionedTransaction;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::analyze::{
     build_overview, AccountDiff, AccountOverview, Analysis, Explanation, FieldDiff, ProgramInfo,
     SigInfo, SimulationReport,
 };
+use crate::check::{Check, Scenario};
 use crate::error::{Error, Result};
 use crate::fixture::Fixture;
-use crate::check::{Check, Scenario};
 use crate::replay::{
     FeatureToggle, Mutation, PreState, ReplayContext, ReplayResult, ScenarioOutcome, TimeTravel,
 };
-use crate::{cpi_tree, decode, diffs, idl, ixname, utils};
+use crate::{cpi_tree, decode, diffs, idl, ixname, utils, CapturedTransaction};
 
 /// An RPC-backed client with caches. Everything svmscope fetches — transaction
 /// JSON, program IDLs — is fetched once per `Scope` and reused, so
@@ -44,6 +47,20 @@ pub struct Scope {
     tx_cache: Mutex<HashMap<String, serde_json::Value>>,
     /// On-chain IDL by program id; `None` = checked, program publishes none.
     idl_cache: Mutex<HashMap<String, Option<serde_json::Value>>>,
+}
+
+fn status_is_confirmed(status: &serde_json::Value) -> bool {
+    match status
+        .get("confirmationStatus")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("confirmed" | "finalized") => true,
+        Some("processed") => false,
+        None => status.get("confirmations").is_some_and(|confirmation| {
+            confirmation.is_null() || confirmation.as_u64().is_some_and(|count| count > 1)
+        }),
+        Some(_) => false,
+    }
 }
 
 impl Scope {
@@ -91,25 +108,42 @@ impl Scope {
     }
 
     /// The transaction's `getTransaction` JSON, fetched once and cached.
-    fn transaction_json(&self, signature: &str) -> Result<serde_json::Value> {
+    fn fetch_transaction_json(&self, signature: &str) -> Result<Option<serde_json::Value>> {
         if let Some(tx) = self.tx_cache.lock().unwrap().get(signature) {
-            return Ok(tx.clone());
+            return Ok(Some(tx.clone()));
         }
+
         let tx: serde_json::Value = self
             .client
             .send(
                 RpcRequest::GetTransaction,
-                json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
+                json!([
+                    signature,
+                    {
+                        "encoding": "json",
+                        "commitment": "confirmed",
+                        "maxSupportedTransactionVersion": 0
+                    }
+                ]),
             )
             .map_err(Error::rpc)?;
+
+        // A recently confirmed transaction may not be indexed yet.
         if tx.is_null() {
-            return Err(Error::TransactionNotFound(signature.to_string()));
+            return Ok(None);
         }
+
         self.tx_cache
             .lock()
             .unwrap()
             .insert(signature.to_string(), tx.clone());
-        Ok(tx)
+
+        Ok(Some(tx))
+    }
+
+    fn transaction_json(&self, signature: &str) -> Result<serde_json::Value> {
+        self.fetch_transaction_json(signature)?
+            .ok_or_else(|| Error::TransactionNotFound(signature.to_string()))
     }
 
     /// A program's on-chain IDL, fetched once and cached (`None` = has none).
@@ -444,20 +478,119 @@ impl Scope {
         }
         None
     }
+
+    fn wait_for_transaction(&self, signature: &str) -> Result<serde_json::Value> {
+        const TIMEOUT: Duration = Duration::from_secs(20);
+        const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+        let deadline = Instant::now() + TIMEOUT;
+        let mut confirmed = false;
+
+        loop {
+            if Instant::now() >= deadline {
+                return if confirmed {
+                    Err(Error::TransactionMetadataUnavailable {
+                        signature: signature.to_string(),
+                    })
+                } else {
+                    Err(Error::ConfirmationTimeout {
+                        signature: signature.to_string(),
+                    })
+                };
+            }
+
+            if !confirmed {
+                let response: serde_json::Value = self
+                    .client
+                    .send(
+                        RpcRequest::GetSignatureStatuses,
+                        json!([
+                            [signature],
+                            {
+                                "searchTransactionHistory": true,
+                            }
+                        ]),
+                    )
+                    .map_err(Error::rpc)?;
+
+                let statuses = response
+                    .get("value")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| {
+                        Error::MalformedRpcResponse(
+                            "getSignatureStatuses: missing value array".into(),
+                        )
+                    })?;
+
+                let status = statuses.first().ok_or_else(|| {
+                    Error::MalformedRpcResponse("getSignatureStatuses: empty value array".into())
+                })?;
+
+                if !status.is_null() && status_is_confirmed(status) {
+                    confirmed = true;
+                }
+            }
+
+            if confirmed {
+                if let Some(tx) = self.fetch_transaction_json(signature)? {
+                    return Ok(tx);
+                }
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+
+            if !remaining.is_zero() {
+                thread::sleep(POLL_INTERVAL.min(remaining));
+            }
+        }
+    }
+
+    /// Submit a signed transaction while retaining its pre-transaction world
+    /// for replay, mutation, and time travel after it lands.
+    pub fn send_and_capture(&self, tx: VersionedTransaction) -> Result<CapturedTransaction> {
+        let mut replay = self.preflight_tx(tx.clone())?;
+        let signature = self
+            .client
+            .send_transaction_with_config(
+                &tx,
+                RpcSendTransactionConfig {
+                    // A reverting transaction must still land so svmscope can
+                    // capture its program failure as data.
+                    skip_preflight: true,
+                    ..RpcSendTransactionConfig::default()
+                },
+            )
+            .map_err(Error::rpc)?;
+
+        let tx_json = self.wait_for_transaction(&signature.to_string())?;
+
+        replay.set_recorded(OnchainRecord::from_tx_json(&tx_json));
+
+        Ok(CapturedTransaction {
+            signature: signature.to_string(),
+            replay,
+        })
+    }
 }
 
 /// The transaction's actual on-chain outcome, kept alongside the replay so
 /// local results can be compared against what really happened.
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct OnchainRecord {
+    /// Whether the transaction succeeded on-chain.
     pub success: bool,
     /// The on-chain error, as reported by the RPC (JSON-encoded), when it failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Fee paid on-chain, in lamports.
     pub fee: u64,
+    /// Compute units consumed on-chain, if reported.
     pub compute_units: Option<u64>,
+    /// Slot the transaction landed in, if reported.
     pub slot: Option<u64>,
+    /// Block time (unix seconds), when the RPC reports it.
     pub block_time: Option<i64>,
+    /// The program logs the transaction produced on-chain.
     pub logs: Vec<String>,
 }
 
@@ -494,6 +627,10 @@ pub struct Replay {
 }
 
 impl Replay {
+    pub(crate) fn set_recorded(&mut self, recorded: OnchainRecord) {
+        self.recorded = Some(recorded);
+    }
+
     /// Rebuild a replay from a frozen fixture — fully offline, no RPC. A v2
     /// fixture restores the recorded on-chain outcome and captured IDLs too.
     pub fn from_fixture(fx: &Fixture) -> Result<Replay> {
@@ -646,6 +783,7 @@ impl Replay {
 /// failure — a plain-language explanation.
 #[derive(Debug, Serialize)]
 pub struct Replayed {
+    /// The replay's outcome (success, error, logs, CU).
     pub result: ReplayResult,
     /// Every account the transaction changed, before → after, with named
     /// fields where the layout (or an IDL) is known.
@@ -794,4 +932,63 @@ fn decode_diffs(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn confirmed_success_is_landed() {
+        let status = json!({
+            "confirmationStatus": "confirmed",
+            "err": null
+        });
+
+        assert!(status_is_confirmed(&status));
+    }
+
+    #[test]
+    fn confirmed_program_failure_is_still_landed() {
+        let status = json!({
+            "confirmationStatus": "confirmed",
+            "err": {
+                "InstructionError": [0, {"Custom": 6001}]
+            }
+        });
+
+        assert!(status_is_confirmed(&status));
+    }
+
+    #[test]
+    fn finalized_is_landed() {
+        let status = json!({
+            "confirmationStatus": "finalized",
+            "err": null
+        });
+
+        assert!(status_is_confirmed(&status));
+    }
+
+    #[test]
+    fn processed_is_not_confirmed() {
+        let status = json!({
+            "confirmationStatus": "processed",
+            "err": null
+        });
+
+        assert!(!status_is_confirmed(&status));
+    }
+
+    #[test]
+    fn legacy_rooted_status_is_confirmed() {
+        let status = json!({
+            "confirmationStatus": null,
+            "confirmations": null,
+            "err": null
+        });
+
+        assert!(status_is_confirmed(&status));
+    }
 }

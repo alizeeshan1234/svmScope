@@ -19,12 +19,15 @@ use crate::replay::{AccountAssert, CmpOp, Expect, FeatureToggle, Mutation, State
 /// false = deactivate an active one.
 #[derive(Deserialize, Clone)]
 pub struct FeatureInput {
+    /// The feature gate's address, as base58.
     pub id: String,
+    /// True to activate the gate, false to deactivate it.
     #[serde(default)]
     pub active: bool,
 }
 
 impl FeatureInput {
+    /// Convert into the engine's [`FeatureToggle`], validating the id.
     pub fn into_toggle(self) -> Result<FeatureToggle> {
         let id = Address::from_str(self.id.trim())
             .map_err(|_| Error::InvalidSpec(format!("bad feature id (not a pubkey): {}", self.id)))?;
@@ -49,13 +52,20 @@ pub fn feature_toggles(features: Vec<FeatureInput>) -> Result<Vec<FeatureToggle>
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum MutationInput {
+    /// Set an account's lamport balance.
     Lamports {
+        /// The account to mutate.
         address: String,
+        /// The new lamport balance.
         lamports: u64,
     },
+    /// Patch an account's data at an offset.
     Data {
+        /// The account to mutate.
         address: String,
+        /// Byte offset where the patch begins.
         offset: usize,
+        /// The bytes to write, as hex (`0x`, spaces, underscores tolerated).
         bytes_hex: String,
     },
 }
@@ -78,6 +88,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>> {
 }
 
 impl MutationInput {
+    /// Convert into the engine's [`Mutation`], decoding hex bytes.
     pub fn into_mutation(self) -> Result<Mutation> {
         Ok(match self {
             MutationInput::Lamports { address, lamports } => Mutation::Lamports {
@@ -111,14 +122,18 @@ impl MutationInput {
 /// `op` is one of `== != < <= > >=` (default `==`).
 #[derive(Deserialize)]
 pub struct AssertInput {
+    /// The account the assertion reads.
     pub address: String,
+    /// The assertion kind (see the type docs); defaults to `"u64"`.
     #[serde(default = "default_kind")]
     pub kind: String,
+    /// Byte offset for the `u64` kind.
     #[serde(default)]
     pub offset: usize,
     /// Field name for the `field` / `field_delta` kinds.
     #[serde(default)]
     pub field: Option<String>,
+    /// Comparison operator: `==` `!=` `<` `<=` `>` `>=` (default `==`).
     #[serde(default = "default_op")]
     pub op: String,
     /// Signed so deltas can be negative; non-delta kinds require it to be ≥ 0.
@@ -207,13 +222,19 @@ impl AssertInput {
 /// an optional `contains` requires the error/logs to include that text.
 #[derive(Deserialize)]
 pub struct ScenarioInput {
+    /// The scenario's name, shown in outcomes.
     pub name: String,
+    /// The transaction-level expectation: `"success"`, `"revert"`/`"fail"`,
+    /// or `"any"` (the default).
     #[serde(default = "default_expect")]
     pub expect: String,
+    /// For a revert expectation: text the error/logs must include.
     #[serde(default)]
     pub contains: Option<String>,
+    /// Mutations applied to the world before replaying.
     #[serde(default)]
     pub mutations: Vec<MutationInput>,
+    /// Post-replay state assertions.
     #[serde(default)]
     pub asserts: Vec<AssertInput>,
 }
@@ -391,8 +412,10 @@ mod tests {
 /// offline run — the CI-safe path — or `signature` to fetch live state via RPC.
 #[derive(Deserialize)]
 pub struct SuiteRequest {
+    /// Transaction signature for the live-RPC path.
     #[serde(default)]
     pub signature: Option<String>,
+    /// Path to a frozen fixture file for the offline path.
     #[serde(default)]
     pub fixture: Option<String>,
     /// Cluster name (mainnet/devnet/testnet/localnet) for the live-signature path.
@@ -407,5 +430,6 @@ pub struct SuiteRequest {
     /// Optional runtime feature-gate toggles applied to every scenario.
     #[serde(default)]
     pub features: Vec<FeatureInput>,
+    /// The scenarios to run.
     pub scenarios: Vec<ScenarioInput>,
 }

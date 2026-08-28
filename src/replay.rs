@@ -22,16 +22,21 @@ const NATIVE_LOADER: &str = "NativeLoader1111111111111111111111111111111";
 const BPF_LOADER_2: &str = "BPFLoader2111111111111111111111111111111111";
 const BPF_LOADER_UPGRADEABLE: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
 
+/// The outcome of one local replay run.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Default)]
 pub struct ReplayResult {
+    /// Whether the transaction executed without error.
     pub success: bool,
+    /// The failure, formatted, when `success` is false.
     pub error: Option<String>,
     /// The failure resolved to its human name via the program's IDL, e.g.
     /// "SlippageToleranceExceeded" for a bare `Custom(6001)`. Filled in by the
     /// library layer (which has RPC access); `None` when unresolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_name: Option<String>,
+    /// The program logs the replay produced.
     pub logs: Vec<String>,
+    /// Compute units the replay consumed.
     pub compute_units: u64,
 }
 
@@ -46,7 +51,7 @@ fn fetch_account_data(client: &RpcClient, address: &str) -> Option<Vec<u8>> {
     let resp: serde_json::Value = client
         .send(
             RpcRequest::GetAccountInfo,
-            json!([address, { "encoding": "base64" }]),
+            json!([address, { "encoding": "base64", "commitment": "confirmed" }]),
         )
         .ok()?;
     let data_b64 = resp["value"]["data"][0].as_str()?;
@@ -74,7 +79,10 @@ fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Result<LoadedAcc
     let resp: serde_json::Value = client
         .send(
             RpcRequest::GetMultipleAccounts,
-            json!([account_keys, { "encoding": "base64" }]),
+            json!([
+                account_keys,
+                { "encoding": "base64", "commitment": "confirmed" }
+            ]),
         )
         .map_err(Error::rpc)?;
 
@@ -872,17 +880,27 @@ fn fetch_transaction(client: &RpcClient, signature: &str) -> Result<VersionedTra
 /// at an offset (how you'd flip a token balance or an oracle price in place).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mutation {
+    /// Set an account's lamport balance.
     Lamports {
+        /// The account to mutate.
         address: String,
+        /// The new lamport balance.
         value: u64,
     },
+    /// Replace an account's data wholesale.
     Data {
+        /// The account to mutate.
         address: String,
+        /// The complete replacement data.
         bytes: Vec<u8>,
     },
+    /// Overwrite a slice of an account's data at an offset.
     DataPatch {
+        /// The account to mutate.
         address: String,
+        /// Byte offset where the patch begins.
         offset: usize,
+        /// The bytes to write at that offset.
         bytes: Vec<u8>,
     },
 }
@@ -1245,19 +1263,24 @@ fn short(s: &str) -> String {
 /// The result of one post-replay assertion.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AssertOutcome {
+    /// Human description of what was asserted.
     pub description: String,
+    /// Whether the assertion held.
     pub pass: bool,
 }
 
 /// The result of running one scenario.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ScenarioOutcome {
+    /// The scenario's name.
     pub name: String,
     /// Human description of the transaction-level expectation.
     pub expect: String,
     /// Whether everything asserted (outcome + all state checks) held.
     pub pass: bool,
+    /// What the replay actually did.
     pub actual: ReplayResult,
+    /// Each state assertion's individual result.
     pub asserts: Vec<AssertOutcome>,
 }
 

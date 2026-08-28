@@ -1,4 +1,5 @@
 #![deny(unreachable_pub)]
+#![warn(missing_docs)]
 
 //! Decode, reconstruct, replay, and mutate Solana transactions.
 //!
@@ -53,6 +54,35 @@
 //! # Ok::<(), svmscope::Error>(())
 //! ```
 //!
+//! # Building and submitting transactions
+//!
+//! You don't have to start from an existing signature. Against a local
+//! validator, [`Scope::program_with_idl`] gives an IDL-driven builder: pick a
+//! method, supply accounts and JSON arguments, and
+//! [`MethodBuilder::send_and_capture`] signs, submits, waits for the
+//! transaction to land, and returns a [`CapturedTransaction`] whose replay
+//! holds the exact pre-transaction world — ready for mutation and time travel
+//! with no further RPC.
+//!
+//! ```no_run
+//! # use serde_json::json;
+//! # use std::str::FromStr;
+//! # let scope = svmscope::Scope::new("http://127.0.0.1:8899");
+//! # let program_id = solana_address::Address::from_str("11111111111111111111111111111111")?;
+//! # let idl = json!({});
+//! # let payer = solana_keypair::Keypair::new();
+//! # let state = program_id;
+//! let captured = scope
+//!     .program_with_idl(program_id, idl)
+//!     .method("setValue")?
+//!     .payer(&payer)
+//!     .account("state", state)
+//!     .args(json!({ "value": 42 }))?
+//!     .send_and_capture()?;
+//! println!("landed: {}", captured.signature);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
 //! # Hermetic testing
 //!
 //! Replays against live RPC state drift as the chain moves on. To pin a
@@ -93,11 +123,14 @@ mod diffs;
 mod error;
 mod fixture;
 pub mod idl;
+mod idl_encode;
 pub(crate) mod ixname;
+mod program;
 mod replay;
 pub mod report;
 mod scope;
 pub mod spec;
+mod submit;
 pub(crate) mod utils;
 
 pub use analyze::{
@@ -111,10 +144,17 @@ pub use decode::{AccountInfo, DecodedAccount, Field};
 pub use diffs::{BalanceChange, TokenChange};
 pub use error::{Error, Result};
 pub use fixture::{Fixture, FixtureEntry, FIXTURE_VERSION};
+pub use program::{MethodBuilder, ProgramClient};
 pub use replay::{
     AssertOutcome, FeatureToggle, Mutation, ReplayResult, ScenarioOutcome, TimeTravel,
 };
 pub use scope::{OnchainRecord, Replay, Replayed, Scope};
+pub use submit::CapturedTransaction;
+
+/// Compile-checks every Rust example in the README as part of `cargo test`.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
 
 /// Resolve a cluster name or explicit RPC URL to an endpoint. Precedence:
 /// explicit `rpc` URL > `cluster` name > `default`.

@@ -1,3 +1,11 @@
+//! On-chain Anchor IDL fetching, parsing, and account/instruction decoding.
+//!
+//! Anchor programs can publish their IDL to a derived on-chain account
+//! (zlib-compressed JSON). This module locates and inflates it, resolves
+//! custom error codes to their names, lists a program's instructions with
+//! discriminators and account/argument specs, and decodes account data into
+//! named fields using the IDL's type definitions.
+
 use std::io::Read;
 
 use crate::decode::{DecodedAccount, Field};
@@ -71,8 +79,11 @@ fn fetch_idl_program_metadata(client: &RpcClient, program_id: Address) -> Option
 /// `Custom(6024)` and "Slippage exceeded".
 #[derive(serde::Serialize, Clone)]
 pub struct IdlError {
+    /// The numeric custom error code (e.g. 6024).
     pub code: u64,
+    /// The error's name in the IDL (e.g. "SlippageToleranceExceeded").
     pub name: String,
+    /// The error's human message from the IDL.
     pub msg: String,
 }
 
@@ -98,18 +109,26 @@ pub(crate) fn error_for_code(idl: &Value, code: u64) -> Option<IdlError> {
 /// One instruction a program exposes, for the transaction builder.
 #[derive(serde::Serialize)]
 pub struct IdlInstruction {
+    /// The instruction's IDL method name.
     pub name: String,
     /// 8-byte Anchor discriminator.
     pub discriminator: Vec<u8>,
+    /// The instruction's doc lines from the IDL.
     pub docs: Vec<String>,
+    /// The accounts the instruction takes, in order.
     pub accounts: Vec<IdlAccountSpec>,
+    /// The arguments the instruction takes, in order.
     pub args: Vec<IdlArg>,
 }
 
+/// One account an IDL instruction requires.
 #[derive(serde::Serialize)]
 pub struct IdlAccountSpec {
+    /// The account's IDL name (e.g. "authority").
     pub name: String,
+    /// Whether the instruction may write to the account.
     pub writable: bool,
+    /// Whether the account must sign the transaction.
     pub signer: bool,
     /// True when the IDL says this account is a PDA.
     pub pda: bool,
@@ -128,13 +147,21 @@ pub struct IdlAccountSpec {
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum PdaSeed {
     /// Literal bytes.
-    Const { bytes: Vec<u8> },
+    Const {
+        /// The literal seed bytes.
+        bytes: Vec<u8>,
+    },
     /// The public key of another account in the same instruction.
-    Account { path: String },
+    Account {
+        /// The referenced account's IDL path.
+        path: String,
+    },
 }
 
+/// One argument an IDL instruction takes.
 #[derive(serde::Serialize)]
 pub struct IdlArg {
+    /// The argument's IDL name.
     pub name: String,
     /// Wire type label, e.g. "u64" / "pubkey" / "string".
     #[serde(rename = "type")]
@@ -236,6 +263,14 @@ pub fn instructions(idl: &Value) -> Vec<IdlInstruction> {
             })
         })
         .collect()
+}
+
+/// Find an instruction definition by its exact IDL method name.
+pub(crate) fn instruction_by_name<'a>(idl: &'a Value, name: &str) -> Option<&'a Value> {
+    idl.get("instructions")?
+        .as_array()?
+        .iter()
+        .find(|instruction| instruction.get("name").and_then(Value::as_str) == Some(name))
 }
 
 /// Find the IDL instruction whose 8-byte discriminator matches this instruction's

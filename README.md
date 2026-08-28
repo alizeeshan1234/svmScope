@@ -36,10 +36,12 @@ svmscope = { version = "0.2", features = ["server"] }
 
 ## Library quickstart
 
-```rust
+```rust,no_run
 use svmscope::{Check, Cmp, Mutation, Scope};
 
 let scope = Scope::new("https://api.mainnet-beta.solana.com");
+let signature = "a mainnet transaction signature";
+let (vault, user) = ("the vault's address", "the user's address");
 
 // Decode: the full CPI tree, every instruction named from its on-chain IDL.
 let analysis = scope.analyze(signature)?;
@@ -68,6 +70,7 @@ let future = replay.run()?;
 // Freeze the whole world into one JSON file: accounts, ELFs, IDLs, and the
 // recorded on-chain outcome. It replays identically forever, offline.
 std::fs::write("fixtures/claim.json", scope.capture(signature)?.to_json()?)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 The main API is available directly from the crate root. Import
@@ -76,12 +79,137 @@ types as `svmscope::Type`; implementation modules are intentionally private.
 The `idl`, `report`, and `spec` modules are public for IDL inspection, HTML
 reports, and the JSON scenario format respectively.
 
-### Offline fixture use
+## Build and send the transaction inside the Rust test
+
+You no longer need to run the TypeScript tests, copy a signature, and then start
+svmscope. The Rust test can build the Anchor instruction from the program IDL,
+sign it, send it to `solana-test-validator`, wait for it to land, and immediately
+receive a replay of the exact pre-transaction state.
+
+### 1. Build and deploy the Anchor program
+
+Terminal 1 (leave it running):
+
+```bash
+solana-test-validator --reset
+```
+
+Terminal 2:
+
+```bash
+anchor build
+anchor deploy --provider.cluster localnet
+mkdir -p tests/fixtures
+solana-keygen new --no-bip39-passphrase -o tests/fixtures/payer.json
+solana airdrop 10 "$(solana address -k tests/fixtures/payer.json)" --url localhost
+anchor keys list
+```
+
+Keep the generated `target/idl/<program>.json`. The local validator must already
+have the program deployed before svmscope constructs the replay because the
+replay captures the deployed ELF and all input accounts. Put the address printed
+by `anchor keys list` in `YOUR_PROGRAM_ID`. If the instruction updates state,
+initialize that state/PDA first and put its address in
+`YOUR_EXISTING_STATE_ACCOUNT`.
+
+### 2. Add the test dependencies
+
+```toml
+[dev-dependencies]
+svmscope = { path = "../svmscope" }
+serde_json = "1"
+solana-address = "2.6"
+solana-keypair = "3.1"
+solana-signer = "3.0"
+```
+
+### 3. Construct, submit, capture, mutate, and time-travel
+
+```rust,no_run
+use std::str::FromStr;
+
+use serde_json::json;
+use solana_address::Address;
+use solana_keypair::read_keypair_file;
+use solana_signer::Signer;
+use svmscope::{Mutation, Scope};
+
+fn invokes_program_and_replays_it() -> Result<(), Box<dyn std::error::Error>> {
+    let scope = Scope::new("http://127.0.0.1:8899");
+    let program_id = Address::from_str("YOUR_PROGRAM_ID")?;
+    let state = Address::from_str("YOUR_EXISTING_STATE_ACCOUNT")?;
+    let payer = read_keypair_file("tests/fixtures/payer.json")?;
+    let idl = serde_json::from_str(&std::fs::read_to_string(
+        "target/idl/your_program.json",
+    )?)?;
+
+    let mut captured = scope
+        .program_with_idl(program_id, idl)
+        .method("setValue")?
+        .payer(&payer)
+        // Names must match the IDL. Nested accounts may use "group.account".
+        .account("authority", payer.pubkey())
+        .account("state", state)
+        .args(json!({ "value": 42 }))?
+        .send_and_capture()?;
+
+    // This signature was created here; nothing is copied from a TS test.
+    println!("landed transaction: {}", captured.signature);
+    assert!(captured.replay.recorded().is_some());
+
+    // Re-execute locally from the state captured immediately before submission.
+    let baseline = captured.replay.run()?;
+    assert!(baseline.result.success);
+
+    // Mutations and time travel now reuse that in-memory replay with no RPC.
+    let changed = captured
+        .replay
+        .simulate(&[Mutation::lamports(state.to_string(), 0)])?;
+    println!("after mutation: {:?}", changed.result.error);
+
+    captured.replay.advance_seconds(30 * 86_400);
+    let future = captured.replay.run()?;
+    println!("after 30 days: {}", future.result.success);
+
+    // Optional: freeze this newly created transaction for offline CI.
+    let fixture = captured.replay.to_fixture()?;
+    std::fs::write("fixtures/set_value.json", fixture.to_json()?)?;
+
+    Ok(())
+}
+```
+
+Use `.account_signer("accountName", &keypair)` when an IDL account must sign,
+or `.signer(&keypair)` when its address was supplied separately. Fixed-address
+accounts in modern Anchor IDLs, such as the System Program, are filled
+automatically. PDAs are addresses, not signers: derive them in the test and pass
+the result with `.account(...)`.
+
+Argument values are JSON and are Borsh-encoded in IDL order. Supported values
+include booleans; signed and unsigned integers through 128 bits; floats; strings;
+public keys; bytes; vectors; options; fixed arrays; and IDL-defined structs and
+enums. Pass integers larger than JSON's exact numeric range as decimal strings,
+and bytes either as `[0, 1, 255]` or a `"0x..."` string.
+
+`send_and_capture` waits up to 20 seconds. A program revert is still a landed
+transaction and returns `Ok(CapturedTransaction)` with
+`captured.replay.recorded().unwrap().success == false`. `Err` is reserved for an
+RPC failure, timeout, malformed IDL/accounts/arguments, or transaction-building
+failure.
+
+If you already construct a `VersionedTransaction` yourself, use the lower-level
+path directly:
+
+```rust,ignore
+let captured = scope.send_and_capture(signed_versioned_transaction)?;
+```
+
+## Offline fixture use
 
 Capture a transaction once while connected to RPC, then load it without any
 network access in tests or CI:
 
-```rust
+```rust,no_run
 use svmscope::{Check, Fixture, Replay, Scenario};
 
 let fixture = Fixture::from_json(&std::fs::read_to_string("fixtures/claim.json")?)?;
@@ -128,7 +256,7 @@ cargo run -- upgrade fixture.json                 # re-capture an old fixture as
 
 Every command takes `--cluster <mainnet|devnet|testnet|localnet>` or `--rpc <url>`.
 
-```
+```text
 $ cargo run -- <SIGNATURE>
 
 #0  Route V2  (JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4)
@@ -163,7 +291,7 @@ Suites also exist as a JSON format — the same one the web UI exports and `svms
 }
 ```
 
-```
+```text
 $ cargo run -- test suite.json
 svmscope test — fixture 4RHX…oJWt (16 accounts, 5 programs) [deterministic, offline]
   PASS  baseline replays faithfully  (expect: succeeds; got: succeeded)

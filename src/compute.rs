@@ -13,9 +13,12 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Compute units one program consumed within a transaction.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CuUsage {
+    /// The program's address, as base58.
     pub program: String,
+    /// Compute units consumed across all of the program's invocations.
     pub cu: u64,
 }
 

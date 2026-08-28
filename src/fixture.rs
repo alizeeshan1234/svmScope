@@ -23,14 +23,20 @@ fn default_version() -> u32 {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum FixtureEntry {
+    /// A data account, captured verbatim.
     Data {
+        /// The account's address, as base58.
         address: String,
+        /// The program that owns the account.
         owner: String,
+        /// The account's SOL balance in lamports.
         lamports: u64,
         /// base64 of the raw account data.
         data_b64: String,
     },
+    /// A program, captured as its executable bytecode.
     Program {
+        /// The program's address, as base58.
         address: String,
         /// base64 of the program's ELF bytecode.
         elf_b64: String,
@@ -44,6 +50,7 @@ pub struct Fixture {
     /// which adds `idls` and `recorded`.
     #[serde(default = "default_version")]
     pub version: u32,
+    /// The frozen transaction's signature, as base58.
     pub signature: String,
     /// The slot the live context actually ran at — the SVM clock is set to this on
     /// reload, so a frozen replay uses the *same* slot the live one did (not the
@@ -57,6 +64,7 @@ pub struct Fixture {
     pub captured_block_time: Option<i64>,
     /// base64 of the bincode-serialized `VersionedTransaction`.
     pub tx_b64: String,
+    /// Every captured account and program the transaction touches.
     pub entries: Vec<FixtureEntry>,
     /// On-chain Anchor IDLs by program id, captured so named-field asserts,
     /// error names, and decoded diffs all resolve **offline**. (v2+)

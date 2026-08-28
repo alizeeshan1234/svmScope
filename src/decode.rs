@@ -22,13 +22,16 @@ const SPL_TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 pub struct DecodedAccount {
     /// Human label, e.g. "SPL Token Account".
     pub type_name: String,
+    /// The account's fields, in layout order.
     pub fields: Vec<Field>,
 }
 
 /// One field within a decoded account.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Field {
+    /// The field's name (e.g. "amount").
     pub name: String,
+    /// Byte offset of the field within the account's data.
     pub offset: usize,
     /// Wire type the UI uses to pick an editor and encode edits:
     /// "u64" | "u8" | "bool" | "pubkey" | "coption-pubkey" | "coption-u64".
@@ -49,11 +52,17 @@ pub struct Field {
 /// One account's summary plus (if recognized) its decoded fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AccountInfo {
+    /// The account's address, as base58.
     pub address: String,
+    /// The program that owns the account.
     pub owner: String,
+    /// The account's SOL balance in lamports.
     pub lamports: u64,
+    /// Whether the account holds an executable program.
     pub executable: bool,
+    /// Length of the account's data in bytes.
     pub data_len: usize,
+    /// Named fields, when the account's layout is recognized.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decoded: Option<DecodedAccount>,
 }

@@ -3,9 +3,12 @@
 use crate::utils::resolve_account_keys;
 use serde_json::Value;
 
+/// A change in an account's SOL (lamport) balance.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct BalanceChange {
+    /// The account whose balance changed.
     pub address: String,
+    /// Signed lamport change (post − pre).
     pub delta: i64,
     /// Post-transaction lamport balance (what an explorer shows alongside the change).
     pub post: u64,
@@ -15,9 +18,13 @@ pub struct BalanceChange {
 /// divides by 10^decimals for display).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct TokenChange {
+    /// The token account whose balance changed.
     pub address: String,
+    /// The token account's owner (the wallet).
     pub owner: String,
+    /// The token's mint address.
     pub mint: String,
+    /// The mint's decimals (for converting raw units to display units).
     pub decimals: u8,
     /// Signed change in raw base units, as a string (can exceed i64).
     pub delta_raw: String,
