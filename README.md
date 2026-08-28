@@ -6,26 +6,44 @@ The Solana testing stack has unit testing ([LiteSVM](https://github.com/LiteSVM/
 
 ## Add it to a Rust project
 
-Until the first crates.io release, use the repository directly:
+svmscope is a testing tool, so add it as a dev-dependency:
 
-```toml
-[dependencies]
-svmscope = { git = "https://github.com/alizeeshan1234/svmScope" }
+```bash
+cargo add --dev svmscope
 ```
 
-For development against a local checkout:
-
 ```toml
-[dependencies]
-svmscope = { path = "../svmscope" }
-```
-
-After version 0.2 is published to crates.io, the dependency becomes:
-
-```toml
-[dependencies]
+[dev-dependencies]
 svmscope = "0.2"
 ```
+
+Then point it at a real transaction and replay it locally — no validator, no
+setup:
+
+```rust,no_run
+use svmscope::{Check, Mutation, Scope};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let scope = Scope::new("https://api.mainnet-beta.solana.com");
+
+// Reconstruct the transaction's world once — every account, every program ELF.
+let mut replay = scope.replay("<signature>")?;
+assert!(replay.run()?.result.success);
+
+// Then ask "what if?" — a reverting replay is data, not an error.
+let out = replay.verify(
+    "draining the vault makes the claim revert",
+    &[Mutation::lamports("<vault-address>", 0)],
+    &[Check::revert_contains("InsufficientFunds")],
+)?;
+assert!(out.pass);
+# Ok(())
+# }
+```
+
+That's the whole loop: **reconstruct once, replay and mutate forever.** The rest
+of this README goes deeper — building and submitting transactions, freezing
+offline fixtures, and the full assertion DSL.
 
 The optional HTTP server is not compiled for normal library users. Enable it
 only when you need the API server:

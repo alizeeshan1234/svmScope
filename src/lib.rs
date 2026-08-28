@@ -14,16 +14,18 @@
 //!
 //! # Installation
 //!
-//! Until the first crates.io release, depend on the repository or a local
-//! checkout:
+//! svmscope is a testing tool, so add it as a dev-dependency:
 //!
-//! ```toml
-//! [dependencies]
-//! svmscope = { git = "https://github.com/alizeeshan1234/svmScope" }
-//! # Or: svmscope = { path = "../svmscope" }
+//! ```text
+//! cargo add --dev svmscope
 //! ```
 //!
-//! After the 0.2 release is published, use `svmscope = "0.2"`.
+//! or in `Cargo.toml`:
+//!
+//! ```toml
+//! [dev-dependencies]
+//! svmscope = "0.2"
+//! ```
 //!
 //! # Quickstart
 //!
