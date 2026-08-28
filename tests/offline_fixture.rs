@@ -69,6 +69,55 @@ fn mutations_and_the_check_dsl_compose() {
 }
 
 #[test]
+fn named_field_mutations_mirror_named_field_asserts() {
+    // The same what-if as the byte-patch test above, but by NAME: no offsets.
+    // Set count to 99 pre-replay; the increment lands on 100.
+    let out = replay()
+        .verify(
+            "field mutation reaches 100",
+            &[Mutation::field(COUNTER_PDA, "count", 99)],
+            &[
+                Check::success(),
+                Check::account(COUNTER_PDA)
+                    .field("count", Cmp::eq(100))
+                    .build(),
+            ],
+        )
+        .unwrap();
+    assert!(out.pass, "{out:?}");
+}
+
+#[test]
+fn field_mutation_errors_are_hard_and_specific() {
+    // Unknown field: a hard error naming the fields that do exist — never a
+    // silently ignored mutation.
+    let err = replay()
+        .verify(
+            "typo'd field",
+            &[Mutation::field(COUNTER_PDA, "countt", 1)],
+            &[Check::success()],
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&err, svmscope::Error::UnknownField { available, .. } if available.iter().any(|f| f == "count")),
+        "{err}"
+    );
+
+    // Out-of-range value for the field's type: a hard error, not a truncation.
+    let err = replay()
+        .verify(
+            "negative into u64",
+            &[Mutation::field(COUNTER_PDA, "count", -1)],
+            &[Check::success()],
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err, svmscope::Error::FieldValueOutOfRange { .. }),
+        "{err}"
+    );
+}
+
+#[test]
 fn time_travel_warps_the_clock() {
     let mut replay = replay();
     let before = replay.describe_clock();

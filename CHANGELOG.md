@@ -6,9 +6,25 @@ All notable changes to svmscope are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Named-field mutations** — `Mutation::field(addr, "reserve_a", value)`, the
+  mutation-side twin of the Check DSL's named-field asserts. Resolved through
+  the account's decoded layout (SPL layouts or the owner program's IDL); an
+  unknown field errors listing the real names, an ambiguous short name errors
+  with candidates, and a value that doesn't fit the field's type is a hard
+  `FieldValueOutOfRange`, never a silent truncation. Also available in JSON
+  suites as `{"kind":"field","address":…,"field":…,"value":…}` (additive —
+  existing suites are unaffected).
+- **Wire-format snapshot tests** pinning the exact JSON shapes of every
+  response type the web UI and TS SDK consume, so internal refactors cannot
+  silently break the HTTP API contract.
+
+### Changed
+
 - Declared `rust-version = "1.91"` (MSRV, verified against the full test suite).
-- README: demo all three `Mutation` constructors (`lamports`, `patch`, `data`);
-  link the [svmscope_example](https://github.com/alizeeshan1234/svmscope_example)
+- README: demo all four `Mutation` constructors; link the
+  [svmscope_example](https://github.com/alizeeshan1234/svmscope_example)
   reference-consumer repo.
 
 ## [0.2.2] — 2026-08-28

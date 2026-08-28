@@ -134,6 +134,8 @@ mod scope;
 pub mod spec;
 mod submit;
 pub(crate) mod utils;
+#[cfg(test)]
+mod wire_format_tests;
 
 pub use analyze::{
     AccountDiff, AccountOverview, Analysis, Explanation, FieldDiff, Overview, ProgramInfo, SigInfo,
