@@ -3,7 +3,7 @@
 //! replayable any number of times with zero further RPC).
 //!
 //! ```no_run
-//! use svmscope::{Scope, replay::Mutation};
+//! use svmscope::{Mutation, Scope};
 //!
 //! let scope = Scope::new("https://api.mainnet-beta.solana.com");
 //! let mut replay = scope.replay("<signature>")?;   // all RPC happens here
@@ -362,6 +362,15 @@ impl Scope {
             .idl_for(program_id)
             .ok_or_else(|| Error::NoIdl(program_id.to_string()))?;
         Ok(idl::instructions(&idl))
+    }
+
+    /// A program's complete on-chain IDL, when the program publishes one.
+    pub fn program_idl(&self, program_id: &str) -> Result<Option<serde_json::Value>> {
+        let program_id = program_id.trim();
+        if Address::from_str(program_id).is_err() {
+            return Err(Error::InvalidAddress(program_id.to_string()));
+        }
+        Ok(self.idl_for(program_id))
     }
 
     /// Fetch an account's raw state: (owner, lamports, executable, data).

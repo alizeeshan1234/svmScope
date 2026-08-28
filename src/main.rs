@@ -5,9 +5,8 @@
 
 use std::env;
 use std::error::Error;
-use std::str::FromStr;
 
-use svmscope::{replay, spec, Replay, Scope};
+use svmscope::{spec, Mutation, Replay, ReplayResult, ScenarioOutcome, Scope};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
@@ -52,8 +51,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // IDL probe: `svmscope idl <program_id>` prints a program's on-chain Anchor IDL.
     if signature == "idl" {
         let prog = args.get(2).ok_or("usage: svmscope idl <program_id>")?;
-        let id = solana_address::Address::from_str(prog).map_err(|_| "bad program id")?;
-        match svmscope::idl::fetch_idl_json(scope.client(), id) {
+        match scope.program_idl(prog)? {
             Some(j) => println!("{}", serde_json::to_string_pretty(&j)?),
             None => println!("no on-chain IDL for {prog}"),
         }
@@ -135,7 +133,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     print_replay("REPLAY", &replay_session.run()?.result);
 
     // Mutations come only from the CLI (`--mutate <address>:<lamports>`).
-    let mut mutations: Vec<replay::Mutation> = Vec::new();
+    let mut mutations: Vec<Mutation> = Vec::new();
     let mut i = 2;
     while i < args.len() {
         if args[i] == "--mutate" {
@@ -148,7 +146,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let value: u64 = lamports_str
                 .parse()
                 .map_err(|_| "lamports must be a number")?;
-            mutations.push(replay::Mutation::lamports(addr, value));
+            mutations.push(Mutation::lamports(addr, value));
             i += 2;
         } else {
             i += 1;
@@ -167,7 +165,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn load_and_run_suite(
     scope: &Scope,
     path: &str,
-) -> Result<(String, Vec<replay::ScenarioOutcome>), Box<dyn Error>> {
+) -> Result<(String, Vec<ScenarioOutcome>), Box<dyn Error>> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let req: spec::SuiteRequest =
         serde_json::from_str(&text).map_err(|e| format!("bad scenario file: {e}"))?;
@@ -263,7 +261,7 @@ fn run_tests(scope: &Scope, path: &str) -> Result<(), Box<dyn Error>> {
 }
 
 /// Display a replay result (the CLI's job — the module returns data, `main` prints it).
-fn print_replay(label: &str, r: &replay::ReplayResult) {
+fn print_replay(label: &str, r: &ReplayResult) {
     if r.success {
         println!("{label}: success ✅  (compute units: {})", r.compute_units);
     } else {

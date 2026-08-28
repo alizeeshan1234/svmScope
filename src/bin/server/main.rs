@@ -18,8 +18,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use svmscope::spec::{MutationInput, SuiteRequest};
-use svmscope::replay::{Mutation, ReplayResult, ScenarioOutcome};
-use svmscope::{Analysis, Scope};
+use svmscope::{Analysis, Mutation, ReplayResult, ScenarioOutcome, Scope, TimeTravel};
 
 const DEFAULT_RPC: &str = "https://api.mainnet-beta.solana.com";
 
@@ -197,7 +196,7 @@ struct SimRequest {
     mutations: Vec<MutationInput>,
     /// Optional clock warp — test time-gated logic without waiting.
     #[serde(default)]
-    time_travel: svmscope::replay::TimeTravel,
+    time_travel: TimeTravel,
     /// Optional runtime feature-gate toggles — replay as if a feature were (in)active.
     #[serde(default)]
     features: Vec<svmscope::spec::FeatureInput>,
@@ -343,7 +342,7 @@ struct PreflightRequest {
     mutations: Vec<MutationInput>,
     /// Optional clock warp — test time-gated logic without waiting.
     #[serde(default)]
-    time_travel: svmscope::replay::TimeTravel,
+    time_travel: TimeTravel,
     /// Optional runtime feature-gate toggles.
     #[serde(default)]
     features: Vec<svmscope::spec::FeatureInput>,
@@ -502,7 +501,7 @@ struct IdlRequest {
     /// Account address (for /decode_account) or program id (for /idl_instructions).
     #[serde(default)]
     address: Option<String>,
-    /// The IDL JSON, e.g. the contents of target/idl/<program>.json.
+    /// The IDL JSON, e.g. the contents of `target/idl/<program>.json`.
     idl: serde_json::Value,
     #[serde(default)]
     cluster: Option<String>,
@@ -514,7 +513,7 @@ struct IdlRequest {
 /// Lets a developer decode their own program's accounts before publishing an IDL.
 async fn decode_account_handler(
     Json(req): Json<IdlRequest>,
-) -> Result<Json<svmscope::decode::AccountInfo>, (StatusCode, String)> {
+) -> Result<Json<svmscope::AccountInfo>, (StatusCode, String)> {
     let address = req
         .address
         .clone()
@@ -589,7 +588,7 @@ async fn replay_handler(
 async fn freeze_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
-) -> Result<Json<svmscope::fixture::Fixture>, (StatusCode, String)> {
+) -> Result<Json<svmscope::Fixture>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || Scope::new(url).capture(&signature))
     .await

@@ -1,3 +1,5 @@
+#![deny(unreachable_pub)]
+
 //! Decode, reconstruct, replay, and mutate Solana transactions.
 //!
 //! Point svmscope at a mainnet signature and it (1) **decodes** the transaction —
@@ -9,6 +11,19 @@
 //! account's lamports or data, warp the clock, flip feature gates, then replay
 //! again to ask *"what if this had been different?"*.
 //!
+//! # Installation
+//!
+//! Until the first crates.io release, depend on the repository or a local
+//! checkout:
+//!
+//! ```toml
+//! [dependencies]
+//! svmscope = { git = "https://github.com/alizeeshan1234/svmScope" }
+//! # Or: svmscope = { path = "../svmscope" }
+//! ```
+//!
+//! After the 0.2 release is published, use `svmscope = "0.2"`.
+//!
 //! # Quickstart
 //!
 //! Two nouns: a [`Scope`] fetches and caches, a [`Replay`] is one transaction's
@@ -16,7 +31,7 @@
 //! that is local and free.
 //!
 //! ```no_run
-//! use svmscope::{Scope, replay::Mutation};
+//! use svmscope::{Mutation, Scope};
 //!
 //! let scope = Scope::new("https://api.mainnet-beta.solana.com");
 //! let sig = "your transaction signature";
@@ -42,10 +57,17 @@
 //!
 //! Replays against live RPC state drift as the chain moves on. To pin a
 //! transaction's world forever, [`Scope::capture`] snapshots the transaction,
-//! every account it touched, and every program ELF into a [`fixture::Fixture`];
+//! every account it touched, and every program ELF into a [`Fixture`];
 //! [`Replay::from_fixture`] then rebuilds the world and runs what-if scenario
 //! suites (mutations + expectations + named-field assertions) against that
 //! frozen state — offline, deterministic, CI-friendly.
+//!
+//! # Public API
+//!
+//! Consumer-facing types are re-exported from the crate root. Prefer imports
+//! such as `svmscope::{Scope, Replay, Mutation, Check, Fixture}`; implementation
+//! modules are private. The [`idl`], [`report`], and [`spec`] modules expose the
+//! specialized IDL, HTML-report, and JSON-suite APIs.
 //!
 //! # Errors
 //!
@@ -62,19 +84,19 @@
 //! This same library powers the svmscope CLI, the HTTP API, and the hosted UI
 //! at <https://svmscope.vercel.app> — identical results in all four.
 
-pub mod analyze;
-pub mod check;
-pub mod compute;
-pub mod cpi_tree;
-pub mod decode;
-pub mod diffs;
-pub mod error;
-pub mod fixture;
+mod analyze;
+mod check;
+mod compute;
+mod cpi_tree;
+mod decode;
+mod diffs;
+mod error;
+mod fixture;
 pub mod idl;
 pub(crate) mod ixname;
-pub mod replay;
+mod replay;
 pub mod report;
-pub mod scope;
+mod scope;
 pub mod spec;
 pub(crate) mod utils;
 
@@ -83,9 +105,15 @@ pub use analyze::{
     SimulationReport,
 };
 pub use check::{AccountCheck, Check, Cmp, Scenario};
+pub use compute::CuUsage;
+pub use cpi_tree::{CpiEntry, IxAccount, IxArg};
+pub use decode::{AccountInfo, DecodedAccount, Field};
+pub use diffs::{BalanceChange, TokenChange};
 pub use error::{Error, Result};
-pub use fixture::Fixture;
-pub use replay::Mutation;
+pub use fixture::{Fixture, FixtureEntry, FIXTURE_VERSION};
+pub use replay::{
+    AssertOutcome, FeatureToggle, Mutation, ReplayResult, ScenarioOutcome, TimeTravel,
+};
 pub use scope::{OnchainRecord, Replay, Replayed, Scope};
 
 /// Resolve a cluster name or explicit RPC URL to an endpoint. Precedence:

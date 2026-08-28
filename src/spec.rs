@@ -61,7 +61,7 @@ pub enum MutationInput {
 }
 
 /// Decode a hex string, tolerating `0x`, spaces, and underscores.
-pub fn hex_decode(s: &str) -> Result<Vec<u8>> {
+fn hex_decode(s: &str) -> Result<Vec<u8>> {
     let s = s.trim().trim_start_matches("0x").replace([' ', '_'], "");
     if s.is_empty() || !s.len().is_multiple_of(2) {
         return Err(Error::InvalidSpec(

@@ -37,16 +37,16 @@ pub struct CpiEntry {
     pub args: Vec<IxArg>,
     /// Raw instruction data, kept only so `analyze` can decode it; never serialized.
     #[serde(skip)]
-    pub data: Vec<u8>,
+    pub(crate) data: Vec<u8>,
     /// This instruction's account indexes into the resolved account list; used by
     /// `analyze` to resolve addresses, never serialized.
     #[serde(skip)]
-    pub account_indexes: Vec<usize>,
+    pub(crate) account_indexes: Vec<usize>,
 }
 
 /// Build the CPI call tree as a flat list; nesting is carried by `stack_height`
 /// (1 = top-level instruction, 2 = a CPI, 3 = a nested CPI, ...).
-pub fn build_cpi_tree(tx: &Value) -> Vec<CpiEntry> {
+pub(crate) fn build_cpi_tree(tx: &Value) -> Vec<CpiEntry> {
     let empty = vec![];
     let instructions = tx["transaction"]["message"]["instructions"]
         .as_array()

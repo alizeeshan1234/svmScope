@@ -5,7 +5,7 @@ use serde_json::Value;
 ///
 /// Missing `loadedAddresses` is normal (legacy / simple transactions have no
 /// lookup tables), so we simply skip it — it is not an error.
-pub fn resolve_account_keys(tx: &Value) -> Vec<String> {
+pub(crate) fn resolve_account_keys(tx: &Value) -> Vec<String> {
     let mut keys: Vec<String> = Vec::new();
 
     let mut push_all = |v: &Value| {

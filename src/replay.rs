@@ -271,7 +271,7 @@ const SLOTS_PER_EPOCH: i64 = 432_000;
 const SECS_PER_SLOT: f64 = 0.4;
 
 impl TimeTravel {
-    pub fn is_noop(&self) -> bool {
+    pub(crate) fn is_noop(&self) -> bool {
         self.epochs.is_none()
             && self.slots.is_none()
             && self.seconds.is_none()
@@ -320,7 +320,7 @@ impl TimeTravel {
     }
 
     /// A human summary of where we travelled to, for the UI.
-    pub fn describe(&self, clock: &Clock) -> String {
+    pub(crate) fn describe(&self, clock: &Clock) -> String {
         format!(
             "slot {} · epoch {} · {}",
             clock.slot,

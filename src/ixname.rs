@@ -200,7 +200,7 @@ fn native_args(program: &str, data: &[u8]) -> Vec<IxArg> {
 /// Decode an instruction fully: its name, its arguments, and its accounts named
 /// from the IDL (Anchor) or a known layout (native). `idl_cache` avoids re-fetching
 /// an IDL for every instruction of the same program.
-pub fn enrich(
+pub(crate) fn enrich(
     client: &RpcClient,
     idl_cache: &mut HashMap<String, Option<Value>>,
     program: &str,

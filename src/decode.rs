@@ -202,7 +202,7 @@ fn decode_mint(data: &[u8]) -> DecodedAccount {
 /// Token-2022 account with extensions is longer than its base size; the type
 /// byte at offset 165 (Token-2022 pads mints past that offset precisely to
 /// disambiguate) tells us whether it's a Mint (1) or an Account (2).
-pub fn decode_bytes(owner: &str, data: &[u8]) -> Option<DecodedAccount> {
+pub(crate) fn decode_bytes(owner: &str, data: &[u8]) -> Option<DecodedAccount> {
     decode(owner, data)
 }
 

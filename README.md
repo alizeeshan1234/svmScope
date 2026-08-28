@@ -4,6 +4,38 @@
 
 The Solana testing stack has unit testing ([LiteSVM](https://github.com/LiteSVM/litesvm)), instruction testing ([Mollusk](https://github.com/anza-xyz/mollusk)), and integration testing from current mainnet state ([Surfpool](https://github.com/txtx/surfpool)). svmscope covers the fourth quadrant: **post-mortem and regression testing from a historical transaction** — a real signature already encodes its entire world (accounts, programs, state), so one signature replaces a hundred lines of test setup.
 
+## Add it to a Rust project
+
+Until the first crates.io release, use the repository directly:
+
+```toml
+[dependencies]
+svmscope = { git = "https://github.com/alizeeshan1234/svmScope" }
+```
+
+For development against a local checkout:
+
+```toml
+[dependencies]
+svmscope = { path = "../svmscope" }
+```
+
+After version 0.2 is published to crates.io, the dependency becomes:
+
+```toml
+[dependencies]
+svmscope = "0.2"
+```
+
+The optional HTTP server is not compiled for normal library users. Enable it
+only when you need the API server:
+
+```toml
+svmscope = { version = "0.2", features = ["server"] }
+```
+
+## Library quickstart
+
 ```rust
 use svmscope::{Check, Cmp, Mutation, Scope};
 
@@ -38,9 +70,29 @@ let future = replay.run()?;
 std::fs::write("fixtures/claim.json", scope.capture(signature)?.to_json()?)?;
 ```
 
-```toml
-[dependencies]
-svmscope = "0.2"
+The main API is available directly from the crate root. Import
+`Scope`, `Replay`, `Mutation`, `Check`, `Cmp`, `Scenario`, `Fixture`, and result
+types as `svmscope::Type`; implementation modules are intentionally private.
+The `idl`, `report`, and `spec` modules are public for IDL inspection, HTML
+reports, and the JSON scenario format respectively.
+
+### Offline fixture use
+
+Capture a transaction once while connected to RPC, then load it without any
+network access in tests or CI:
+
+```rust
+use svmscope::{Check, Fixture, Replay, Scenario};
+
+let fixture = Fixture::from_json(&std::fs::read_to_string("fixtures/claim.json")?)?;
+let replay = Replay::from_fixture(&fixture)?;
+let outcomes = replay.run_suite(&[
+    Scenario::new("matches mainnet").check(Check::matches_onchain()),
+    Scenario::new("still succeeds").check(Check::success()),
+])?;
+
+assert!(outcomes.iter().all(|outcome| outcome.pass));
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 ## The three things it does

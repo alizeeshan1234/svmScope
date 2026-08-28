@@ -36,7 +36,7 @@ fn fixed_cu(program: &str) -> Option<u64> {
 
 /// Compute units per program, aggregated (a program invoked N times is summed
 /// into one row) and sorted by consumption, descending.
-pub fn cu_per_program(tx: &Value) -> Vec<CuUsage> {
+pub(crate) fn cu_per_program(tx: &Value) -> Vec<CuUsage> {
     let Some(log_messages) = tx["meta"]["logMessages"].as_array() else {
         return vec![];
     };

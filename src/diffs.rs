@@ -29,7 +29,7 @@ pub struct TokenChange {
 ///
 /// The two arrays are keyed by `accountIndex`; we pair them up, compute the
 /// signed delta per account, and drop anything that didn't move.
-pub fn token_diffs(tx: &Value) -> Vec<TokenChange> {
+pub(crate) fn token_diffs(tx: &Value) -> Vec<TokenChange> {
     let account_keys = resolve_account_keys(tx);
     let empty = vec![];
     let pre = tx["meta"]["preTokenBalances"].as_array().unwrap_or(&empty);
@@ -93,7 +93,7 @@ pub fn token_diffs(tx: &Value) -> Vec<TokenChange> {
 }
 
 /// The lamport balance change for every account that changed.
-pub fn account_diffs(tx: &Value) -> Vec<BalanceChange> {
+pub(crate) fn account_diffs(tx: &Value) -> Vec<BalanceChange> {
     let empty = vec![];
     let pre = tx["meta"]["preBalances"].as_array().unwrap_or(&empty);
     let post = tx["meta"]["postBalances"].as_array().unwrap_or(&empty);

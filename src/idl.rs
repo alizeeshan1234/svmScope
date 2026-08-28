@@ -15,7 +15,7 @@ const PROGRAM_METADATA_PROGRAM: &str = "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7n
 /// Fetch a program's on-chain IDL. There are two publishing mechanisms and
 /// Explorer reads both, so we do too: the legacy Anchor IDL account
 /// (`anchor:idl` seed), then the newer Program Metadata program.
-pub fn fetch_idl_json(client: &RpcClient, program_id: Address) -> Option<Value> {
+pub(crate) fn fetch_idl_json(client: &RpcClient, program_id: Address) -> Option<Value> {
     fetch_idl_anchor_account(client, program_id)
         .or_else(|| fetch_idl_program_metadata(client, program_id))
 }
@@ -240,7 +240,7 @@ pub fn instructions(idl: &Value) -> Vec<IdlInstruction> {
 
 /// Find the IDL instruction whose 8-byte discriminator matches this instruction's
 /// data — the entry that names it and describes its args and accounts.
-pub fn find_ix<'a>(idl: &'a Value, data: &[u8]) -> Option<&'a Value> {
+pub(crate) fn find_ix<'a>(idl: &'a Value, data: &[u8]) -> Option<&'a Value> {
     let disc = data.get(0..8)?;
     idl.get("instructions")?.as_array()?.iter().find(|ix| {
         ix.get("discriminator")
