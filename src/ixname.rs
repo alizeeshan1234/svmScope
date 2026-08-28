@@ -200,7 +200,7 @@ fn native_args(program: &str, data: &[u8]) -> Vec<IxArg> {
 /// Decode an instruction fully: its name, its arguments, and its accounts named
 /// from the IDL (Anchor) or a known layout (native). `idl_cache` avoids re-fetching
 /// an IDL for every instruction of the same program.
-pub fn enrich(
+pub(crate) fn enrich(
     client: &RpcClient,
     idl_cache: &mut HashMap<String, Option<Value>>,
     program: &str,
@@ -224,11 +224,16 @@ pub fn enrich(
             TOKEN | TOKEN_2022 => token_ix(data).map(String::from),
             SYSTEM => system_ix(data).map(String::from),
             COMPUTE_BUDGET => compute_budget_ix(data).map(String::from),
-            ATA => Some(if data.first() == Some(&1) {
-                "Create Idempotent".into()
-            } else {
-                "Create".into()
-            }),
+            // ATA discriminants: (empty data or) 0 = Create, 1 = CreateIdempotent,
+            // 2 = RecoverNested.
+            ATA => Some(
+                match data.first() {
+                    Some(1) => "Create Idempotent",
+                    Some(2) => "Recover Nested",
+                    _ => "Create",
+                }
+                .into(),
+            ),
             _ => Some("Memo".into()),
         };
         let names = native_account_names(program, data)

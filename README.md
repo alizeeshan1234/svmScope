@@ -1,310 +1,364 @@
 # svmscope
 
-**A transaction simulator for Solana — decode any transaction, replay it locally, and change reality to see what happens.**
+**Start from a real transaction.** Decode it, replay it locally in an embedded SVM, mutate state and time-travel, freeze it into a fixture, and assert on it forever.
 
-`svmscope` takes a mainnet transaction and:
+The Solana testing stack has unit testing ([LiteSVM](https://github.com/LiteSVM/litesvm)), instruction testing ([Mollusk](https://github.com/anza-xyz/mollusk)), and integration testing from current mainnet state ([Surfpool](https://github.com/txtx/surfpool)). svmscope covers the fourth quadrant: **post-mortem and regression testing from a historical transaction** — a real signature already encodes its entire world (accounts, programs, state), so one signature replaces a hundred lines of test setup.
 
-1. **Decodes** it into a readable report — the full cross-program call tree with every
-   instruction named and its arguments and accounts decoded (from the on-chain IDL or
-   known native layouts), who gained or lost SOL, and compute units per program (with
-   Address Lookup Table resolution).
-2. **Replays** it locally in an embedded SVM ([LiteSVM](https://github.com/LiteSVM/litesvm)) —
-   re-executing the real programs against the transaction's reconstructed state.
-3. **Mutates** — change an account's balance or data, then replay again, to ask
-   *"what if this had been different?"*
+## Add it to a Rust project
 
-It's a decoder, a debugger, and a what-if lab in one command-line tool.
-
-## Decode
-
-```
-$ cargo run -- <SIGNATURE>
-
-#0  ComputeBudget111111111111111111111111111111
-#1  ComputeBudget111111111111111111111111111111
-#2  ComputeBudget111111111111111111111111111111
-#3  JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4
-└─ [2] BiSoNHVpsVZW2F7rx2eQ59yQwKxzU5NvBcmKshCSUypi
-    └─ [3] TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
-└─ [2] DRVSpZ2YUYYKgZP8XtLhAGtT1zYSCKzeHfb4DgRnrgqD
-    └─ [3] TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
-└─ [2] FLUX6xBayGxLX9UcimVRxXFMHH6q43mAbRvDzSpCsvfK
-    └─ [3] TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
-
--- account balance changes --
-capsFrvPsaCQ6y7RUk3TYkB5D1oNCNjRb4uYuB5UCsZ  -5451 lamports
-
--- compute units per program --
-BiSoNHVpsVZW2F7rx2eQ59yQwKxzU5NvBcmKshCSUypi 98926 CU
-DRVSpZ2YUYYKgZP8XtLhAGtT1zYSCKzeHfb4DgRnrgqD 29612 CU
-JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4  178113 CU
-```
-
-## Replay
-
-`svmscope` then reconstructs the world the transaction ran in — every account it
-touched *and* every program it invoked (following the upgradeable-loader programdata
-pointer for the ELF) — loads it all into an in-process SVM, and re-executes the
-transaction:
-
-```
--- replay --
-loaded 22 data accounts and 6 programs into the SVM
-REPLAY: failed ❌  error: InstructionError(4, Custom(6024))
-  Program JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4 invoke [1]
-  Program log: Instruction: RouteV2
-  Program JUP6... failed: custom program error: 0x1788
-```
-
-That's the *real* Jupiter program executing locally. Swaps frequently fail on replay
-with a slippage error — not a bug, but the honest consequence of **state drift**: the
-current pool prices differ from the transaction's original slot. Exact replay of
-older transactions needs archival state (see the roadmap); recent/simple transactions
-replay cleanly.
-
-## Mutate — the "what-if" engine
-
-Pass `--mutate <address>:<lamports>` to change an account before replaying, then compare:
-
-```
-$ cargo run -- <SIGNATURE> --mutate <ACCOUNT>:0
-
-REPLAY: failed ❌  error: InstructionError(4, Custom(6024))
-MUTATED REPLAY: failed ❌  error: AccountNotFound
-```
-
-Here zeroing an account's balance changed the outcome — because an account with zero
-lamports is treated as non-existent. The engine also supports **data mutations**
-(rewriting an account's bytes — e.g. a token balance or an oracle price) via the
-`Mutation::Data` API, which is how you'd flip a failing swap into a succeeding one by
-rewinding a pool's reserves.
-
-## Usage
+svmscope is a testing tool, so add it as a dev-dependency:
 
 ```bash
-cargo build
-
-# decode + replay
-cargo run -- <SIGNATURE>
-
-# decode + replay + a what-if mutation (multiple allowed)
-cargo run -- <SIGNATURE> --mutate <ADDRESS>:<LAMPORTS>
-
-# web UI (decode + replay + scenario tests)
-cargo run --bin server --features server        # → http://127.0.0.1:3000
+cargo add --dev svmscope
 ```
-
-Uses the public `https://api.mainnet-beta.solana.com` endpoint, which only retains
-recent transactions. For older transactions, point it at an archival RPC.
-
-## Use it as a crate
-
-The CLI, the HTTP API, and the hosted UI are all thin layers over one Rust
-library — `svmscope` on crates.io. Embed the engine directly in your own tests
-or tools:
 
 ```toml
-[dependencies]
-svmscope = "0.1"
+[dev-dependencies]
+svmscope = "0.2"
 ```
 
-```rust
-use solana_client::rpc_client::RpcClient;
-use svmscope::replay::{Mutation, TimeTravel};
+Then point it at a real transaction and replay it locally — no validator, no
+setup:
 
-let rpc = RpcClient::new("https://api.mainnet-beta.solana.com".to_string());
+```rust,no_run
+use svmscope::{Check, Mutation, Scope};
 
-// Decode: CPI tree, named instructions, balance/token diffs, CU per program.
-let analysis = svmscope::analyze(&rpc, signature)?;
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let scope = Scope::new("https://api.mainnet-beta.solana.com");
 
-// Replay the real programs locally in LiteSVM.
-let replay = svmscope::run_replay(&rpc, &analysis.signature)?;
+// Reconstruct the transaction's world once — every account, every program ELF.
+let mut replay = scope.replay("<signature>")?;
+assert!(replay.run()?.result.success);
 
-// What-if: mutate state and/or warp the clock, then replay.
-let what_if = svmscope::simulate(
-    &rpc,
-    &analysis.signature,
-    &[Mutation::Lamports { address: pool.into(), value: 0 }],
-    TimeTravel { seconds: Some(30 * 86_400), ..Default::default() },
-    vec![],
+// Then ask "what if?" — a reverting replay is data, not an error.
+let out = replay.verify(
+    "draining the vault makes the claim revert",
+    &[Mutation::lamports("<vault-address>", 0)],
+    &[Check::revert_contains("InsufficientFunds")],
 )?;
-
-// Hermetic: freeze the tx's whole world, then run scenario suites offline.
-let fixture = svmscope::capture_fixture(&rpc, &analysis.signature)?;
+assert!(out.pass);
+# Ok(())
+# }
 ```
 
-The `server` feature (off by default) additionally builds the HTTP API binary.
+That's the whole loop: **reconstruct once, replay and mutate forever.** The rest
+of this README goes deeper — building and submitting transactions, freezing
+offline fixtures, and the full assertion DSL.
 
-## Scenario testing — the hermetic part
+The optional HTTP server is not compiled for normal library users. Enable it
+only when you need the API server:
 
-The point isn't just "what if?", it's **coverage**: assert what *should* happen in
-each edge case, with no test harness to write. svmscope replays the real programs
-against edited state and checks both the transaction outcome and the resulting
-account state.
+```toml
+svmscope = { version = "0.2", features = ["server"] }
+```
 
-The catch with replaying live transactions is **state drift** — current on-chain
-state moves, so a replay that passes today can fail tomorrow for reasons unrelated
-to your code. A test that flakes on mainnet state is worse than no test. So freeze
-a **fixture** first: a self-contained snapshot (transaction + every account + every
-program ELF) that replays identically forever, offline.
+## Library quickstart
+
+```rust,no_run
+use svmscope::{Check, Cmp, Mutation, Scope};
+
+let scope = Scope::new("https://api.mainnet-beta.solana.com");
+let signature = "a mainnet transaction signature";
+let (vault, user) = ("the vault's address", "the user's address");
+
+// Decode: the full CPI tree, every instruction named from its on-chain IDL.
+let analysis = scope.analyze(signature)?;
+
+// Reconstruct the transaction's world once — every account, every program ELF.
+// All RPC happens here; every run below is local, instant, and free.
+let mut replay = scope.replay(signature)?;
+assert!(replay.run()?.result.success);
+
+// What-if, with declarative checks (a reverting replay is data, not an Err):
+let outcome = replay.verify(
+    "draining the vault makes the claim revert",
+    &[Mutation::lamports(vault, 0)],
+    &[
+        Check::revert_contains("InsufficientFunds"),
+        Check::account(user).token_delta(Cmp::eq(0)).build(),
+    ],
+)?;
+assert!(outcome.pass);
+
+// Time is just the Clock sysvar — warp it. A vesting claim that reverts
+// today succeeds at +30 days.
+replay.advance_seconds(30 * 86_400);
+let future = replay.run()?;
+
+// Freeze the whole world into one JSON file: accounts, ELFs, IDLs, and the
+// recorded on-chain outcome. It replays identically forever, offline.
+std::fs::write("fixtures/claim.json", scope.capture(signature)?.to_json()?)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The main API is available directly from the crate root. Import
+`Scope`, `Replay`, `Mutation`, `Check`, `Cmp`, `Scenario`, `Fixture`, and result
+types as `svmscope::Type`; implementation modules are intentionally private.
+The `idl`, `report`, and `spec` modules are public for IDL inspection, HTML
+reports, and the JSON scenario format respectively.
+
+## Build and send the transaction inside the Rust test
+
+You no longer need to run the TypeScript tests, copy a signature, and then start
+svmscope. The Rust test can build the Anchor instruction from the program IDL,
+sign it, send it to `solana-test-validator`, wait for it to land, and immediately
+receive a replay of the exact pre-transaction state.
+
+### 1. Build and deploy the Anchor program
+
+Terminal 1 (leave it running):
 
 ```bash
-# 1. Freeze the world the transaction ran in → one portable file
-cargo run -- freeze <SIGNATURE> -o fixture.json
-
-# 2. Write a suite next to it (see below), then run it — deterministic, no RPC
-cargo run -- test suite.json      # exits non-zero if any scenario fails → CI-ready
+solana-test-validator --reset
 ```
 
-A `suite.json` references the fixture and lists scenarios. Each scenario mutates
-accounts, asserts a transaction outcome (`success` / `revert` [+ `contains`]), and
-optionally asserts on **resulting state** after replay:
+Terminal 2:
+
+```bash
+anchor build
+anchor deploy --provider.cluster localnet
+mkdir -p tests/fixtures
+solana-keygen new --no-bip39-passphrase -o tests/fixtures/payer.json
+solana airdrop 10 "$(solana address -k tests/fixtures/payer.json)" --url localhost
+anchor keys list
+```
+
+Keep the generated `target/idl/<program>.json`. The local validator must already
+have the program deployed before svmscope constructs the replay because the
+replay captures the deployed ELF and all input accounts. Put the address printed
+by `anchor keys list` in `YOUR_PROGRAM_ID`. If the instruction updates state,
+initialize that state/PDA first and put its address in
+`YOUR_EXISTING_STATE_ACCOUNT`.
+
+### 2. Add the test dependencies
+
+```toml
+[dev-dependencies]
+svmscope = { path = "../svmscope" }
+serde_json = "1"
+solana-address = "2.6"
+solana-keypair = "3.1"
+solana-signer = "3.0"
+```
+
+### 3. Construct, submit, capture, mutate, and time-travel
+
+```rust,no_run
+use std::str::FromStr;
+
+use serde_json::json;
+use solana_address::Address;
+use solana_keypair::read_keypair_file;
+use solana_signer::Signer;
+use svmscope::{Mutation, Scope};
+
+fn invokes_program_and_replays_it() -> Result<(), Box<dyn std::error::Error>> {
+    let scope = Scope::new("http://127.0.0.1:8899");
+    let program_id = Address::from_str("YOUR_PROGRAM_ID")?;
+    let state = Address::from_str("YOUR_EXISTING_STATE_ACCOUNT")?;
+    let payer = read_keypair_file("tests/fixtures/payer.json")?;
+    let idl = serde_json::from_str(&std::fs::read_to_string(
+        "target/idl/your_program.json",
+    )?)?;
+
+    let mut captured = scope
+        .program_with_idl(program_id, idl)
+        .method("setValue")?
+        .payer(&payer)
+        // Names must match the IDL. Nested accounts may use "group.account".
+        .account("authority", payer.pubkey())
+        .account("state", state)
+        .args(json!({ "value": 42 }))?
+        .send_and_capture()?;
+
+    // This signature was created here; nothing is copied from a TS test.
+    println!("landed transaction: {}", captured.signature);
+    assert!(captured.replay.recorded().is_some());
+
+    // Re-execute locally from the state captured immediately before submission.
+    let baseline = captured.replay.run()?;
+    assert!(baseline.result.success);
+
+    // Mutations and time travel now reuse that in-memory replay with no RPC.
+    let changed = captured
+        .replay
+        .simulate(&[Mutation::lamports(state.to_string(), 0)])?;
+    println!("after mutation: {:?}", changed.result.error);
+
+    captured.replay.advance_seconds(30 * 86_400);
+    let future = captured.replay.run()?;
+    println!("after 30 days: {}", future.result.success);
+
+    // Optional: freeze this newly created transaction for offline CI.
+    let fixture = captured.replay.to_fixture()?;
+    std::fs::write("fixtures/set_value.json", fixture.to_json()?)?;
+
+    Ok(())
+}
+```
+
+Use `.account_signer("accountName", &keypair)` when an IDL account must sign,
+or `.signer(&keypair)` when its address was supplied separately. Fixed-address
+accounts in modern Anchor IDLs, such as the System Program, are filled
+automatically. PDAs are addresses, not signers: derive them in the test and pass
+the result with `.account(...)`.
+
+Argument values are JSON and are Borsh-encoded in IDL order. Supported values
+include booleans; signed and unsigned integers through 128 bits; floats; strings;
+public keys; bytes; vectors; options; fixed arrays; and IDL-defined structs and
+enums. Pass integers larger than JSON's exact numeric range as decimal strings,
+and bytes either as `[0, 1, 255]` or a `"0x..."` string.
+
+`send_and_capture` waits up to 20 seconds. A program revert is still a landed
+transaction and returns `Ok(CapturedTransaction)` with
+`captured.replay.recorded().unwrap().success == false`. `Err` is reserved for an
+RPC failure, timeout, malformed IDL/accounts/arguments, or transaction-building
+failure.
+
+If you already construct a `VersionedTransaction` yourself, use the lower-level
+path directly:
+
+```rust,ignore
+let captured = scope.send_and_capture(signed_versioned_transaction)?;
+```
+
+## Offline fixture use
+
+Capture a transaction once while connected to RPC, then load it without any
+network access in tests or CI:
+
+```rust,no_run
+use svmscope::{Check, Fixture, Replay, Scenario};
+
+let fixture = Fixture::from_json(&std::fs::read_to_string("fixtures/claim.json")?)?;
+let replay = Replay::from_fixture(&fixture)?;
+let outcomes = replay.run_suite(&[
+    Scenario::new("matches mainnet").check(Check::matches_onchain()),
+    Scenario::new("still succeeds").check(Check::success()),
+])?;
+
+assert!(outcomes.iter().all(|outcome| outcome.pass));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+## The three things it does
+
+**1. Post-mortem a transaction.** Paste a failed mainnet signature: the CPI tree arrives with instructions, arguments, and accounts *named* (resolved from the on-chain Anchor IDL or known native layouts), balance and token diffs, per-program compute units, and — on replay — the failure explained in plain language (`"SlippageToleranceExceeded"`, not `Custom(6001)`). Then change one thing and run it again.
+
+**2. Test against reality.** `scope.replay(sig)` rebuilds the transaction's world inside [LiteSVM](https://github.com/LiteSVM/litesvm) — no validator, no ports, no devnet dance. Mutate lamports or bytes, flip runtime feature gates, warp the clock by slots/epochs/seconds or to an absolute point, and assert on outcomes *and resulting state* with a mollusk-style `Check` DSL, including named fields: `Check::account(pool).field("reserve_a", Cmp::gt(0))`.
+
+**3. Regression-test it in CI, offline.** `scope.capture(sig)` freezes everything — transaction, accounts, program binaries, IDLs, and the actual on-chain outcome — into one portable JSON fixture. `Replay::from_fixture` rebuilds the world with **zero RPC**: deterministic suites in CI with no key, no drift, no flakes, and `Check::matches_onchain()` as the "does it still behave like mainnet" primitive.
+
+Errors are typed and self-explanatory: a typo'd mutation address is a hard `Error::MutationTargetMissing`, never a fake "revert" your test happily accepts; an unknown field name errors *listing the available fields*.
+
+Run the [examples](./examples) against any transaction:
+
+```bash
+cargo run --example post_mortem -- <signature>
+cargo run --example what_if    -- <signature> <account>
+cargo run --example fixture_ci -- <signature>
+```
+
+## The CLI
+
+The same engine, on the command line:
+
+```bash
+cargo run -- <SIGNATURE>                          # decode + replay
+cargo run -- <SIGNATURE> --mutate <ADDR>:<LAMPORTS>  # + a what-if
+cargo run -- freeze <SIGNATURE> -o fixture.json   # capture a fixture
+cargo run -- test suite.json                      # run a scenario suite (CI-ready)
+cargo run -- report suite.json -o report.html     # shareable HTML report
+cargo run -- upgrade fixture.json                 # re-capture an old fixture as v2
+```
+
+Every command takes `--cluster <mainnet|devnet|testnet|localnet>` or `--rpc <url>`.
+
+```text
+$ cargo run -- <SIGNATURE>
+
+#0  Route V2  (JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4)
+    └─ [2] Swap  (BiSoNHVpsVZW2F7rx2eQ59yQwKxzU5NvBcmKshCSUypi)
+        └─ [3] Transfer  (TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA)
+
+-- compute units per program --
+JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4  178113 CU
+
+-- replay --
+REPLAY: failed ❌  error: InstructionError(4, Custom(6024))
+```
+
+That's the *real* Jupiter program executing locally. Swaps often fail on replay with a slippage error — not a bug, but the honest consequence of **state drift**: replays run against current reconstructed state, and pool prices have moved since the original slot. That's exactly why fixtures exist: freeze once, and the replay is pinned forever.
+
+## Scenario suites (JSON)
+
+Suites also exist as a JSON format — the same one the web UI exports and `svmscope test` runs. Reference a fixture for the deterministic, offline path:
 
 ```json
 {
   "fixture": "fixture.json",
   "scenarios": [
+    { "name": "baseline replays faithfully", "expect": "success" },
     {
-      "name": "baseline swap succeeds and moves the reserve",
-      "expect": "success",
-      "asserts": [
-        { "address": "<POOL_RESERVE>", "kind": "field", "field": "amount", "op": "!=", "value": 894205215695071 }
-      ]
-    },
-    {
-      "name": "draining the pool reserve reverts",
+      "name": "draining the pool reverts",
       "expect": "revert",
-      "mutations": [
-        { "kind": "data", "address": "<POOL_RESERVE>", "offset": 64, "bytes_hex": "0000000000000000" }
-      ],
-      "asserts": [
-        { "address": "<POOL_RESERVE>", "kind": "u64", "offset": 64, "op": "==", "value": 0 }
-      ]
+      "mutations": [{ "kind": "data", "address": "<POOL>", "offset": 64, "bytes_hex": "0000000000000000" }],
+      "asserts": [{ "address": "<POOL>", "kind": "field", "field": "amount", "op": "==", "value": 0 }]
     }
   ]
 }
 ```
 
-```
+```text
 $ cargo run -- test suite.json
-svmscope test — fixture 4RHX…SoJWt (16 accounts, 5 programs, 2 scenarios) [deterministic, offline]
-
-  PASS  baseline swap succeeds and moves the reserve  (expect: succeeds; got: succeeded)
-          ✓ assert Cb3N…zXYo amount != 894205215695071
-  PASS  draining the pool reserve reverts  (expect: reverts; got: reverted (Custom(6004)))
-          ✓ assert Cb3N…zXYo u64@64 == 0
-
+svmscope test — fixture 4RHX…oJWt (16 accounts, 5 programs) [deterministic, offline]
+  PASS  baseline replays faithfully  (expect: succeeds; got: succeeded)
+  PASS  draining the pool reverts  (expect: reverts; got: reverted (Custom(6004)))
 2/2 passed
 ```
 
-The web UI (`--bin server`) starts you with a suite auto-generated from the
-transaction; **❄ Freeze fixture** downloads the fixture and **⤓ Export suite**
-writes the matching `suite.json`.
+Assert kinds: `lamports`, `u64` (at an offset), `token_amount`, `lamports_delta`, `token_delta`, and **named fields** — `"field": "pool.reserveA"` resolved through SPL layouts or the program's IDL (`field_delta` for changes). v2 fixtures carry their IDLs, so named-field asserts work fully offline.
 
 ## How it works
 
-- **Decode** — walks `getTransaction`: the CPI tree from `innerInstructions` +
-  `stackHeight`, balance diffs from `pre/postBalances`, compute from the logs, and
-  Address Lookup Table resolution (static keys + `meta.loadedAddresses`).
-- **State** — `getMultipleAccounts` for every account; for programs, it follows the
-  upgradeable loader's programdata pointer to the ELF.
-- **Replay** — loads accounts + programs into LiteSVM (sigverify/blockhash checks off,
-  since the original blockhash isn't valid in a fresh SVM), reconstructs the signed
-  `VersionedTransaction`, loads the referenced lookup tables, and executes.
-- **Mutate** — `get_account` → change lamports/data → `set_account`, before executing.
+- **Decode** — walks `getTransaction`: the CPI tree from `innerInstructions` + `stackHeight`, diffs from `pre/postBalances`, compute from the logs, Address Lookup Table resolution, instruction/account/field naming from on-chain IDLs (Anchor and the Program Metadata program) or built-in native layouts.
+- **Reconstruct** — `getMultipleAccounts` for every touched account; programs resolve through the upgradeable loader's programdata pointer to the raw ELF; closed accounts (drained fee payers, closed token accounts) are rebuilt from the transaction's own metadata; pre-transaction SPL balances are rewound so swaps replay faithfully.
+- **Replay** — everything loads into a pristine LiteSVM per run (sigverify/blockhash checks off — the original blockhash can't be valid in a fresh SVM), the clock anchored to the transaction's real slot and block time. There is no validator to wait for, so runs are microseconds and trivially parallel.
+- **Time travel** — programs read time from the Clock sysvar; we own it. Warps move slot, epoch, and timestamp *coherently* (432k slots/epoch, ~400ms/slot), so a program checking all three sees a consistent world.
 
-## Roadmap
-
-- [x] Decode: CPI tree, balance diffs, compute, ALT resolution
-- [x] State reconstruction (accounts + program binaries)
-- [x] Deterministic local replay
-- [x] What-if mutation engine (lamports + data)
-- [x] Baseline-vs-mutated **diff** output (web UI)
-- [x] Hermetic **fixtures** — freeze state once, replay deterministically offline
-- [x] Scenario suites + post-state **assertions**; `svmscope test` runner for CI
-- [x] IDL-aware account decoding (named fields on Anchor program accounts, on-chain or pasted IDL)
-- [x] **Instruction decoding** — named instructions + decoded arguments + named accounts, from the on-chain IDL (Anchor) or known native layouts, at every depth of the call tree
-- [x] Richer assertions (`token_amount`, `lamports_delta`, `token_delta`)
-- [x] **Named-field assertions** — `{"kind":"field","field":"pool.reserveA"}` instead of `u64@64`, resolved through SPL layouts or the program's IDL (`field_delta` for changes)
-- [x] **Time travel** — warp the clock (slots/epochs/seconds or absolute) for replays, what-ifs, and suites
-- [x] Any cluster or **custom RPC** endpoint, per request
-- [ ] Anchor event decoding (`emit!` events from the program logs)
-- [ ] Archival state so fixtures capture pre-transaction state at the exact slot
-- [ ] Cross-account invariants (token conservation, solvency)
-
-See [VISION.md](./VISION.md) for the full architecture.
-
-## Live
+## Live app
 
 | | |
 | --- | --- |
 | **App** | https://svmscope.vercel.app |
 | **Engine (API)** | https://svmscope.onrender.com |
 
-The UI is static and hosted on Vercel; the engine runs as a container (it executes
-real Solana programs in an embedded SVM, so it needs a long-lived process). They
-talk over HTTP — point the UI at any engine with `?api=<url>`.
+The web UI is a visual layer over this same library — paste a signature, click through the CPI tree, edit named account fields, run suites, freeze fixtures. The `server` feature (off by default — library consumers never compile axum) builds the HTTP API: `cargo run --bin server --features server` → `http://127.0.0.1:3000`, `GET /api` lists the surface. A typed TypeScript client lives in [`sdk/`](./sdk).
 
-## API & SDK
+## Deploy your own
 
-`cargo run --bin server --features server` exposes the engine over HTTP (CORS-enabled; `GET /api`
-lists the surface):
-
-| Endpoint | Description |
-| --- | --- |
-| `GET /analyze/{sig}` | Decode a tx: named CPI tree (instruction names, decoded args & accounts), balances, compute, IDL-decoded accounts. |
-| `GET /replay/{sig}` | Re-execute it locally against reconstructed pre-state. |
-| `POST /simulate` | `{ signature, mutations[], time_travel? }` — replay with what-if edits. |
-| `POST /simulate_suite` | `{ signature, scenarios[], time_travel? }` — scenario tests with assertions. |
-| `POST /preflight` | `{ transaction, mutations[] }` — simulate an **unsigned** tx before sending. |
-| `GET /freeze/{sig}` | Capture a deterministic, offline fixture. |
-
-**Clusters:** every endpoint takes an optional cluster — `?cluster=devnet` (or
-`mainnet` / `testnet` / `localnet`) on GETs, a `cluster` field on POSTs, or
-`?rpc=<url>` for a custom endpoint — so one instance serves them all. The UI's
-cluster dropdown includes a **Custom RPC…** option; the CLI takes `--cluster <name>`
-/ `--rpc <url>`.
-
-**Time travel:** `time_travel` warps the SVM clock before executing — relative
-(`{ "epochs": 1 }`, `{ "seconds": 2592000 }`, `{ "slots": N }`) or absolute
-(`at_unix_timestamp` / `at_slot` / `at_epoch`) — so time-gated logic (vesting
-cliffs, staking cooldowns, auction ends) is testable without waiting. The UI's
-**⏱ Now** control applies it globally.
-
-A typed TypeScript client lives in [`sdk/`](./sdk) — a single zero-dependency
-file; vendor `sdk/src/index.ts` until it's published to npm:
-
-```ts
-import { Svmscope } from "./svmscope";
-const svm = new Svmscope("http://127.0.0.1:3000");
-const result = await svm.preflight(unsignedTx.serialize()); // preview before signing
-```
-
-## Deploy
-
-The server reads `HOST`, `PORT`, and `SVMSCOPE_RPC_URL` from the environment, so it
-runs unchanged locally or on any platform.
-
-**No CLI / no local Docker — deploy from GitHub in a browser:**
-[render.com](https://render.com) → **New → Blueprint** → connect this repo (it reads
-[`render.yaml`](./render.yaml)) → set `SVMSCOPE_RPC_URL` in the dashboard → deploy.
-Builds the Dockerfile on Render's builders.
-
-**Or with a CLI:**
+The server reads `HOST`, `PORT`, and `SVMSCOPE_RPC_URL` from the environment:
 
 ```bash
-# Docker
-docker build -t svmscope .
-docker run -p 3000:3000 -e SVMSCOPE_RPC_URL=https://your-rpc svmscope
-
-# Fly.io (builds remotely — no local Docker needed)
-fly launch --no-deploy && fly deploy
-fly secrets set SVMSCOPE_RPC_URL=https://your-rpc   # optional, for a faster RPC
+docker build -t svmscope . && docker run -p 3000:3000 -e SVMSCOPE_RPC_URL=https://your-rpc svmscope
 ```
 
-The public mainnet RPC is heavily rate-limited; point `SVMSCOPE_RPC_URL` at your own
-endpoint for a hosted deployment.
+Or on [render.com](https://render.com): **New → Blueprint** → connect the repo (reads [`render.yaml`](./render.yaml)) → deploy. The public mainnet RPC is heavily rate-limited; use your own endpoint for anything hosted.
+
+## Roadmap
+
+- [x] Decode, reconstruct, replay, mutate, time-travel, feature gates
+- [x] Hermetic fixtures (v2: IDLs + recorded outcome captured — offline named-field asserts and `matches_onchain`)
+- [x] Typed errors; mutations validated up front (no silently-passing revert tests)
+- [x] `Scope`/`Replay` library API — fetch once, replay forever
+- [x] Mollusk-style `Check` DSL with named-field assertions
+- [ ] Codama/Shank IDL support (named fields for native & Pinocchio programs)
+- [ ] Named-field mutations — `Mutation::field(addr, "count", 99)`
+- [ ] Async/trait RPC abstraction
+- [ ] Anchor event decoding; archival state at the exact slot; cross-account invariants
+
+See [VISION.md](./VISION.md) for the full architecture.
 
 ## Built with
 
-Rust · [`litesvm`](https://crates.io/crates/litesvm) · [`solana-client`](https://crates.io/crates/solana-client) · [`solana-transaction`](https://crates.io/crates/solana-transaction) · [`serde_json`](https://crates.io/crates/serde_json)
+Rust · [`litesvm`](https://crates.io/crates/litesvm) · [`solana-client`](https://crates.io/crates/solana-client) · [`thiserror`](https://crates.io/crates/thiserror) · [`serde_json`](https://crates.io/crates/serde_json)

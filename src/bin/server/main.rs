@@ -16,11 +16,9 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use solana_client::rpc_client::RpcClient;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use svmscope::api::{MutationInput, SuiteRequest};
-use svmscope::replay::{Mutation, ReplayResult, ScenarioOutcome};
-use svmscope::Analysis;
+use svmscope::spec::{MutationInput, SuiteRequest};
+use svmscope::{Analysis, Mutation, ReplayResult, ScenarioOutcome, Scope, TimeTravel};
 
 const DEFAULT_RPC: &str = "https://api.mainnet-beta.solana.com";
 
@@ -186,7 +184,9 @@ fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> String {
     // Never let a caller `rpc` reach resolve_rpc's verbatim-URL branch unless it's
     // both allowed and vetted. `cluster` is already sanitized above.
     let safe_rpc = rpc.filter(|u| allow && vet_custom_rpc(u).is_some());
-    svmscope::resolve_rpc(cluster, safe_rpc, &rpc_url())
+    // `cluster` is pre-sanitized above, so an unknown name can't reach here;
+    // fall back to the default endpoint defensively anyway.
+    svmscope::resolve_rpc_url(cluster, safe_rpc, &rpc_url()).unwrap_or_else(|_| rpc_url())
 }
 
 /// POST body for /simulate.
@@ -196,10 +196,10 @@ struct SimRequest {
     mutations: Vec<MutationInput>,
     /// Optional clock warp — test time-gated logic without waiting.
     #[serde(default)]
-    time_travel: svmscope::replay::TimeTravel,
+    time_travel: TimeTravel,
     /// Optional runtime feature-gate toggles — replay as if a feature were (in)active.
     #[serde(default)]
-    features: Vec<svmscope::api::FeatureInput>,
+    features: Vec<svmscope::spec::FeatureInput>,
     #[serde(default)]
     cluster: Option<String>,
     #[serde(default)]
@@ -211,6 +211,26 @@ async fn index() -> Html<&'static str> {
     Html(include_str!("../../../static/index.html"))
 }
 
+/// Map a library error onto an HTTP status + message. Not-found inputs are 404,
+/// upstream RPC trouble is 502, everything else the caller can fix is 400.
+fn lib_err(e: svmscope::Error) -> (StatusCode, String) {
+    use svmscope::Error as E;
+    match &e {
+        E::TransactionNotFound(_) | E::NoSignatures(_) | E::AccountNotFound(_) => {
+            (StatusCode::NOT_FOUND, e.to_string())
+        }
+        // An RPC error's Display can echo the upstream request, and a paid RPC
+        // URL commonly carries an ?api-key=… secret. Never pass that back to an
+        // anonymous caller — return a generic gateway message and keep the detail
+        // server-side only.
+        E::Rpc(_) | E::MalformedRpcResponse(_) => {
+            eprintln!("upstream RPC error: {e}");
+            (StatusCode::BAD_GATEWAY, "upstream RPC error".to_string())
+        }
+        _ => (StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
 /// GET /analyze/:signature — decode + replay a transaction, return JSON.
 async fn analyze_handler(
     Path(signature): Path<String>,
@@ -219,48 +239,58 @@ async fn analyze_handler(
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     // `analyze` does blocking I/O (RPC) and heavy CPU work (replay), so run it on
     // the blocking thread pool instead of stalling the async runtime.
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::analyze(&client, &signature)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+    let result = tokio::task::spawn_blocking(move || Scope::new(url).analyze(&signature))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
 
     match result {
         Ok(analysis) => Ok(Json(analysis)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
+}
+
+/// Per-request work caps for the public server. Each scenario/mutation is a full
+/// LiteSVM replay on a single blocking thread, so an unbounded batch is a CPU/
+/// thread-pool DoS regardless of the 2MB body limit. Generous for real use.
+const MAX_MUTATIONS_PER_REQUEST: usize = 256;
+const MAX_SCENARIOS_PER_REQUEST: usize = 64;
+
+fn cap(count: usize, limit: usize, what: &str) -> Result<(), (StatusCode, String)> {
+    if count > limit {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("too many {what}: {count} (limit {limit})"),
+        ));
+    }
+    Ok(())
 }
 
 /// POST /simulate — apply what-if mutations and return the mutated replay result.
 async fn simulate_handler(
     Json(req): Json<SimRequest>,
 ) -> Result<Json<ReplayResult>, (StatusCode, String)> {
+    cap(req.mutations.len(), MAX_MUTATIONS_PER_REQUEST, "mutations")?;
     let mutations: Vec<Mutation> = req
         .mutations
         .into_iter()
         .map(MutationInput::into_mutation)
         .collect::<Result<_, _>>()
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let features =
-        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let features = svmscope::spec::feature_toggles(req.features)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::simulate(
-            &client,
-            &req.signature,
-            &mutations,
-            req.time_travel,
-            features,
-        )
+    let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
+        let mut replay = Scope::new(url).replay(&req.signature)?;
+        replay.set_time_travel(req.time_travel);
+        replay.set_features(features);
+        Ok(replay.simulate(&mutations)?.result)
     })
     .await
     .map_err(|e| {
@@ -272,7 +302,7 @@ async fn simulate_handler(
 
     match result {
         Ok(replay) => Ok(Json(replay)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 
@@ -294,31 +324,37 @@ async fn suite_handler(
         .signature
         .clone()
         .ok_or((StatusCode::BAD_REQUEST, "signature is required".to_string()))?;
+    cap(req.scenarios.len(), MAX_SCENARIOS_PER_REQUEST, "scenarios")?;
+    let total_mutations: usize = req.scenarios.iter().map(|s| s.mutations.len()).sum();
+    cap(total_mutations, MAX_MUTATIONS_PER_REQUEST, "mutations")?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let scenarios = req
         .scenarios
         .into_iter()
-        .map(|s| s.into_spec())
+        .map(|s| s.into_scenario())
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    let features =
-        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let features = svmscope::spec::feature_toggles(req.features)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::simulate_suite(&client, &signature, scenarios, req.time_travel, features)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+    let result =
+        tokio::task::spawn_blocking(move || -> Result<Vec<ScenarioOutcome>, svmscope::Error> {
+            let mut replay = Scope::new(url).replay(&signature)?;
+            replay.set_time_travel(req.time_travel);
+            replay.set_features(features);
+            replay.run_suite(&scenarios)
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
 
     match result {
         Ok(outcomes) => Ok(Json(outcomes)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 
@@ -331,10 +367,10 @@ struct PreflightRequest {
     mutations: Vec<MutationInput>,
     /// Optional clock warp — test time-gated logic without waiting.
     #[serde(default)]
-    time_travel: svmscope::replay::TimeTravel,
+    time_travel: TimeTravel,
     /// Optional runtime feature-gate toggles.
     #[serde(default)]
-    features: Vec<svmscope::api::FeatureInput>,
+    features: Vec<svmscope::spec::FeatureInput>,
     #[serde(default)]
     cluster: Option<String>,
     #[serde(default)]
@@ -346,17 +382,18 @@ struct PreflightRequest {
 async fn preflight_handler(
     Json(req): Json<PreflightRequest>,
 ) -> Result<Json<ReplayResult>, (StatusCode, String)> {
+    cap(req.mutations.len(), MAX_MUTATIONS_PER_REQUEST, "mutations")?;
     let mutations: Vec<Mutation> = req
         .mutations
         .into_iter()
         .map(MutationInput::into_mutation)
         .collect::<Result<_, _>>()
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::simulate_preflight(&client, &req.transaction, &mutations)
+    let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
+        let replay = Scope::new(url).preflight(&req.transaction)?;
+        Ok(replay.simulate(&mutations)?.result)
     })
     .await
     .map_err(|e| {
@@ -368,7 +405,7 @@ async fn preflight_handler(
 
     match result {
         Ok(r) => Ok(Json(r)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 
@@ -378,21 +415,18 @@ async fn account_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::AccountOverview>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::account_overview(&client, &address)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+    let result = tokio::task::spawn_blocking(move || Scope::new(url).account(&address))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
 
     match result {
         Ok(ov) => Ok(Json(ov)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 
@@ -402,21 +436,18 @@ async fn signatures_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::SigInfo>>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::recent_signatures(&client, &address, 25)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+    let result = tokio::task::spawn_blocking(move || Scope::new(url).signatures(&address, 25))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
 
     match result {
         Ok(sigs) => Ok(Json(sigs)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 
@@ -425,21 +456,26 @@ async fn signatures_handler(
 async fn preflight_report_handler(
     Json(req): Json<PreflightRequest>,
 ) -> Result<Json<svmscope::SimulationReport>, (StatusCode, String)> {
+    cap(req.mutations.len(), MAX_MUTATIONS_PER_REQUEST, "mutations")?;
     let mutations: Vec<Mutation> = req
         .mutations
         .into_iter()
         .map(MutationInput::into_mutation)
         .collect::<Result<_, _>>()
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let features =
-        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let features = svmscope::spec::feature_toggles(req.features)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::preflight_report(&client, &req.transaction, &mutations, tt, features)
-    })
+    let result = tokio::task::spawn_blocking(
+        move || -> Result<svmscope::SimulationReport, svmscope::Error> {
+            let mut replay = Scope::new(url).preflight(&req.transaction)?;
+            replay.set_time_travel(tt);
+            replay.set_features(features);
+            Ok(replay.simulate(&mutations)?.into_report())
+        },
+    )
     .await
     .map_err(|e| {
         (
@@ -448,7 +484,7 @@ async fn preflight_report_handler(
         )
     })?;
 
-    result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
+    result.map(Json).map_err(lib_err)
 }
 
 /// POST /replay_report — replay a landed tx (optionally mutated) with explanation
@@ -456,21 +492,26 @@ async fn preflight_report_handler(
 async fn replay_report_handler(
     Json(req): Json<SimRequest>,
 ) -> Result<Json<svmscope::SimulationReport>, (StatusCode, String)> {
+    cap(req.mutations.len(), MAX_MUTATIONS_PER_REQUEST, "mutations")?;
     let mutations: Vec<Mutation> = req
         .mutations
         .into_iter()
         .map(MutationInput::into_mutation)
         .collect::<Result<_, _>>()
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let features =
-        svmscope::api::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let features = svmscope::spec::feature_toggles(req.features)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::replay_report(&client, &req.signature, &mutations, tt, features)
-    })
+    let result = tokio::task::spawn_blocking(
+        move || -> Result<svmscope::SimulationReport, svmscope::Error> {
+            let mut replay = Scope::new(url).replay(&req.signature)?;
+            replay.set_time_travel(tt);
+            replay.set_features(features);
+            Ok(replay.simulate(&mutations)?.into_report())
+        },
+    )
     .await
     .map_err(|e| {
         (
@@ -479,7 +520,7 @@ async fn replay_report_handler(
         )
     })?;
 
-    result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
+    result.map(Json).map_err(lib_err)
 }
 
 /// POST body for IDL-assisted decoding / instruction listing.
@@ -488,7 +529,7 @@ struct IdlRequest {
     /// Account address (for /decode_account) or program id (for /idl_instructions).
     #[serde(default)]
     address: Option<String>,
-    /// The IDL JSON, e.g. the contents of target/idl/<program>.json.
+    /// The IDL JSON, e.g. the contents of `target/idl/<program>.json`.
     idl: serde_json::Value,
     #[serde(default)]
     cluster: Option<String>,
@@ -500,7 +541,7 @@ struct IdlRequest {
 /// Lets a developer decode their own program's accounts before publishing an IDL.
 async fn decode_account_handler(
     Json(req): Json<IdlRequest>,
-) -> Result<Json<svmscope::decode::AccountInfo>, (StatusCode, String)> {
+) -> Result<Json<svmscope::AccountInfo>, (StatusCode, String)> {
     let address = req
         .address
         .clone()
@@ -508,26 +549,24 @@ async fn decode_account_handler(
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let idl = (!req.idl.is_null()).then_some(req.idl);
 
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::decode_account_with(&client, &address, idl.as_ref())
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+    let result =
+        tokio::task::spawn_blocking(move || Scope::new(url).decode_account(&address, idl.as_ref()))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("task error: {e}"),
+                )
+            })?;
 
-    result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
+    result.map(Json).map_err(lib_err)
 }
 
 /// POST /idl_instructions — instructions from a supplied IDL (no on-chain publish needed).
 async fn idl_instructions_handler(
     Json(req): Json<IdlRequest>,
 ) -> Json<Vec<svmscope::idl::IdlInstruction>> {
-    Json(svmscope::instructions_from_idl(&req.idl))
+    Json(svmscope::idl::instructions(&req.idl))
 }
 
 /// GET /instructions/:program — the instructions a program exposes (from its IDL),
@@ -537,19 +576,17 @@ async fn instructions_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::idl::IdlInstruction>>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::program_instructions(&client, &program)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+    let result =
+        tokio::task::spawn_blocking(move || Scope::new(url).program_instructions(&program))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("task error: {e}"),
+                )
+            })?;
 
-    result.map(Json).map_err(|m| (StatusCode::BAD_REQUEST, m))
+    result.map(Json).map_err(lib_err)
 }
 
 /// GET /replay/:signature — run the local replay on demand (analyze skips it).
@@ -558,9 +595,8 @@ async fn replay_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<ReplayResult>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::run_replay(&client, &signature)
+    let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
+        Ok(Scope::new(url).replay(&signature)?.run()?.result)
     })
     .await
     .map_err(|e| {
@@ -572,7 +608,7 @@ async fn replay_handler(
 
     match result {
         Ok(replay) => Ok(Json(replay)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 
@@ -580,23 +616,20 @@ async fn replay_handler(
 async fn freeze_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
-) -> Result<Json<svmscope::fixture::Fixture>, (StatusCode, String)> {
+) -> Result<Json<svmscope::Fixture>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || {
-        let client = RpcClient::new(url);
-        svmscope::capture_fixture(&client, &signature)
-    })
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+    let result = tokio::task::spawn_blocking(move || Scope::new(url).capture(&signature))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
 
     match result {
         Ok(fx) => Ok(Json(fx)),
-        Err(msg) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(e) => Err(lib_err(e)),
     }
 }
 
@@ -622,12 +655,19 @@ async fn api_index() -> Json<serde_json::Value> {
 
 /// The client's address, preferring the proxy-forwarded IP since we run behind
 /// Render's load balancer (otherwise every request looks like the same peer).
+///
+/// Use the *rightmost* `X-Forwarded-For` entry: our trusted proxy appends the
+/// real client IP on the right, while any entries to the left are supplied by
+/// the client itself. Taking the leftmost would let a client send a random
+/// `X-Forwarded-For` per request and mint a fresh identity each time, defeating
+/// the rate limiter (the only DoS defense on the unauthenticated endpoints).
 fn client_id(req: &Request, peer: Option<SocketAddr>) -> String {
     req.headers()
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.split(',').next_back())
         .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
         .or_else(|| peer.map(|p| p.ip().to_string()))
         .unwrap_or_else(|| "unknown".into())
 }
@@ -749,11 +789,21 @@ async fn stats_handler(Query(q): Query<StatsQuery>) -> Response {
         .ok()
         .filter(|t| !t.is_empty());
     match configured {
-        Some(expected) if q.token.as_deref() == Some(expected.as_str()) => {
+        Some(expected) if q.token.as_deref().is_some_and(|t| ct_eq(t, &expected)) => {
             Json(stats::snapshot_json()).into_response()
         }
         _ => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
+}
+
+/// Constant-time string equality for the stats token, so a mismatch can't be
+/// narrowed by response timing. (Length is not treated as secret.)
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 #[tokio::main]

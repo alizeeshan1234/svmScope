@@ -3,6 +3,7 @@
 //! Loads the transaction's accounts AND programs into an in-process SVM
 //! (LiteSVM) so the transaction can be re-executed locally.
 
+use crate::error::{Error, Result};
 use crate::fixture::{Fixture, FixtureEntry};
 use base64::Engine;
 use litesvm::types::TransactionResult;
@@ -21,16 +22,21 @@ const NATIVE_LOADER: &str = "NativeLoader1111111111111111111111111111111";
 const BPF_LOADER_2: &str = "BPFLoader2111111111111111111111111111111111";
 const BPF_LOADER_UPGRADEABLE: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
 
-#[derive(serde::Serialize, Default)]
+/// The outcome of one local replay run.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Default)]
 pub struct ReplayResult {
+    /// Whether the transaction executed without error.
     pub success: bool,
+    /// The failure, formatted, when `success` is false.
     pub error: Option<String>,
     /// The failure resolved to its human name via the program's IDL, e.g.
     /// "SlippageToleranceExceeded" for a bare `Custom(6001)`. Filled in by the
     /// library layer (which has RPC access); `None` when unresolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_name: Option<String>,
+    /// The program logs the replay produced.
     pub logs: Vec<String>,
+    /// Compute units the replay consumed.
     pub compute_units: u64,
 }
 
@@ -45,7 +51,7 @@ fn fetch_account_data(client: &RpcClient, address: &str) -> Option<Vec<u8>> {
     let resp: serde_json::Value = client
         .send(
             RpcRequest::GetAccountInfo,
-            json!([address, { "encoding": "base64" }]),
+            json!([address, { "encoding": "base64", "commitment": "confirmed" }]),
         )
         .ok()?;
     let data_b64 = resp["value"]["data"][0].as_str()?;
@@ -69,17 +75,20 @@ type LoadedAccounts = (Vec<(Address, Loaded)>, HashMap<String, ()>);
 /// (non-null) — including programs whose ELF we couldn't resolve. The caller uses
 /// that set to tell a genuinely-closed account (safe to reconstruct) apart from a
 /// program that merely failed to load (must NOT be reconstructed as data).
-fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Result<LoadedAccounts, String> {
+fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Result<LoadedAccounts> {
     let resp: serde_json::Value = client
         .send(
             RpcRequest::GetMultipleAccounts,
-            json!([account_keys, { "encoding": "base64" }]),
+            json!([
+                account_keys,
+                { "encoding": "base64", "commitment": "confirmed" }
+            ]),
         )
-        .map_err(|e| format!("getMultipleAccounts failed: {e}"))?;
+        .map_err(Error::rpc)?;
 
     let accounts = resp["value"]
         .as_array()
-        .ok_or("unexpected getMultipleAccounts response (no value array)")?;
+        .ok_or_else(|| Error::MalformedRpcResponse("getMultipleAccounts: no value array".into()))?;
     let mut out: Vec<(Address, Loaded)> = Vec::new();
     let mut existing: HashMap<String, ()> = HashMap::new();
 
@@ -184,15 +193,13 @@ fn svm_from_loaded(loaded: &[(Address, Loaded)], features: &[FeatureToggle], slo
     }
     for (addr, l) in loaded {
         match l {
+            // A load failure here (malformed account, unloadable ELF) surfaces
+            // through the replay result itself — a library must not print.
             Loaded::Data(a) => {
-                if let Err(e) = svm.set_account(*addr, a.clone()) {
-                    eprintln!("warn: skipped account {addr}: {e:?}");
-                }
+                let _ = svm.set_account(*addr, a.clone());
             }
             Loaded::Program(elf) => {
-                if let Err(e) = svm.add_program(*addr, elf) {
-                    eprintln!("warn: skipped program {addr}: {e:?}");
-                }
+                let _ = svm.add_program(*addr, elf);
             }
         }
     }
@@ -201,7 +208,9 @@ fn svm_from_loaded(loaded: &[(Address, Loaded)], features: &[FeatureToggle], slo
 
 /// The reconstructed world a transaction ran in, fetched once. Run any number of
 /// scenarios against it with [`ReplayContext::run`] — each gets a pristine SVM.
-pub struct ReplayContext {
+pub(crate) struct ReplayContext {
+    /// The replayed transaction's signature (empty for pre-flight transactions).
+    signature: String,
     tx: VersionedTransaction,
     loaded: Vec<(Address, Loaded)>,
     /// The slot the transaction landed in. The SVM clock is set to this so
@@ -226,13 +235,13 @@ pub struct ReplayContext {
 
 /// An account that the transaction changed, with raw before/after bytes. The
 /// caller turns these into named field diffs using the account's layout.
-pub struct RawAccountDiff {
-    pub address: String,
-    pub owner: String,
-    pub lamports_before: u64,
-    pub lamports_after: u64,
-    pub data_before: Vec<u8>,
-    pub data_after: Vec<u8>,
+pub(crate) struct RawAccountDiff {
+    pub(crate) address: String,
+    pub(crate) owner: String,
+    pub(crate) lamports_before: u64,
+    pub(crate) lamports_after: u64,
+    pub(crate) data_before: Vec<u8>,
+    pub(crate) data_after: Vec<u8>,
 }
 
 /// Move the SVM's clock forward (or to an absolute point) so time-gated program
@@ -242,7 +251,7 @@ pub struct RawAccountDiff {
 /// Relative fields add to the transaction's own clock; absolute fields replace it.
 /// Slots and epochs are kept consistent with each other where possible
 /// (Solana's ~432,000 slots per epoch, ~400ms per slot).
-#[derive(Default, Clone, serde::Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TimeTravel {
     /// Jump forward this many epochs (the common case for staking).
     #[serde(default)]
@@ -270,7 +279,7 @@ const SLOTS_PER_EPOCH: i64 = 432_000;
 const SECS_PER_SLOT: f64 = 0.4;
 
 impl TimeTravel {
-    pub fn is_noop(&self) -> bool {
+    pub(crate) fn is_noop(&self) -> bool {
         self.epochs.is_none()
             && self.slots.is_none()
             && self.seconds.is_none()
@@ -282,22 +291,27 @@ impl TimeTravel {
     /// Apply this warp to a clock, advancing the related fields together so a
     /// program that reads epoch *and* timestamp sees a consistent world.
     fn apply(&self, clock: &mut Clock) {
+        // Saturating throughout: the warp values come from untrusted JSON, and an
+        // extreme epoch/slot count must clamp, never overflow-panic (debug) or
+        // wrap to a nonsense clock (release).
         let mut slot_delta: i64 = 0;
         if let Some(e) = self.epochs {
-            slot_delta += e * SLOTS_PER_EPOCH;
+            slot_delta = slot_delta.saturating_add(e.saturating_mul(SLOTS_PER_EPOCH));
         }
         if let Some(s) = self.slots {
-            slot_delta += s;
+            slot_delta = slot_delta.saturating_add(s);
         }
         if slot_delta != 0 {
             clock.slot = clock.slot.saturating_add_signed(slot_delta);
             clock.epoch = clock
                 .epoch
                 .saturating_add_signed(slot_delta / SLOTS_PER_EPOCH);
-            clock.unix_timestamp += (slot_delta as f64 * SECS_PER_SLOT) as i64;
+            clock.unix_timestamp = clock
+                .unix_timestamp
+                .saturating_add((slot_delta as f64 * SECS_PER_SLOT) as i64);
         }
         if let Some(secs) = self.seconds {
-            clock.unix_timestamp += secs;
+            clock.unix_timestamp = clock.unix_timestamp.saturating_add(secs);
             // Keep slots roughly in step so slot-based checks move too.
             let by = (secs as f64 / SECS_PER_SLOT) as i64;
             clock.slot = clock.slot.saturating_add_signed(by);
@@ -319,7 +333,7 @@ impl TimeTravel {
     }
 
     /// A human summary of where we travelled to, for the UI.
-    pub fn describe(&self, clock: &Clock) -> String {
+    pub(crate) fn describe(&self, clock: &Clock) -> String {
         format!(
             "slot {} · epoch {} · {}",
             clock.slot,
@@ -353,13 +367,13 @@ fn chrono_like(ts: i64) -> String {
 
 impl ReplayContext {
     /// Warp the clock for subsequent runs (see [`TimeTravel`]).
-    pub fn set_time_travel(&mut self, tt: TimeTravel) {
+    pub(crate) fn set_time_travel(&mut self, tt: TimeTravel) {
         self.time_travel = tt;
     }
 
     /// Flip runtime feature gates for subsequent runs (see [`FeatureToggle`]).
     /// Every run rebuilds its SVM, so this takes effect on the next replay.
-    pub fn set_feature_toggles(&mut self, toggles: Vec<FeatureToggle>) {
+    pub(crate) fn set_feature_toggles(&mut self, toggles: Vec<FeatureToggle>) {
         self.feature_toggles = toggles;
     }
 
@@ -384,7 +398,7 @@ impl ReplayContext {
 
     /// A human description of the clock this context replays with, e.g.
     /// "slot 487,817,148 · epoch 1128 · 2026-09-01 04:12 UTC".
-    pub fn describe_clock(&self) -> String {
+    pub(crate) fn describe_clock(&self) -> String {
         let svm = LiteSVM::new();
         let mut clock = svm.get_sysvar::<Clock>();
         self.base_clock(&mut clock);
@@ -405,16 +419,15 @@ impl ReplayContext {
         svm
     }
 
-    /// Replay the transaction after applying `mutations` to a fresh copy of the
-    /// state. Repeatable and side-effect-free across calls.
-    pub fn run(&self, mutations: &[Mutation]) -> ReplayResult {
-        self.run_full(mutations).0
-    }
-
-    /// Replay and report **what changed** — every touched account's lamports and
-    /// raw data, before and after. The caller decodes the bytes into named fields.
-    pub fn run_with_diff(&self, mutations: &[Mutation]) -> (ReplayResult, Vec<RawAccountDiff>) {
-        let (result, svm) = self.run_full(mutations);
+    /// Replay and report **what changed** among the loaded accounts — each one's
+    /// lamports and raw data, before and after. The caller decodes the bytes into
+    /// named fields. Accounts *created* by the transaction aren't in the loaded
+    /// set, so they don't appear here.
+    pub(crate) fn run_with_diff(
+        &self,
+        mutations: &[Mutation],
+    ) -> Result<(ReplayResult, Vec<RawAccountDiff>)> {
+        let (result, svm) = self.run_full(mutations)?;
         let mut diffs = Vec::new();
         for (addr, l) in &self.loaded {
             let Loaded::Data(before) = l else { continue };
@@ -433,7 +446,7 @@ impl ReplayContext {
                 data_after: after.data.clone(),
             });
         }
-        (result, diffs)
+        Ok((result, diffs))
     }
 
     /// The pre-transaction state of an account (for delta assertions).
@@ -445,34 +458,68 @@ impl ReplayContext {
         })
     }
 
-    /// The owner program of an account's pre-state — which IDL a named-field
-    /// assertion on it would need.
-    pub fn pre_owner(&self, address: &str) -> Option<String> {
-        self.pre_account(address).map(|a| a.owner.to_string())
+    /// Whether an address is part of the replay's world at all (a loaded data
+    /// account or program). An assertion against an address that is *not* known
+    /// is a typo, not an account that happens to be empty — the difference
+    /// between a hard error and a check that silently reads zero and passes.
+    fn is_known(&self, address: &str) -> bool {
+        match Address::from_str(address) {
+            Ok(addr) => self.loaded.iter().any(|(a, _)| *a == addr),
+            Err(_) => false,
+        }
     }
 
     /// Register a program's IDL for named-field assertion resolution.
-    pub fn add_idl(&mut self, owner: String, idl: serde_json::Value) {
+    pub(crate) fn add_idl(&mut self, owner: String, idl: serde_json::Value) {
         self.idls.insert(owner, idl);
+    }
+
+    /// The registered IDLs, by program id.
+    pub(crate) fn idl_map(&self) -> &HashMap<String, serde_json::Value> {
+        &self.idls
+    }
+
+    /// Every program whose IDL could matter here: loaded programs (error-name
+    /// resolution) plus each distinct data-account owner (named-field decode).
+    pub(crate) fn interesting_programs(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        for (addr, l) in &self.loaded {
+            match l {
+                Loaded::Program(_) => {
+                    seen.insert(addr.to_string());
+                }
+                Loaded::Data(acc) => {
+                    seen.insert(acc.owner.to_string());
+                }
+            }
+        }
+        seen.into_iter().collect()
+    }
+
+    /// Add one feature toggle on top of those already set.
+    pub(crate) fn push_feature_toggle(&mut self, t: FeatureToggle) {
+        self.feature_toggles.push(t);
     }
 
     /// Decode an account's pre-state into named fields: built-in layouts (SPL
     /// token & friends) first, then the owner program's registered IDL. The
     /// pre-state layout is authoritative for both sides of a delta — an assert
     /// shouldn't silently change meaning because the tx rewrote the account.
-    fn decode_pre(
-        &self,
-        address: &str,
-    ) -> Result<(crate::decode::DecodedAccount, &Account), String> {
+    fn decode_pre(&self, address: &str) -> Result<(crate::decode::DecodedAccount, &Account)> {
         let pre = self
             .pre_account(address)
-            .ok_or_else(|| format!("no pre-state for {address}"))?;
+            .ok_or_else(|| Error::AccountNotFound(format!("{address} (no pre-state)")))?;
         let owner = pre.owner.to_string();
         crate::decode::decode_bytes(&owner, &pre.data)
-            .or_else(|| self.idls.get(&owner).and_then(|i| crate::idl::decode_with_idl(i, &pre.data)))
+            .or_else(|| {
+                self.idls
+                    .get(&owner)
+                    .and_then(|i| crate::idl::decode_with_idl(i, &pre.data))
+            })
             .map(|dec| (dec, pre))
-            .ok_or_else(|| {
-                format!("can't decode {address} into named fields (no known layout, and no IDL for its program {owner})")
+            .ok_or_else(|| Error::UndecodableAccount {
+                address: address.to_string(),
+                owner,
             })
     }
 }
@@ -497,7 +544,7 @@ struct TokenInfo {
 }
 
 #[derive(Default)]
-pub struct PreState {
+pub(crate) struct PreState {
     /// account address -> raw SPL token amount before the transaction.
     token_amounts: HashMap<String, u64>,
     /// account address -> its lamports before the transaction.
@@ -507,7 +554,7 @@ pub struct PreState {
 }
 
 impl PreState {
-    pub fn from_meta(tx: &serde_json::Value, account_keys: &[String]) -> PreState {
+    pub(crate) fn from_meta(tx: &serde_json::Value, account_keys: &[String]) -> PreState {
         let mut ps = PreState::default();
 
         // Pre-transaction lamports, parallel to the resolved account list.
@@ -589,13 +636,13 @@ impl PreState {
 /// `pre_state` restores pre-transaction token balances so swaps replay faithfully
 /// instead of slipping. (`_tx_slot` is the transaction's original slot, kept for
 /// the signature's sake but no longer used to set the clock — see below.)
-pub fn build_context(
+pub(crate) fn build_context(
     client: &RpcClient,
     signature: &str,
     account_keys: &[String],
     _tx_slot: Option<u64>,
     pre_state: &PreState,
-) -> Result<ReplayContext, String> {
+) -> Result<ReplayContext> {
     // Replay runs against CURRENT account state — an RPC returns today's accounts,
     // not the tx-time snapshot. Anchoring the clock to the transaction's ORIGINAL
     // slot then contradicts that state: a program that checks the clock against an
@@ -641,6 +688,7 @@ pub fn build_context(
     }
 
     Ok(ReplayContext {
+        signature: signature.to_string(),
         tx,
         loaded,
         slot,
@@ -693,10 +741,10 @@ fn resolve_alt_addresses(
 /// hasn't been sent yet. Resolves its accounts (incl. ALTs), loads their *current*
 /// on-chain state (which, for a not-yet-sent tx, IS the pre-state — no drift, no
 /// archival), and sets the slot to the current slot so ALT resolution works.
-pub fn preflight_context(
+pub(crate) fn preflight_context(
     client: &RpcClient,
     tx: VersionedTransaction,
-) -> Result<ReplayContext, String> {
+) -> Result<ReplayContext> {
     let mut keys: Vec<String> = tx
         .message
         .static_account_keys()
@@ -719,7 +767,13 @@ pub fn preflight_context(
     // Real wall-clock time for that slot — a pre-flight simulation should run
     // "now", and any date-based program logic depends on this being accurate.
     let block_time = slot.and_then(|s| client.get_block_time(s).ok());
+    let signature = tx
+        .signatures
+        .first()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
     Ok(ReplayContext {
+        signature,
         tx,
         loaded,
         slot,
@@ -738,8 +792,9 @@ impl ReplayContext {
     /// / `self.block_time`) — the exact clock the live replay ran with — so a
     /// reloaded fixture reproduces the live outcome instead of drifting to the
     /// transaction's original slot.
-    pub fn to_fixture(&self, signature: &str) -> Fixture {
-        let tx_bytes = bincode::serialize(&self.tx).expect("serialize tx");
+    pub(crate) fn to_fixture(&self) -> Result<Fixture> {
+        let tx_bytes = bincode::serialize(&self.tx)
+            .map_err(|e| Error::Fixture(format!("serialize transaction: {e}")))?;
         let entries = self
             .loaded
             .iter()
@@ -756,23 +811,30 @@ impl ReplayContext {
                 },
             })
             .collect();
-        Fixture {
-            signature: signature.to_string(),
+        Ok(Fixture {
+            version: crate::fixture::FIXTURE_VERSION,
+            signature: self.signature.clone(),
             captured_slot: self.slot,
             captured_block_time: self.block_time,
             tx_b64: b64_encode(&tx_bytes),
             entries,
-        }
+            idls: self
+                .idls
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            recorded: None, // the Replay layer fills this in — it knows the outcome
+        })
     }
 
     /// Rebuild a replay context from a frozen fixture — **no network**. This is
     /// what makes fixture-backed suites deterministic and CI-safe.
-    pub fn from_fixture(fx: &Fixture) -> Result<ReplayContext, String> {
+    pub(crate) fn from_fixture(fx: &Fixture) -> Result<ReplayContext> {
         let tx_bytes = base64::engine::general_purpose::STANDARD
             .decode(&fx.tx_b64)
-            .map_err(|e| format!("bad tx base64: {e}"))?;
-        let tx: VersionedTransaction =
-            bincode::deserialize(&tx_bytes).map_err(|e| format!("deserialize tx: {e}"))?;
+            .map_err(|e| Error::Fixture(format!("bad tx base64: {e}")))?;
+        let tx: VersionedTransaction = bincode::deserialize(&tx_bytes)
+            .map_err(|e| Error::Fixture(format!("deserialize tx: {e}")))?;
 
         let mut loaded = Vec::with_capacity(fx.entries.len());
         for e in &fx.entries {
@@ -783,13 +845,15 @@ impl ReplayContext {
                     lamports,
                     data_b64,
                 } => {
-                    let addr =
-                        Address::from_str(address).map_err(|_| format!("bad address {address}"))?;
-                    let owner_addr =
-                        Address::from_str(owner).map_err(|_| format!("bad owner {owner}"))?;
+                    let addr = Address::from_str(address)
+                        .map_err(|_| Error::Fixture(format!("bad address {address}")))?;
+                    let owner_addr = Address::from_str(owner)
+                        .map_err(|_| Error::Fixture(format!("bad owner {owner}")))?;
                     let data = base64::engine::general_purpose::STANDARD
                         .decode(data_b64)
-                        .map_err(|e| format!("bad data base64 for {address}: {e}"))?;
+                        .map_err(|e| {
+                            Error::Fixture(format!("bad data base64 for {address}: {e}"))
+                        })?;
                     loaded.push((
                         addr,
                         Loaded::Data(Account {
@@ -802,95 +866,152 @@ impl ReplayContext {
                     ));
                 }
                 FixtureEntry::Program { address, elf_b64 } => {
-                    let addr =
-                        Address::from_str(address).map_err(|_| format!("bad address {address}"))?;
+                    let addr = Address::from_str(address)
+                        .map_err(|_| Error::Fixture(format!("bad address {address}")))?;
                     let elf = base64::engine::general_purpose::STANDARD
                         .decode(elf_b64)
-                        .map_err(|e| format!("bad elf base64 for {address}: {e}"))?;
+                        .map_err(|e| {
+                            Error::Fixture(format!("bad elf base64 for {address}: {e}"))
+                        })?;
                     loaded.push((addr, Loaded::Program(elf)));
                 }
             }
         }
         Ok(ReplayContext {
+            signature: fx.signature.clone(),
             tx,
             loaded,
             slot: fx.captured_slot,
             block_time: fx.captured_block_time,
             time_travel: TimeTravel::default(),
-            idls: HashMap::new(),
+            // v2 fixtures carry their IDLs, so named-field asserts, error
+            // names, and decoded diffs resolve offline too.
+            idls: fx
+                .idls
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             feature_toggles: Vec::new(),
         })
     }
 }
 
 /// Fetch the raw transaction (base64 wire bytes) and deserialize it.
-fn fetch_transaction(client: &RpcClient, signature: &str) -> Result<VersionedTransaction, String> {
+fn fetch_transaction(client: &RpcClient, signature: &str) -> Result<VersionedTransaction> {
     let resp: serde_json::Value = client
         .send(
             RpcRequest::GetTransaction,
             json!([signature, { "encoding": "base64", "maxSupportedTransactionVersion": 0 }]),
         )
-        .map_err(|e| format!("getTransaction failed: {e}"))?;
-    let tx_b64 = resp["transaction"][0]
-        .as_str()
-        .ok_or_else(|| format!("no base64 transaction in response for {signature}"))?;
+        .map_err(Error::rpc)?;
+    if resp.is_null() {
+        return Err(Error::TransactionNotFound(signature.to_string()));
+    }
+    let tx_b64 = resp["transaction"][0].as_str().ok_or_else(|| {
+        Error::MalformedRpcResponse(format!("no base64 transaction in response for {signature}"))
+    })?;
     let bytes = b64_decode(tx_b64);
     bincode::deserialize::<VersionedTransaction>(&bytes)
-        .map_err(|e| format!("could not deserialize transaction {signature}: {e}"))
+        .map_err(|e| Error::TxDecode(format!("{signature}: {e}")))
 }
 
 /// A change to apply to an account before replaying.
 ///
 /// `Data` replaces an account's bytes wholesale; `DataPatch` overwrites a slice
 /// at an offset (how you'd flip a token balance or an oracle price in place).
-#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mutation {
+    /// Set an account's lamport balance.
     Lamports {
+        /// The account to mutate.
         address: String,
+        /// The new lamport balance.
         value: u64,
     },
+    /// Replace an account's data wholesale.
     Data {
+        /// The account to mutate.
         address: String,
+        /// The complete replacement data.
         bytes: Vec<u8>,
     },
+    /// Overwrite a slice of an account's data at an offset.
     DataPatch {
+        /// The account to mutate.
         address: String,
+        /// Byte offset where the patch begins.
         offset: usize,
+        /// The bytes to write at that offset.
         bytes: Vec<u8>,
     },
 }
 
-/// Apply one mutation to the SVM, or explain why it can't be applied.
-fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<(), String> {
-    let (address, addr) = match m {
-        Mutation::Lamports { address, .. }
-        | Mutation::Data { address, .. }
-        | Mutation::DataPatch { address, .. } => (
-            address,
-            Address::from_str(address).map_err(|_| format!("invalid address: {address}"))?,
-        ),
-    };
+impl Mutation {
+    /// Set an account's lamports.
+    pub fn lamports(address: impl Into<String>, value: u64) -> Mutation {
+        Mutation::Lamports {
+            address: address.into(),
+            value,
+        }
+    }
+
+    /// Replace an account's data wholesale.
+    pub fn data(address: impl Into<String>, bytes: Vec<u8>) -> Mutation {
+        Mutation::Data {
+            address: address.into(),
+            bytes,
+        }
+    }
+
+    /// Overwrite a slice of an account's data at `offset`.
+    pub fn patch(address: impl Into<String>, offset: usize, bytes: Vec<u8>) -> Mutation {
+        Mutation::DataPatch {
+            address: address.into(),
+            offset,
+            bytes,
+        }
+    }
+
+    fn address(&self) -> &str {
+        match self {
+            Mutation::Lamports { address, .. }
+            | Mutation::Data { address, .. }
+            | Mutation::DataPatch { address, .. } => address,
+        }
+    }
+}
+
+/// Apply one mutation to the SVM. Callers validate first (see
+/// [`ReplayContext::validate_mutations`]), so a failure here is a hard error,
+/// never folded into a "failed replay" — a typo'd address must not satisfy an
+/// `expect: revert` scenario.
+fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
+    let address = m.address();
+    let addr =
+        Address::from_str(address).map_err(|_| Error::InvalidAddress(address.to_string()))?;
     let mut account = svm
         .get_account(&addr)
-        .ok_or_else(|| format!("mutation target not loaded in SVM: {address}"))?;
+        .ok_or_else(|| Error::MutationTargetMissing(address.to_string()))?;
 
     match m {
         Mutation::Lamports { value, .. } => account.lamports = *value,
         Mutation::Data { bytes, .. } => account.data = bytes.clone(),
         Mutation::DataPatch { offset, bytes, .. } => {
-            let end = offset + bytes.len();
-            if end > account.data.len() {
-                return Err(format!(
-                    "patch out of range for {address}: offset {offset} + {} bytes > account size {}",
-                    bytes.len(),
-                    account.data.len()
-                ));
-            }
+            let end = offset
+                .checked_add(bytes.len())
+                .filter(|&e| e <= account.data.len())
+                .ok_or_else(|| Error::PatchOutOfRange {
+                    address: address.to_string(),
+                    offset: *offset,
+                    len: bytes.len(),
+                    size: account.data.len(),
+                })?;
             account.data[*offset..end].copy_from_slice(bytes);
         }
     }
-    svm.set_account(addr, account)
-        .map_err(|e| format!("set_account failed for {address}: {e:?}"))
+    svm.set_account(addr, account).map_err(|e| {
+        Error::MalformedRpcResponse(format!("set_account failed for {address}: {e:?}"))
+    })
 }
 
 /// Convert a raw transaction result into a `ReplayResult`.
@@ -915,51 +1036,13 @@ fn to_replay_result(result: TransactionResult) -> ReplayResult {
     }
 }
 
-/// A replay that never ran because state couldn't be reconstructed (RPC error,
-/// missing transaction) — reported as a failed result instead of a panic.
-fn failed_result(error: String) -> ReplayResult {
-    ReplayResult {
-        success: false,
-        error: Some(error),
-        ..Default::default()
-    }
-}
-
-/// Replay the transaction against the reconstructed state.
-pub fn replay_transaction(
-    client: &RpcClient,
-    signature: &str,
-    account_keys: &[String],
-    slot: Option<u64>,
-    pre_state: &PreState,
-) -> ReplayResult {
-    match build_context(client, signature, account_keys, slot, pre_state) {
-        Ok(ctx) => ctx.run(&[]),
-        Err(e) => failed_result(e),
-    }
-}
-
-/// Replay the transaction after applying the given mutations.
-pub fn mutate_and_replay(
-    client: &RpcClient,
-    signature: &str,
-    account_keys: &[String],
-    mutations: &[Mutation],
-    slot: Option<u64>,
-    pre_state: &PreState,
-) -> ReplayResult {
-    match build_context(client, signature, account_keys, slot, pre_state) {
-        Ok(ctx) => ctx.run(mutations),
-        Err(e) => failed_result(e),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Scenario testing: assert expected outcomes across a suite of what-ifs.
 // ---------------------------------------------------------------------------
 
 /// The outcome a scenario asserts.
-pub enum Expect {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Expect {
     /// The transaction must succeed.
     Success,
     /// The transaction must fail (any error).
@@ -972,7 +1055,7 @@ pub enum Expect {
 }
 
 impl Expect {
-    fn matches(&self, r: &ReplayResult) -> bool {
+    pub(crate) fn matches(&self, r: &ReplayResult) -> bool {
         match self {
             Expect::Success => r.success,
             Expect::Revert => !r.success,
@@ -985,7 +1068,7 @@ impl Expect {
         }
     }
 
-    fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         match self {
             Expect::Success => "succeeds".into(),
             Expect::Revert => "reverts".into(),
@@ -996,8 +1079,8 @@ impl Expect {
 }
 
 /// A comparison operator for numeric state assertions.
-#[derive(Clone, Copy, Debug)]
-pub enum CmpOp {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CmpOp {
     Eq,
     Ne,
     Lt,
@@ -1007,10 +1090,7 @@ pub enum CmpOp {
 }
 
 impl CmpOp {
-    fn test(self, a: u64, b: u64) -> bool {
-        self.test_i128(a as i128, b as i128)
-    }
-    fn test_i128(self, a: i128, b: i128) -> bool {
+    pub(crate) fn test_i128(self, a: i128, b: i128) -> bool {
         match self {
             CmpOp::Eq => a == b,
             CmpOp::Ne => a != b,
@@ -1020,7 +1100,7 @@ impl CmpOp {
             CmpOp::Ge => a >= b,
         }
     }
-    pub fn symbol(self) -> &'static str {
+    pub(crate) fn symbol(self) -> &'static str {
         match self {
             CmpOp::Eq => "==",
             CmpOp::Ne => "!=",
@@ -1034,16 +1114,16 @@ impl CmpOp {
 
 /// A check on an account's state *after* the transaction replays. This is what
 /// makes a scenario a real test — asserting on resulting state, not just pass/fail.
-#[derive(Debug)]
-pub enum StateCheck {
+#[derive(Debug, Clone)]
+pub(crate) enum StateCheck {
     /// The account's lamports satisfy `op value`.
-    Lamports { op: CmpOp, value: u64 },
+    Lamports { op: CmpOp, value: i128 },
     /// The little-endian u64 at `offset` satisfies `op value`
     /// (e.g. an SPL token amount at offset 64).
     U64At {
         offset: usize,
         op: CmpOp,
-        value: u64,
+        value: i128,
     },
     /// The *change* in lamports (post - pre) satisfies `op value` (may be negative)
     /// — e.g. "the fee vault gained ≥ N": `LamportsDelta { Ge, N }`.
@@ -1068,10 +1148,10 @@ pub enum StateCheck {
 }
 
 /// A post-replay assertion targeting one account.
-#[derive(Debug)]
-pub struct AccountAssert {
-    pub address: String,
-    pub check: StateCheck,
+#[derive(Debug, Clone)]
+pub(crate) struct AccountAssert {
+    pub(crate) address: String,
+    pub(crate) check: StateCheck,
 }
 
 /// Read a little-endian u64 at `offset`, or 0 if out of range.
@@ -1089,7 +1169,7 @@ fn read_u64_at(data: &[u8], offset: usize) -> u64 {
 pub(crate) fn find_field<'a>(
     dec: &'a crate::decode::DecodedAccount,
     name: &'a str,
-) -> Result<&'a crate::decode::Field, String> {
+) -> Result<&'a crate::decode::Field> {
     if let Some(f) = dec.fields.iter().find(|f| f.name == name) {
         return Ok(f);
     }
@@ -1101,49 +1181,43 @@ pub(crate) fn find_field<'a>(
         .collect();
     match hits.len() {
         1 => Ok(hits[0]),
-        0 => {
-            let avail: Vec<&str> = dec
-                .fields
-                .iter()
-                .map(|f| f.name.as_str())
-                .take(12)
-                .collect();
-            Err(format!(
-                "no field \"{name}\" on this {} (fields: {})",
-                dec.type_name,
-                avail.join(", ")
-            ))
-        }
-        _ => {
-            let names: Vec<&str> = hits.iter().map(|f| f.name.as_str()).collect();
-            Err(format!(
-                "\"{name}\" is ambiguous here — use one of: {}",
-                names.join(", ")
-            ))
-        }
+        0 => Err(Error::UnknownField {
+            field: name.to_string(),
+            type_name: dec.type_name.clone(),
+            available: dec.fields.iter().map(|f| f.name.clone()).take(12).collect(),
+        }),
+        _ => Err(Error::AmbiguousField {
+            field: name.to_string(),
+            candidates: hits.iter().map(|f| f.name.clone()).collect(),
+        }),
     }
 }
 
 /// Read a named integer field's bytes as a number. Unsigned ints zero-extend,
 /// signed ints sign-extend, bool reads as 0/1; anything else (pubkey, string,
 /// 128-bit ints) can't be compared numerically and says so.
-pub(crate) fn read_field_int(data: &[u8], f: &crate::decode::Field) -> Result<i128, String> {
-    let bytes = data
-        .get(f.offset..f.offset + f.size)
-        .ok_or_else(|| format!("{} @{} out of range (len {})", f.name, f.offset, data.len()))?;
+pub(crate) fn read_field_int(data: &[u8], f: &crate::decode::Field) -> Result<i128> {
+    let bytes = f
+        .offset
+        .checked_add(f.size)
+        .and_then(|end| data.get(f.offset..end))
+        .ok_or_else(|| Error::OutOfRange {
+            what: format!("{} @{}", f.name, f.offset),
+            len: data.len(),
+        })?;
     let le = |b: &[u8]| -> u128 { b.iter().rev().fold(0u128, |acc, &x| (acc << 8) | x as u128) };
     match (f.ty.as_str(), f.size) {
-        ("bool", _) => Ok((bytes[0] != 0) as i128),
+        ("bool", _) => Ok(bytes.first().is_some_and(|&b| b != 0) as i128),
         ("u8" | "u16" | "u32" | "u64", _) => Ok(le(bytes) as i128),
         ("i8" | "i16" | "i32" | "i64", n) => {
             let raw = le(bytes);
             let shift = 128 - 8 * n as u32;
             Ok(((raw as i128) << shift) >> shift) // sign-extend from n bytes
         }
-        (ty, _) => Err(format!(
-            "{} is a {ty} — only integer/bool fields can be asserted",
-            f.name
-        )),
+        (ty, _) => Err(Error::NonNumericField {
+            field: f.name.clone(),
+            ty: ty.to_string(),
+        }),
     }
 }
 
@@ -1168,23 +1242,36 @@ impl AccountAssert {
 
     /// Evaluate against the post-replay `svm`; `ctx` supplies pre-transaction values
     /// for the delta checks.
-    fn eval(&self, svm: &LiteSVM, ctx: &ReplayContext) -> Result<bool, String> {
+    fn eval(&self, svm: &LiteSVM, ctx: &ReplayContext) -> Result<bool> {
         let addr = Address::from_str(&self.address)
-            .map_err(|_| format!("bad address {}", self.address))?;
+            .map_err(|_| Error::InvalidAddress(self.address.clone()))?;
         let acc = svm.get_account(&addr);
+        // A check against an address the replay never loaded is a typo, not an
+        // account that is legitimately empty. Erroring here (rather than reading
+        // a silent zero) is what stops a mistyped assert from passing vacuously —
+        // the same guarantee the mutation path gives via MutationTargetMissing.
+        // A known account that is now gone (closed/drained) still reads zero,
+        // which is its true post-transaction state.
+        if acc.is_none() && !ctx.is_known(&self.address) {
+            return Err(Error::AccountNotFound(self.address.clone()));
+        }
         match &self.check {
             StateCheck::Lamports { op, value } => {
-                Ok(op.test(acc.map(|a| a.lamports).unwrap_or(0), *value))
+                Ok(op.test_i128(acc.map(|a| a.lamports).unwrap_or(0) as i128, *value))
             }
             StateCheck::U64At { offset, op, value } => {
-                let acc = acc.ok_or_else(|| format!("account not found: {}", self.address))?;
-                if offset + 8 > acc.data.len() {
-                    return Err(format!(
-                        "u64@{offset} out of range (len {})",
-                        acc.data.len()
-                    ));
+                let acc = acc.ok_or_else(|| Error::AccountNotFound(self.address.clone()))?;
+                if offset
+                    .checked_add(8)
+                    .filter(|&e| e <= acc.data.len())
+                    .is_none()
+                {
+                    return Err(Error::OutOfRange {
+                        what: format!("u64@{offset}"),
+                        len: acc.data.len(),
+                    });
                 }
-                Ok(op.test(read_u64_at(&acc.data, *offset), *value))
+                Ok(op.test_i128(read_u64_at(&acc.data, *offset) as i128, *value))
             }
             StateCheck::LamportsDelta { op, value } => {
                 let pre = ctx
@@ -1205,13 +1292,13 @@ impl AccountAssert {
             StateCheck::Field { name, op, value } => {
                 let (dec, _) = ctx.decode_pre(&self.address)?;
                 let f = find_field(&dec, name)?;
-                let acc = acc.ok_or_else(|| format!("account not found: {}", self.address))?;
+                let acc = acc.ok_or_else(|| Error::AccountNotFound(self.address.clone()))?;
                 Ok(op.test_i128(read_field_int(&acc.data, f)?, *value))
             }
             StateCheck::FieldDelta { name, op, value } => {
                 let (dec, pre) = ctx.decode_pre(&self.address)?;
                 let f = find_field(&dec, name)?;
-                let acc = acc.ok_or_else(|| format!("account not found: {}", self.address))?;
+                let acc = acc.ok_or_else(|| Error::AccountNotFound(self.address.clone()))?;
                 let delta = read_field_int(&acc.data, f)? - read_field_int(&pre.data, f)?;
                 Ok(op.test_i128(delta, *value))
             }
@@ -1220,95 +1307,205 @@ impl AccountAssert {
 }
 
 fn short(s: &str) -> String {
-    if s.len() > 12 {
-        format!("{}…{}", &s[..4], &s[s.len() - 4..])
+    // Count by chars, not bytes: an address string is normally ASCII, but this
+    // also formats arbitrary user-supplied strings (a typo'd assert address),
+    // and byte-slicing one at a non-char-boundary would panic.
+    let count = s.chars().count();
+    if count > 12 {
+        let head: String = s.chars().take(4).collect();
+        let tail: String = s.chars().skip(count - 4).collect();
+        format!("{head}…{tail}")
     } else {
         s.to_string()
     }
 }
 
-/// One named test case: mutations, the transaction-level outcome it asserts, and
-/// optional post-replay state assertions.
-pub struct ScenarioSpec {
-    pub name: String,
-    pub mutations: Vec<Mutation>,
-    pub expect: Expect,
-    pub asserts: Vec<AccountAssert>,
-}
-
 /// The result of one post-replay assertion.
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AssertOutcome {
+    /// Human description of what was asserted.
     pub description: String,
+    /// Whether the assertion held.
     pub pass: bool,
 }
 
 /// The result of running one scenario.
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ScenarioOutcome {
+    /// The scenario's name.
     pub name: String,
     /// Human description of the transaction-level expectation.
     pub expect: String,
     /// Whether everything asserted (outcome + all state checks) held.
     pub pass: bool,
+    /// What the replay actually did.
     pub actual: ReplayResult,
+    /// Each state assertion's individual result.
     pub asserts: Vec<AssertOutcome>,
 }
 
 impl ReplayContext {
     /// Run mutations and keep the post-replay SVM so state can be inspected.
-    fn run_full(&self, mutations: &[Mutation]) -> (ReplayResult, LiteSVM) {
+    /// A mutation that can't be applied is a hard `Err`, never a failed replay.
+    fn run_full(&self, mutations: &[Mutation]) -> Result<(ReplayResult, LiteSVM)> {
         let mut svm = self.fresh_svm();
         for m in mutations {
-            if let Err(e) = apply_mutation(&mut svm, m) {
-                return (
-                    ReplayResult {
-                        success: false,
-                        error: Some(e),
-                        ..Default::default()
-                    },
-                    svm,
-                );
-            }
+            apply_mutation(&mut svm, m)?;
         }
         let result = to_replay_result(svm.send_transaction(self.tx.clone()));
-        (result, svm)
+        Ok((result, svm))
+    }
+
+    /// Check every mutation against the loaded state without running anything:
+    /// the address parses, the target account is loaded, and a patch stays in
+    /// bounds. Lets a suite fail fast — before any scenario executes.
+    pub(crate) fn validate_mutations(&self, mutations: &[Mutation]) -> Result<()> {
+        for m in mutations {
+            let address = m.address();
+            let addr = Address::from_str(address)
+                .map_err(|_| Error::InvalidAddress(address.to_string()))?;
+            let data_len = self
+                .loaded
+                .iter()
+                .find_map(|(a, l)| match l {
+                    Loaded::Data(acc) if *a == addr => Some(acc.data.len()),
+                    Loaded::Program(_) if *a == addr => Some(0),
+                    _ => None,
+                })
+                .ok_or_else(|| Error::MutationTargetMissing(address.to_string()))?;
+            if let Mutation::DataPatch { offset, bytes, .. } = m {
+                if offset
+                    .checked_add(bytes.len())
+                    .filter(|&e| e <= data_len)
+                    .is_none()
+                {
+                    return Err(Error::PatchOutOfRange {
+                        address: address.to_string(),
+                        offset: *offset,
+                        len: bytes.len(),
+                        size: data_len,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
 /// Run a suite of scenarios against one pre-fetched context and report pass/fail.
-pub fn run_suite(ctx: &ReplayContext, scenarios: &[ScenarioSpec]) -> Vec<ScenarioOutcome> {
+///
+/// Every scenario's mutations are validated **before anything runs** — a typo'd
+/// mutation address fails the whole suite with a hard error instead of showing
+/// up as a revert that an `expect: revert` scenario would silently accept.
+///
+/// A scenario with no outcome check implicitly asserts success.
+pub(crate) fn run_suite(
+    ctx: &ReplayContext,
+    recorded: Option<&crate::scope::OnchainRecord>,
+    scenarios: &[crate::check::Scenario],
+) -> Result<Vec<ScenarioOutcome>> {
+    use crate::check::CheckKind;
+
+    for s in scenarios {
+        ctx.validate_mutations(&s.mutations)?;
+    }
     scenarios
         .iter()
         .map(|s| {
-            let (actual, svm) = ctx.run_full(&s.mutations);
-            let outcome_pass = s.expect.matches(&actual);
+            let (actual, svm) = ctx.run_full(&s.mutations)?;
 
-            let asserts: Vec<AssertOutcome> = s
-                .asserts
+            // Transaction-level outcome: every Outcome check must hold; a
+            // scenario that declares none implicitly asserts success — unless it
+            // carries a `matches_onchain` check, which is itself the outcome
+            // assertion (and would otherwise be contradicted for a transaction
+            // whose recorded outcome is a revert).
+            let outcomes: Vec<&Expect> = s
+                .checks
                 .iter()
-                .map(|a| match a.eval(&svm, ctx) {
-                    Ok(pass) => AssertOutcome {
-                        description: a.describe(),
-                        pass,
-                    },
-                    // A failed eval (missing account, unknown field, bad offset)
-                    // is a failed assertion — and the description says why.
-                    Err(e) => AssertOutcome {
-                        description: format!("{} — {e}", a.describe()),
-                        pass: false,
-                    },
+                .filter_map(|c| match &c.0 {
+                    CheckKind::Outcome(e) => Some(e),
+                    _ => None,
                 })
                 .collect();
+            let has_matches_onchain = s
+                .checks
+                .iter()
+                .any(|c| matches!(&c.0, CheckKind::MatchesOnchain));
+            let implicit = [if has_matches_onchain {
+                Expect::Any
+            } else {
+                Expect::Success
+            }];
+            let effective: &[&Expect] = if outcomes.is_empty() {
+                &[&implicit[0]]
+            } else {
+                &outcomes
+            };
+            let outcome_pass = effective.iter().all(|e| e.matches(&actual));
+            let expect = effective
+                .iter()
+                .map(|e| e.describe())
+                .collect::<Vec<_>>()
+                .join(" & ");
+
+            // Result- and state-level checks all report as assert outcomes.
+            let mut asserts: Vec<AssertOutcome> = Vec::new();
+            for c in &s.checks {
+                match &c.0 {
+                    CheckKind::Outcome(_) => {}
+                    CheckKind::LogContains(t) => asserts.push(AssertOutcome {
+                        description: format!("logs contain \"{t}\""),
+                        pass: actual.error.as_deref().is_some_and(|e| e.contains(t))
+                            || actual.logs.iter().any(|l| l.contains(t)),
+                    }),
+                    CheckKind::ComputeUnits(c) => asserts.push(AssertOutcome {
+                        description: format!("compute units {} {}", c.op.symbol(), c.value),
+                        pass: c.op.test_i128(actual.compute_units as i128, c.value),
+                    }),
+                    CheckKind::MatchesOnchain => asserts.push(match recorded {
+                        Some(r) => AssertOutcome {
+                            description: format!(
+                                "matches the on-chain outcome ({})",
+                                if r.success { "success" } else { "failure" }
+                            ),
+                            pass: actual.success == r.success,
+                        },
+                        None => AssertOutcome {
+                            description:
+                                "matches the on-chain outcome — no recorded outcome available \
+                                 (pre-flight tx, or a v1 fixture; re-capture to record it)"
+                                    .into(),
+                            pass: false,
+                        },
+                    }),
+                    CheckKind::Account(list) => {
+                        for a in list {
+                            asserts.push(match a.eval(&svm, ctx) {
+                                Ok(pass) => AssertOutcome {
+                                    description: a.describe(),
+                                    pass,
+                                },
+                                // A failed eval (missing account, unknown field,
+                                // bad offset) is a failed assertion — and the
+                                // description says why.
+                                Err(e) => AssertOutcome {
+                                    description: format!("{} — {e}", a.describe()),
+                                    pass: false,
+                                },
+                            });
+                        }
+                    }
+                }
+            }
 
             let pass = outcome_pass && asserts.iter().all(|a| a.pass);
-            ScenarioOutcome {
+            Ok(ScenarioOutcome {
                 name: s.name.clone(),
-                expect: s.expect.describe(),
+                expect,
                 pass,
                 actual,
                 asserts,
-            }
+            })
         })
         .collect()
 }
@@ -1368,7 +1565,7 @@ mod tests {
     #[test]
     fn unknown_field_errors_and_lists_candidates() {
         let (dec, _) = token_decoded();
-        let e = find_field(&dec, "reserveA").unwrap_err();
+        let e = find_field(&dec, "reserveA").unwrap_err().to_string();
         assert!(e.contains("no field \"reserveA\""), "{e}");
         assert!(e.contains("amount"), "should list available fields: {e}");
     }
@@ -1377,7 +1574,10 @@ mod tests {
     fn non_integer_field_refuses_comparison() {
         let (dec, data) = token_decoded();
         let owner = find_field(&dec, "owner").unwrap();
-        assert!(read_field_int(&data, owner).unwrap_err().contains("pubkey"));
+        assert!(read_field_int(&data, owner)
+            .unwrap_err()
+            .to_string()
+            .contains("pubkey"));
     }
 
     #[test]
@@ -1396,12 +1596,87 @@ mod tests {
     }
 
     #[test]
+    fn typoed_mutation_is_a_hard_error_not_a_passing_revert() {
+        // The v0.1 hole: a mutation targeting an unloaded (typo'd) address was
+        // folded into ReplayResult{success:false}, which `expect: revert`
+        // scenarios happily accepted. It must be a hard Err now.
+        let ctx = ReplayContext {
+            signature: String::new(),
+            tx: VersionedTransaction::default(),
+            loaded: Vec::new(),
+            slot: None,
+            block_time: None,
+            time_travel: TimeTravel::default(),
+            idls: HashMap::new(),
+            feature_toggles: Vec::new(),
+        };
+        // (Not the system program — that one exists as a builtin in a fresh SVM.)
+        let typo = Mutation::lamports(Address::from([7u8; 32]).to_string(), 0);
+
+        assert!(matches!(
+            ctx.run_full(std::slice::from_ref(&typo)),
+            Err(Error::MutationTargetMissing(_))
+        ));
+
+        // A whole suite fails fast — before any scenario executes.
+        let suite = [crate::check::Scenario::new("drain")
+            .mutate(typo)
+            .check(crate::check::Check::revert())];
+        assert!(matches!(
+            run_suite(&ctx, None, &suite),
+            Err(Error::MutationTargetMissing(_))
+        ));
+    }
+
+    #[test]
+    fn patch_bounds_are_validated_up_front() {
+        let addr = Address::from_str("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").unwrap();
+        let ctx = ReplayContext {
+            signature: String::new(),
+            tx: VersionedTransaction::default(),
+            loaded: vec![(
+                addr,
+                Loaded::Data(Account {
+                    lamports: 1,
+                    data: vec![0u8; 8],
+                    owner: Address::default(),
+                    executable: false,
+                    rent_epoch: 0,
+                }),
+            )],
+            slot: None,
+            block_time: None,
+            time_travel: TimeTravel::default(),
+            idls: HashMap::new(),
+            feature_toggles: Vec::new(),
+        };
+        // In range: fine. Out of range (offset 4 + 8 bytes > size 8): typed error.
+        assert!(ctx
+            .validate_mutations(&[Mutation::patch(addr.to_string(), 0, vec![0; 8])])
+            .is_ok());
+        assert!(matches!(
+            ctx.validate_mutations(&[Mutation::patch(addr.to_string(), 4, vec![0; 8])]),
+            Err(Error::PatchOutOfRange {
+                offset: 4,
+                len: 8,
+                size: 8,
+                ..
+            })
+        ));
+        // usize overflow in offset + len must not panic either.
+        assert!(ctx
+            .validate_mutations(&[Mutation::patch(addr.to_string(), usize::MAX, vec![0; 8])])
+            .is_err());
+    }
+
+    #[test]
     fn fixture_roundtrip_preserves_slot_and_clock() {
         // The core fixture-fidelity invariant: freezing a context and reloading it
         // must reproduce the exact slot AND wall-clock the live replay ran at — not
         // drop the block time (which used to happen, so time-gated programs behaved
         // differently after freezing).
         let ctx = ReplayContext {
+            signature: "SIG".into(),
             tx: VersionedTransaction::default(),
             loaded: Vec::new(),
             slot: Some(295_000_123),
@@ -1411,7 +1686,7 @@ mod tests {
             feature_toggles: Vec::new(),
         };
 
-        let fx = ctx.to_fixture("SIG");
+        let fx = ctx.to_fixture().unwrap();
         assert_eq!(fx.captured_slot, Some(295_000_123));
         assert_eq!(fx.captured_block_time, Some(1_787_600_325));
 
@@ -1480,6 +1755,21 @@ mod tests {
         tt.apply(&mut c);
         assert_eq!(c.unix_timestamp, 2_000_000_040);
         assert_eq!(c.slot, clock().slot + 100); // 40s / 0.4s per slot
+    }
+
+    #[test]
+    fn extreme_warp_saturates_instead_of_overflowing() {
+        // A single absurd jump, and the applied clock, must clamp rather than
+        // panic (debug) or wrap (release).
+        let tt = TimeTravel {
+            epochs: Some(i64::MAX),
+            seconds: Some(i64::MAX),
+            slots: Some(i64::MAX),
+            ..Default::default()
+        };
+        let mut c = clock();
+        tt.apply(&mut c); // must not panic
+        assert!(c.unix_timestamp >= clock().unix_timestamp);
     }
 
     #[test]

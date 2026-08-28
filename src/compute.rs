@@ -13,9 +13,12 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
-#[derive(serde::Serialize)]
+/// Compute units one program consumed within a transaction.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct CuUsage {
+    /// The program's address, as base58.
     pub program: String,
+    /// Compute units consumed across all of the program's invocations.
     pub cu: u64,
 }
 
@@ -36,7 +39,7 @@ fn fixed_cu(program: &str) -> Option<u64> {
 
 /// Compute units per program, aggregated (a program invoked N times is summed
 /// into one row) and sorted by consumption, descending.
-pub fn cu_per_program(tx: &Value) -> Vec<CuUsage> {
+pub(crate) fn cu_per_program(tx: &Value) -> Vec<CuUsage> {
     let Some(log_messages) = tx["meta"]["logMessages"].as_array() else {
         return vec![];
     };
@@ -54,20 +57,25 @@ pub fn cu_per_program(tx: &Value) -> Vec<CuUsage> {
     for line in log_messages {
         let line = line.as_str().unwrap_or_default();
         let w: Vec<&str> = line.split_whitespace().collect();
-        // "Program <id> invoke [n]"
-        if w.len() >= 3 && w[0] == "Program" && w[2] == "invoke" {
+        // "Program <id> invoke [n]". The runtime's own lines carry a base58
+        // program id as w[1]; a program's `msg!("invoke [1]")` becomes
+        // "Program log: invoke [1]", so reject w[1] values ending in ':'
+        // ("log:", "data:", …) that a program can forge — a real id never has one.
+        if w.len() >= 3 && w[0] == "Program" && w[2] == "invoke" && !w[1].ends_with(':') {
             push(&mut order, w[1]);
             *invokes.entry(w[1].to_string()).or_insert(0) += 1;
         }
         // "Program <id> consumed N of M compute units"
         if w.len() >= 4
             && w[0] == "Program"
+            && !w[1].ends_with(':')
             && line.contains("consumed")
             && line.contains("compute units")
         {
             if let Ok(cu) = w[3].parse::<u64>() {
                 push(&mut order, w[1]);
-                *sbf.entry(w[1].to_string()).or_insert(0) += cu;
+                let entry = sbf.entry(w[1].to_string()).or_insert(0);
+                *entry = entry.saturating_add(cu);
             }
         }
     }
@@ -79,11 +87,11 @@ pub fn cu_per_program(tx: &Value) -> Vec<CuUsage> {
     for p in &order {
         if let Some(&v) = sbf.get(p) {
             cu.insert(p.clone(), v);
-            attributed += v;
+            attributed = attributed.saturating_add(v);
         } else if let Some(fc) = fixed_cu(p) {
-            let v = fc * invokes.get(p).copied().unwrap_or(1);
+            let v = fc.saturating_mul(invokes.get(p).copied().unwrap_or(1));
             cu.insert(p.clone(), v);
-            attributed += v;
+            attributed = attributed.saturating_add(v);
         } else {
             unattributed.push(p.clone());
         }
@@ -152,6 +160,26 @@ mod tests {
     #[test]
     fn no_logs_means_no_rows() {
         assert!(cu_per_program(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn program_emitted_log_lines_cannot_forge_a_cu_row() {
+        // A program logging `msg!("invoke [1]")` / a fake "consumed" line becomes
+        // "Program log: …"; w[1] == "log:" must be ignored, not treated as a
+        // phantom program id that corrupts the attribution.
+        let tx = json!({ "meta": {
+            "computeUnitsConsumed": 300,
+            "logMessages": [
+                "Program AAA invoke [1]",
+                "Program log: invoke [1]",
+                "Program log: consumed 99999 of 0 compute units",
+                "Program AAA consumed 300 of 200000 compute units",
+                "Program AAA success"
+            ]
+        }});
+        let cu = cu_per_program(&tx);
+        assert_eq!(cu.len(), 1);
+        assert_eq!((cu[0].program.as_str(), cu[0].cu), ("AAA", 300));
     }
 
     #[test]

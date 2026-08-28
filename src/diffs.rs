@@ -3,9 +3,12 @@
 use crate::utils::resolve_account_keys;
 use serde_json::Value;
 
-#[derive(serde::Serialize)]
+/// A change in an account's SOL (lamport) balance.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct BalanceChange {
+    /// The account whose balance changed.
     pub address: String,
+    /// Signed lamport change (post − pre).
     pub delta: i64,
     /// Post-transaction lamport balance (what an explorer shows alongside the change).
     pub post: u64,
@@ -13,11 +16,15 @@ pub struct BalanceChange {
 
 /// A change in an SPL token account's balance, in raw base units (client
 /// divides by 10^decimals for display).
-#[derive(serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct TokenChange {
+    /// The token account whose balance changed.
     pub address: String,
+    /// The token account's owner (the wallet).
     pub owner: String,
+    /// The token's mint address.
     pub mint: String,
+    /// The mint's decimals (for converting raw units to display units).
     pub decimals: u8,
     /// Signed change in raw base units, as a string (can exceed i64).
     pub delta_raw: String,
@@ -29,7 +36,7 @@ pub struct TokenChange {
 ///
 /// The two arrays are keyed by `accountIndex`; we pair them up, compute the
 /// signed delta per account, and drop anything that didn't move.
-pub fn token_diffs(tx: &Value) -> Vec<TokenChange> {
+pub(crate) fn token_diffs(tx: &Value) -> Vec<TokenChange> {
     let account_keys = resolve_account_keys(tx);
     let empty = vec![];
     let pre = tx["meta"]["preTokenBalances"].as_array().unwrap_or(&empty);
@@ -54,6 +61,11 @@ pub fn token_diffs(tx: &Value) -> Vec<TokenChange> {
 
     for e in post {
         let i = idx(e);
+        // Skip an entry with no resolvable account index rather than emitting a
+        // row with an empty address (a malformed/missing `accountIndex`).
+        if i >= account_keys.len() {
+            continue;
+        }
         seen.insert(i);
         let post_raw = raw(e);
         let pre_raw = pre_map.get(&i).copied().unwrap_or(0);
@@ -73,7 +85,7 @@ pub fn token_diffs(tx: &Value) -> Vec<TokenChange> {
     // Accounts present in pre but not post (fully drained/closed).
     for e in pre {
         let i = idx(e);
-        if seen.contains(&i) {
+        if i >= account_keys.len() || seen.contains(&i) {
             continue;
         }
         let pre_raw = raw(e);
@@ -93,7 +105,7 @@ pub fn token_diffs(tx: &Value) -> Vec<TokenChange> {
 }
 
 /// The lamport balance change for every account that changed.
-pub fn account_diffs(tx: &Value) -> Vec<BalanceChange> {
+pub(crate) fn account_diffs(tx: &Value) -> Vec<BalanceChange> {
     let empty = vec![];
     let pre = tx["meta"]["preBalances"].as_array().unwrap_or(&empty);
     let post = tx["meta"]["postBalances"].as_array().unwrap_or(&empty);

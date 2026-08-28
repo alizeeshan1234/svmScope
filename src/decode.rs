@@ -18,17 +18,20 @@ const SPL_TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const SPL_TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
 /// A recognized account, broken into named fields.
-#[derive(Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DecodedAccount {
     /// Human label, e.g. "SPL Token Account".
     pub type_name: String,
+    /// The account's fields, in layout order.
     pub fields: Vec<Field>,
 }
 
 /// One field within a decoded account.
-#[derive(Serialize, Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Field {
+    /// The field's name (e.g. "amount").
     pub name: String,
+    /// Byte offset of the field within the account's data.
     pub offset: usize,
     /// Wire type the UI uses to pick an editor and encode edits:
     /// "u64" | "u8" | "bool" | "pubkey" | "coption-pubkey" | "coption-u64".
@@ -38,7 +41,8 @@ pub struct Field {
     pub size: usize,
     /// Current value, formatted for display and to prefill the editor.
     pub value: String,
-    /// Whether the UI should let the user change this field.
+    /// Whether this is a fixed-width scalar that's safe to patch in place
+    /// (the natural target for a `Mutation::patch`).
     pub editable: bool,
     /// Optional human hint (e.g. what a numeric state code means).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,13 +50,19 @@ pub struct Field {
 }
 
 /// One account's summary plus (if recognized) its decoded fields.
-#[derive(Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AccountInfo {
+    /// The account's address, as base58.
     pub address: String,
+    /// The program that owns the account.
     pub owner: String,
+    /// The account's SOL balance in lamports.
     pub lamports: u64,
+    /// Whether the account holds an executable program.
     pub executable: bool,
+    /// Length of the account's data in bytes.
     pub data_len: usize,
+    /// Named fields, when the account's layout is recognized.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decoded: Option<DecodedAccount>,
 }
@@ -201,7 +211,7 @@ fn decode_mint(data: &[u8]) -> DecodedAccount {
 /// Token-2022 account with extensions is longer than its base size; the type
 /// byte at offset 165 (Token-2022 pads mints past that offset precisely to
 /// disambiguate) tells us whether it's a Mint (1) or an Account (2).
-pub fn decode_bytes(owner: &str, data: &[u8]) -> Option<DecodedAccount> {
+pub(crate) fn decode_bytes(owner: &str, data: &[u8]) -> Option<DecodedAccount> {
     decode(owner, data)
 }
 
@@ -214,6 +224,10 @@ fn decode(owner: &str, data: &[u8]) -> Option<DecodedAccount> {
         SPL_TOKEN | SPL_TOKEN_2022 => match data.len() {
             82 => Some(decode_mint(data)),           // base mint
             165 => Some(decode_token_account(data)), // base token account
+            // A Multisig is exactly 355 bytes; its byte at 165 is an arbitrary
+            // signer-key byte, so it must not fall into the type-byte rule below
+            // (which would misread it as a Mint/Account and show garbage fields).
+            355 => None,
             // Token-2022 with extensions: disambiguate by the account-type byte.
             n if n > 165 => match data[165] {
                 1 => Some(decode_mint(data)),          // Mint (base 82 still valid)
@@ -235,7 +249,11 @@ fn decode_lookup_table(data: &[u8]) -> Option<DecodedAccount> {
     if data.len() < 56 {
         return None;
     }
-    let authority = if data[20] == 1 && data.len() >= 56 {
+    // Layout: enum tag u32 @0, deactivation_slot @4, last_extended_slot @12,
+    // last_extended_slot_start_index u8 @20, then `authority: Option<Pubkey>`
+    // whose 1-byte presence tag is at offset 21 (key at 22..54). Reading the
+    // tag from 20 (the start-index byte) misreports the authority.
+    let authority = if data[21] == 1 {
         read_pubkey(data, 22)
     } else {
         "none".into()
@@ -277,7 +295,9 @@ fn decode_lookup_table(data: &[u8]) -> Option<DecodedAccount> {
 /// Stake account: 4-byte enum discriminant, then Meta (authorized + lockup) and,
 /// when delegated, the Stake struct.
 fn decode_stake(data: &[u8]) -> Option<DecodedAccount> {
-    if data.len() < 120 {
+    // Meta ends at 124 (lockup custodian pubkey at 92..124) — anything shorter
+    // can't be a well-formed stake account and must not be sliced.
+    if data.len() < 124 {
         return None;
     }
     let state = match read_u32(data, 0) {
@@ -318,7 +338,9 @@ fn decode_stake(data: &[u8]) -> Option<DecodedAccount> {
             76,
             "i64",
             8,
-            read_u64(data, 76).to_string(),
+            // The field is an i64; format it signed so a negative lockup reads
+            // correctly instead of as a huge unsigned number.
+            (read_u64(data, 76) as i64).to_string(),
             true,
         ),
         field(
@@ -413,7 +435,7 @@ fn decode_nonce(data: &[u8]) -> Option<DecodedAccount> {
 /// the current unix time are timestamps. Everything is reported as `@offset` so
 /// it stays honest about being inferred, and stays editable so it's still useful
 /// for what-ifs.
-pub fn infer_layout(data: &[u8]) -> Option<DecodedAccount> {
+pub(crate) fn infer_layout(data: &[u8]) -> Option<DecodedAccount> {
     if data.len() < 8 {
         return None;
     }
@@ -468,7 +490,7 @@ pub fn infer_layout(data: &[u8]) -> Option<DecodedAccount> {
 /// Fetch each account's on-chain state and decode any recognized layouts.
 ///
 /// Parallel to `account_keys`; accounts that don't exist are skipped.
-pub fn describe_accounts(client: &RpcClient, account_keys: &[String]) -> Vec<AccountInfo> {
+pub(crate) fn describe_accounts(client: &RpcClient, account_keys: &[String]) -> Vec<AccountInfo> {
     let resp: serde_json::Value = match client.send(
         RpcRequest::GetMultipleAccounts,
         json!([account_keys, { "encoding": "base64" }]),
@@ -519,8 +541,11 @@ pub fn describe_accounts(client: &RpcClient, account_keys: &[String]) -> Vec<Acc
                 .or_else(|| infer_layout(&data))
         };
 
+        let Some(address) = account_keys.get(i) else {
+            break; // RPC returned more entries than keys requested — stop, don't panic
+        };
         out.push(AccountInfo {
-            address: account_keys[i].clone(),
+            address: address.clone(),
             owner,
             lamports,
             executable,
@@ -529,4 +554,44 @@ pub fn describe_accounts(client: &RpcClient, account_keys: &[String]) -> Vec<Acc
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn find<'a>(dec: &'a DecodedAccount, name: &str) -> &'a Field {
+        dec.fields.iter().find(|f| f.name == name).expect("field")
+    }
+
+    #[test]
+    fn alt_authority_presence_reads_the_option_tag_at_21_not_20() {
+        // Minimal 56-byte lookup-table meta. Put a non-1 value at the
+        // start-index byte (20) and set the authority Option tag (21) to 1 with a
+        // recognizable key. Reading presence from byte 20 would report "none".
+        let mut data = vec![0u8; 56];
+        data[20] = 7; // last_extended_slot_start_index — must not gate authority
+        data[21] = 1; // authority: Some
+        for b in data.iter_mut().skip(22).take(32) {
+            *b = 5;
+        }
+        let dec = decode_bytes(ALT_PROGRAM, &data).expect("decodes");
+        assert_ne!(find(&dec, "authority").value, "none");
+
+        // Absent authority (tag 0) reads as "none" regardless of byte 20.
+        let mut absent = vec![0u8; 56];
+        absent[20] = 1;
+        absent[21] = 0;
+        let dec = decode_bytes(ALT_PROGRAM, &absent).expect("decodes");
+        assert_eq!(find(&dec, "authority").value, "none");
+    }
+
+    #[test]
+    fn spl_multisig_is_not_misdecoded_as_mint_or_account() {
+        // A 355-byte Multisig whose byte at 165 happens to be 1 (would look like a
+        // Mint under the extended-account type-byte rule) must decode to nothing.
+        let mut data = vec![0u8; 355];
+        data[165] = 1;
+        assert!(decode_bytes(SPL_TOKEN_2022, &data).is_none());
+    }
 }
