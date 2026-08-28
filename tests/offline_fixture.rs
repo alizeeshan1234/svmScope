@@ -46,11 +46,17 @@ fn mutations_and_the_check_dsl_compose() {
     let out = replay()
         .verify(
             "patched counter reaches 100",
-            &[Mutation::patch(COUNTER_PDA, 8, 99u64.to_le_bytes().to_vec())],
+            &[Mutation::patch(
+                COUNTER_PDA,
+                8,
+                99u64.to_le_bytes().to_vec(),
+            )],
             &[
                 Check::success(),
                 Check::log_contains("incremented by 1 to : 100"),
-                Check::account(COUNTER_PDA).field("count", Cmp::eq(100)).build(),
+                Check::account(COUNTER_PDA)
+                    .field("count", Cmp::eq(100))
+                    .build(),
                 Check::compute_units(Cmp::le(200_000)),
             ],
         )
@@ -77,16 +83,48 @@ fn a_typoed_mutation_address_is_a_hard_error_not_a_passing_revert() {
             .mutate(Mutation::lamports(typo, 0))
             .check(Check::revert())])
         .unwrap_err();
-    assert!(matches!(err, svmscope::Error::InvalidAddress(_) | svmscope::Error::MutationTargetMissing(_)), "{err}");
+    assert!(
+        matches!(
+            err,
+            svmscope::Error::InvalidAddress(_) | svmscope::Error::MutationTargetMissing(_)
+        ),
+        "{err}"
+    );
 }
 
 #[test]
-fn unknown_fields_error_with_the_available_names()  {
+fn a_typoed_assert_address_fails_the_check_instead_of_silently_passing() {
+    // A `lamports == 0` / `token_delta == 0` assertion against an address the
+    // replay never loaded used to read a silent zero and PASS. It must now fail
+    // the assertion (with the account named), the same no-silent-pass guarantee
+    // the mutation path gives. "So1111…112" is a valid address absent here.
+    let absent = "So11111111111111111111111111111111111111112";
+    let out = replay()
+        .verify(
+            "typo'd assert address",
+            &[],
+            &[
+                Check::account(absent).lamports(Cmp::eq(0)).build(),
+                Check::account(absent).token_delta(Cmp::eq(0)).build(),
+            ],
+        )
+        .unwrap();
+    assert!(!out.pass, "{out:?}");
+    assert!(
+        out.asserts.iter().all(|a| !a.pass),
+        "both asserts must fail, not vacuously pass: {out:?}"
+    );
+}
+
+#[test]
+fn unknown_fields_error_with_the_available_names() {
     let out = replay()
         .verify(
             "bad field name",
             &[],
-            &[Check::account(COUNTER_PDA).field("countt", Cmp::eq(1)).build()],
+            &[Check::account(COUNTER_PDA)
+                .field("countt", Cmp::eq(1))
+                .build()],
         )
         .unwrap();
     // A failed field resolution is a failed assertion whose description names

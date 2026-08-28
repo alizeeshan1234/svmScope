@@ -224,6 +224,10 @@ fn decode(owner: &str, data: &[u8]) -> Option<DecodedAccount> {
         SPL_TOKEN | SPL_TOKEN_2022 => match data.len() {
             82 => Some(decode_mint(data)),           // base mint
             165 => Some(decode_token_account(data)), // base token account
+            // A Multisig is exactly 355 bytes; its byte at 165 is an arbitrary
+            // signer-key byte, so it must not fall into the type-byte rule below
+            // (which would misread it as a Mint/Account and show garbage fields).
+            355 => None,
             // Token-2022 with extensions: disambiguate by the account-type byte.
             n if n > 165 => match data[165] {
                 1 => Some(decode_mint(data)),          // Mint (base 82 still valid)
@@ -245,7 +249,11 @@ fn decode_lookup_table(data: &[u8]) -> Option<DecodedAccount> {
     if data.len() < 56 {
         return None;
     }
-    let authority = if data[20] == 1 && data.len() >= 56 {
+    // Layout: enum tag u32 @0, deactivation_slot @4, last_extended_slot @12,
+    // last_extended_slot_start_index u8 @20, then `authority: Option<Pubkey>`
+    // whose 1-byte presence tag is at offset 21 (key at 22..54). Reading the
+    // tag from 20 (the start-index byte) misreports the authority.
+    let authority = if data[21] == 1 {
         read_pubkey(data, 22)
     } else {
         "none".into()
@@ -330,7 +338,9 @@ fn decode_stake(data: &[u8]) -> Option<DecodedAccount> {
             76,
             "i64",
             8,
-            read_u64(data, 76).to_string(),
+            // The field is an i64; format it signed so a negative lockup reads
+            // correctly instead of as a huge unsigned number.
+            (read_u64(data, 76) as i64).to_string(),
             true,
         ),
         field(
@@ -544,4 +554,44 @@ pub(crate) fn describe_accounts(client: &RpcClient, account_keys: &[String]) -> 
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn find<'a>(dec: &'a DecodedAccount, name: &str) -> &'a Field {
+        dec.fields.iter().find(|f| f.name == name).expect("field")
+    }
+
+    #[test]
+    fn alt_authority_presence_reads_the_option_tag_at_21_not_20() {
+        // Minimal 56-byte lookup-table meta. Put a non-1 value at the
+        // start-index byte (20) and set the authority Option tag (21) to 1 with a
+        // recognizable key. Reading presence from byte 20 would report "none".
+        let mut data = vec![0u8; 56];
+        data[20] = 7; // last_extended_slot_start_index — must not gate authority
+        data[21] = 1; // authority: Some
+        for b in data.iter_mut().skip(22).take(32) {
+            *b = 5;
+        }
+        let dec = decode_bytes(ALT_PROGRAM, &data).expect("decodes");
+        assert_ne!(find(&dec, "authority").value, "none");
+
+        // Absent authority (tag 0) reads as "none" regardless of byte 20.
+        let mut absent = vec![0u8; 56];
+        absent[20] = 1;
+        absent[21] = 0;
+        let dec = decode_bytes(ALT_PROGRAM, &absent).expect("decodes");
+        assert_eq!(find(&dec, "authority").value, "none");
+    }
+
+    #[test]
+    fn spl_multisig_is_not_misdecoded_as_mint_or_account() {
+        // A 355-byte Multisig whose byte at 165 happens to be 1 (would look like a
+        // Mint under the extended-account type-byte rule) must decode to nothing.
+        let mut data = vec![0u8; 355];
+        data[165] = 1;
+        assert!(decode_bytes(SPL_TOKEN_2022, &data).is_none());
+    }
 }

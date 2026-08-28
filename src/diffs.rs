@@ -61,6 +61,11 @@ pub(crate) fn token_diffs(tx: &Value) -> Vec<TokenChange> {
 
     for e in post {
         let i = idx(e);
+        // Skip an entry with no resolvable account index rather than emitting a
+        // row with an empty address (a malformed/missing `accountIndex`).
+        if i >= account_keys.len() {
+            continue;
+        }
         seen.insert(i);
         let post_raw = raw(e);
         let pre_raw = pre_map.get(&i).copied().unwrap_or(0);
@@ -80,7 +85,7 @@ pub(crate) fn token_diffs(tx: &Value) -> Vec<TokenChange> {
     // Accounts present in pre but not post (fully drained/closed).
     for e in pre {
         let i = idx(e);
-        if seen.contains(&i) {
+        if i >= account_keys.len() || seen.contains(&i) {
             continue;
         }
         let pre_raw = raw(e);

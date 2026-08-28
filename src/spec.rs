@@ -12,7 +12,9 @@ use std::str::FromStr;
 use crate::error::{Error, Result};
 
 use crate::check::{Check, CheckKind, Scenario};
-use crate::replay::{AccountAssert, CmpOp, Expect, FeatureToggle, Mutation, StateCheck, TimeTravel};
+use crate::replay::{
+    AccountAssert, CmpOp, Expect, FeatureToggle, Mutation, StateCheck, TimeTravel,
+};
 
 /// A runtime feature-gate toggle for a replay: `{"id":"<feature pubkey>","active":true}`.
 /// `active` true = activate the gate (e.g. test a not-yet-live feature early),
@@ -29,8 +31,9 @@ pub struct FeatureInput {
 impl FeatureInput {
     /// Convert into the engine's [`FeatureToggle`], validating the id.
     pub fn into_toggle(self) -> Result<FeatureToggle> {
-        let id = Address::from_str(self.id.trim())
-            .map_err(|_| Error::InvalidSpec(format!("bad feature id (not a pubkey): {}", self.id)))?;
+        let id = Address::from_str(self.id.trim()).map_err(|_| {
+            Error::InvalidSpec(format!("bad feature id (not a pubkey): {}", self.id))
+        })?;
         Ok(FeatureToggle {
             id,
             active: self.active,
@@ -73,15 +76,19 @@ pub enum MutationInput {
 /// Decode a hex string, tolerating `0x`, spaces, and underscores.
 fn hex_decode(s: &str) -> Result<Vec<u8>> {
     let s = s.trim().trim_start_matches("0x").replace([' ', '_'], "");
-    if s.is_empty() || !s.len().is_multiple_of(2) {
+    // Guard ASCII before byte-slicing below: a multi-byte char would otherwise
+    // pass the even-length check and panic on a non-char-boundary slice.
+    if s.is_empty() || !s.len().is_multiple_of(2) || !s.is_ascii() {
         return Err(Error::InvalidSpec(
             "hex bytes must be a non-empty, even-length hex string".into(),
         ));
     }
-    (0..s.len())
+    let bytes = s.as_bytes();
+    (0..bytes.len())
         .step_by(2)
         .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16)
+            let pair = std::str::from_utf8(&bytes[i..i + 2]).expect("ascii checked above");
+            u8::from_str_radix(pair, 16)
                 .map_err(|_| Error::InvalidSpec(format!("invalid hex: {s}")))
         })
         .collect()
@@ -246,13 +253,21 @@ fn default_expect() -> String {
 impl ScenarioInput {
     /// Convert the JSON shape into an engine [`Scenario`].
     pub fn into_scenario(self) -> Result<Scenario> {
-        let expect = match self.expect.as_str() {
+        let expect = match self.expect.trim() {
             "success" | "pass" => Expect::Success,
             "revert" | "fail" => match self.contains {
                 Some(s) if !s.is_empty() => Expect::RevertContains(s),
                 _ => Expect::Revert,
             },
-            _ => Expect::Any,
+            "any" => Expect::Any,
+            // A typo like "sucess" must not silently become Any and let the
+            // scenario pass vacuously — that is exactly the silent-pass footgun
+            // the crate promises to eliminate.
+            other => {
+                return Err(Error::InvalidSpec(format!(
+                    "unknown expect \"{other}\" (use success, revert, or any)"
+                )))
+            }
         };
         let mutations = self
             .mutations
@@ -289,6 +304,21 @@ mod tests {
         assert!(hex_decode("").is_err());
         assert!(hex_decode("abc").is_err()); // odd length
         assert!(hex_decode("zz").is_err());
+    }
+
+    #[test]
+    fn hex_decode_rejects_multibyte_without_panicking() {
+        // A multi-byte char has an even byte length but no ASCII char boundary at
+        // the slice points — this must be a typed error, never a slice panic.
+        assert!(hex_decode("aΩb").is_err());
+        assert!(hex_decode("0x€€").is_err());
+    }
+
+    #[test]
+    fn unknown_expect_string_is_an_error_not_a_vacuous_pass() {
+        let s: ScenarioInput =
+            serde_json::from_str(r#"{"name":"typo","expect":"sucess"}"#).unwrap();
+        assert!(matches!(s.into_scenario(), Err(Error::InvalidSpec(_))));
     }
 
     #[test]

@@ -268,23 +268,55 @@ impl<'a> MethodBuilder<'a> {
     }
 
     fn resolve_account(&self, full_name: &str, leaf_name: &str, spec: &Value) -> Result<Address> {
-        self.accounts
-            .get(full_name)
-            .or_else(|| self.accounts.get(leaf_name))
-            .copied()
-            .map(Ok)
-            .or_else(|| {
-                spec.get("address").and_then(Value::as_str).map(|address| {
-                    Address::from_str(address)
-                        .map_err(|_| Error::InvalidAddress(address.to_string()))
-                })
-            })
-            .unwrap_or_else(|| {
-                Err(Error::MissingInstructionAccount {
-                    method: self.method.clone(),
-                    account: full_name.to_string(),
-                })
-            })
+        // Exact dotted name wins.
+        if let Some(address) = self.accounts.get(full_name) {
+            return Ok(*address);
+        }
+        // Bare leaf-name fallback — but only when the leaf is unique in the
+        // instruction. Two nested groups can share a leaf (`a.vault`, `b.vault`);
+        // binding both from one `.account("vault", …)` would silently send the
+        // wrong account, so an ambiguous leaf is an error, not a lucky guess.
+        if let Some(address) = self.accounts.get(leaf_name) {
+            let sharing = self.accounts_sharing_leaf(leaf_name);
+            if sharing.len() > 1 {
+                return Err(Error::AmbiguousField {
+                    field: leaf_name.to_string(),
+                    candidates: sharing,
+                });
+            }
+            return Ok(*address);
+        }
+        // A fixed address pinned by the IDL (e.g. system_program).
+        if let Some(address) = spec.get("address").and_then(Value::as_str) {
+            return Address::from_str(address)
+                .map_err(|_| Error::InvalidAddress(address.to_string()));
+        }
+        Err(Error::MissingInstructionAccount {
+            method: self.method.clone(),
+            account: full_name.to_string(),
+        })
+    }
+
+    /// The fully qualified names of every instruction account whose leaf segment
+    /// equals `leaf`. Used to reject an ambiguous bare-leaf account binding.
+    fn accounts_sharing_leaf(&self, leaf: &str) -> Vec<String> {
+        let instruction = self.idl_instruction();
+        let mut names = Vec::new();
+        let _ = collect_account_specs(
+            instruction
+                .get("accounts")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            "",
+            &mut |full_name, leaf_name, _spec| {
+                if leaf_name == leaf {
+                    names.push(full_name.to_string());
+                }
+                Ok(())
+            },
+        );
+        names
     }
 
     fn push_signer(&mut self, signer: &'a dyn Signer) {
@@ -359,7 +391,10 @@ fn instruction_discriminator(instruction: &Value, method: &str) -> Result<Vec<u8
 
     // Anchor IDLs before v0.30 did not include instruction discriminators.
     // Anchor derives them from the first eight SHA-256 bytes of
-    // `global:<rust_instruction_name>`.
+    // `global:<rust_instruction_name>`, recovering the snake_case Rust name from
+    // the IDL's camelCase. This inverse is exact for ordinary names but can
+    // differ when the original had an underscore next to a digit (`claim_2` vs
+    // `claim2`); such a name needs a v0.30+ IDL that carries the discriminator.
     let rust_name = camel_to_snake(method);
     Ok(Sha256::digest(format!("global:{rust_name}").as_bytes())[..8].to_vec())
 }

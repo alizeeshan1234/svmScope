@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let signature = args
         .get(1)
-        .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]\n       svmscope freeze <transaction-signature> [-o fixture.json]\n       svmscope test <scenarios.json>\n       svmscope upgrade <fixture.json>")?;
+        .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]\n       svmscope freeze <transaction-signature> [-o fixture.json]\n       svmscope test <scenarios.json>\n       svmscope report <scenarios.json> [-o report.html]\n       svmscope idl <program-address>\n       svmscope upgrade <fixture.json>\n\n       any command also takes --cluster <mainnet|devnet|testnet|localnet> or --rpc <url>")?;
 
     // Cluster/RPC selection: --cluster <mainnet|devnet|testnet|localnet> or --rpc <url>.
     let flag = |name: &str| {
@@ -62,7 +62,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     // fixture in the current schema (adds captured IDLs + the on-chain
     // outcome), preserving the original signature. Needs live RPC.
     if signature == "upgrade" {
-        let path = args.get(2).ok_or("usage: svmscope upgrade <fixture.json>")?;
+        let path = args
+            .get(2)
+            .ok_or("usage: svmscope upgrade <fixture.json>")?;
         let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
         let old = svmscope::Fixture::from_json(&text)?;
         eprintln!("re-capturing {}…", old.signature);
@@ -99,6 +101,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // JSON mode: emit the whole analysis as one JSON blob and stop.
     if json_mode {
+        if args.iter().any(|a| a == "--mutate") {
+            eprintln!("note: --mutate is ignored in --json mode (it emits the unmutated analysis)");
+        }
         let analysis = scope.analyze(signature)?;
         println!("{}", serde_json::to_string_pretty(&analysis)?);
         return Ok(());
@@ -113,7 +118,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("#{}  {}  ({})", e.index, name, e.program);
         } else {
             let indent = "    ".repeat((e.stack_height - 2) as usize);
-            println!("{}└─ [{}] {}  ({})", indent, e.stack_height, name, e.program);
+            println!(
+                "{}└─ [{}] {}  ({})",
+                indent, e.stack_height, name, e.program
+            );
         }
     }
 
@@ -154,7 +162,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if !mutations.is_empty() {
-        print_replay("MUTATED REPLAY", &replay_session.simulate(&mutations)?.result);
+        print_replay(
+            "MUTATED REPLAY",
+            &replay_session.simulate(&mutations)?.result,
+        );
     }
 
     Ok(())
@@ -176,6 +187,21 @@ fn load_and_run_suite(
         .map(|s| s.into_scenario())
         .collect::<Result<Vec<_>, _>>()?;
     let features = svmscope::spec::feature_toggles(req.features)?;
+
+    // A suite file may carry its own `cluster`/`rpc` for the live-signature path.
+    // Honor them (overriding the CLI-level scope) so a `"cluster": "devnet"`
+    // suite doesn't silently query mainnet when run without a matching --cluster.
+    let suite_scope = if req.signature.is_some() && (req.cluster.is_some() || req.rpc.is_some()) {
+        let url = svmscope::resolve_rpc_url(
+            req.cluster.as_deref(),
+            req.rpc.as_deref(),
+            "https://api.mainnet-beta.solana.com",
+        )?;
+        Some(Scope::new(url))
+    } else {
+        None
+    };
+    let scope = suite_scope.as_ref().unwrap_or(scope);
 
     let (label, mut replay) = if let Some(fx_ref) = &req.fixture {
         // Fixture path is resolved relative to the suite file's directory.

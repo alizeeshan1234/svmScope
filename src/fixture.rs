@@ -5,6 +5,11 @@
 //! touched, already resolved. Once frozen to a file it replays identically
 //! forever, with **no RPC and no state drift** — so a scenario suite built on a
 //! fixture is a real, hermetic regression test you can commit and run in CI.
+//!
+//! A fixture captures *state*, not the replay's in-memory knobs: a time-travel
+//! warp or feature-gate toggle set on a [`crate::Replay`] is not written into
+//! the fixture, so a reloaded fixture starts from the captured clock. Re-apply
+//! those on the reloaded replay if a scenario needs them.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

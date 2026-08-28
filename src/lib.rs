@@ -210,7 +210,10 @@ mod tests {
             "http://127.0.0.1:8899"
         );
         // Nothing specified → the default; an unknown cluster is an error.
-        assert_eq!(resolve_rpc_url(None, None, "http://def").unwrap(), "http://def");
+        assert_eq!(
+            resolve_rpc_url(None, None, "http://def").unwrap(),
+            "http://def"
+        );
         assert!(matches!(
             resolve_rpc_url(Some("nope"), None, "http://def"),
             Err(Error::InvalidSpec(_))

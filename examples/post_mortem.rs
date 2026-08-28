@@ -8,7 +8,9 @@ use svmscope::Scope;
 
 fn main() -> svmscope::Result<()> {
     let mut args = std::env::args().skip(1);
-    let sig = args.next().expect("usage: post_mortem <signature> [rpc_url]");
+    let sig = args
+        .next()
+        .expect("usage: post_mortem <signature> [rpc_url]");
     let rpc = args
         .next()
         .unwrap_or_else(|| "https://api.mainnet-beta.solana.com".into());
@@ -29,7 +31,10 @@ fn main() -> svmscope::Result<()> {
     // Replay it locally — the real program binaries, reconstructed state.
     let replay = scope.replay(&analysis.signature)?;
     let out = replay.run()?;
-    println!("\nreplay: success={} CU={}", out.result.success, out.result.compute_units);
+    println!(
+        "\nreplay: success={} CU={}",
+        out.result.success, out.result.compute_units
+    );
 
     // On failure, the error arrives explained, not as a bare Custom(6001).
     if let Some(explain) = &out.explain {

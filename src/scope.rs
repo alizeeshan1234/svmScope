@@ -63,6 +63,9 @@ fn status_is_confirmed(status: &serde_json::Value) -> bool {
     }
 }
 
+/// A fetched account, as `(owner, lamports, executable, data)`.
+type RawAccount = (String, u64, bool, Vec<u8>);
+
 impl Scope {
     /// A scope talking to the given RPC endpoint.
     pub fn new(rpc_url: impl Into<String>) -> Scope {
@@ -281,7 +284,7 @@ impl Scope {
         if Address::from_str(address).is_err() {
             return Err(Error::InvalidAddress(address.to_string()));
         }
-        let Some((owner, lamports, executable, data)) = self.account_raw(address) else {
+        let Some((owner, lamports, executable, data)) = self.account_raw(address)? else {
             return Ok(AccountOverview {
                 address: address.to_string(),
                 exists: false,
@@ -376,7 +379,7 @@ impl Scope {
         // A supplied IDL wins: it's authoritative for this program, and it beats
         // the inferred layout we may have fallen back to.
         if let Some(idl) = user_idl {
-            if let Some((_, _, _, bytes)) = self.account_raw(address) {
+            if let Ok(Some((_, _, _, bytes))) = self.account_raw(address) {
                 if let Some(d) = idl::decode_with_idl(idl, &bytes) {
                     info.decoded = Some(d);
                 }
@@ -409,7 +412,10 @@ impl Scope {
 
     /// Fetch an account's raw state: (owner, lamports, executable, data).
     /// `None` if it doesn't exist.
-    fn account_raw(&self, address: &str) -> Option<(String, u64, bool, Vec<u8>)> {
+    /// `Ok(None)` means the account genuinely does not exist; `Err` means the
+    /// RPC call itself failed. Keeping these distinct stops a network outage from
+    /// masquerading as "account not found".
+    fn account_raw(&self, address: &str) -> Result<Option<RawAccount>> {
         use base64::Engine;
         let resp: serde_json::Value = self
             .client
@@ -417,19 +423,24 @@ impl Scope {
                 RpcRequest::GetAccountInfo,
                 json!([address, { "encoding": "base64" }]),
             )
-            .ok()?;
+            .map_err(Error::rpc)?;
         let v = &resp["value"];
         if v.is_null() {
-            return None;
+            return Ok(None);
         }
-        let owner = v["owner"].as_str()?.to_string();
-        let lamports = v["lamports"].as_u64()?;
+        let owner = match v["owner"].as_str() {
+            Some(o) => o.to_string(),
+            None => return Ok(None),
+        };
+        let Some(lamports) = v["lamports"].as_u64() else {
+            return Ok(None);
+        };
         let executable = v["executable"].as_bool().unwrap_or(false);
         let data = v["data"][0]
             .as_str()
             .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
             .unwrap_or_default();
-        Some((owner, lamports, executable, data))
+        Ok(Some((owner, lamports, executable, data)))
     }
 
     /// Program deployment details from the (upgradeable) loader accounts.
@@ -441,7 +452,7 @@ impl Scope {
             // Program account: [0..4]=variant, [4..36]=programdata address.
             let pd_bytes: [u8; 32] = program_data_bytes[4..36].try_into().ok()?;
             let pd_addr = Address::from(pd_bytes).to_string();
-            if let Some((_, _, _, pd)) = self.account_raw(&pd_addr) {
+            if let Ok(Some((_, _, _, pd))) = self.account_raw(&pd_addr) {
                 // ProgramData: [0..4]=variant, [4..12]=slot, [12]=Option tag, [13..45]=authority.
                 let slot = pd
                     .get(4..12)
@@ -596,9 +607,18 @@ pub struct OnchainRecord {
 
 impl OnchainRecord {
     pub(crate) fn from_tx_json(tx: &serde_json::Value) -> OnchainRecord {
+        // `getTransaction` may legally return `meta: null`. Treating a null meta
+        // as `err == null` would fabricate a success (and let `matches_onchain`
+        // compare against it); instead record it as an explicit unknown-outcome
+        // failure so nothing downstream reads a phantom success.
+        let has_meta = tx["meta"].is_object();
         OnchainRecord {
-            success: tx["meta"]["err"].is_null(),
-            error: (!tx["meta"]["err"].is_null()).then(|| tx["meta"]["err"].to_string()),
+            success: has_meta && tx["meta"]["err"].is_null(),
+            error: if !has_meta {
+                Some("transaction metadata unavailable".to_string())
+            } else {
+                (!tx["meta"]["err"].is_null()).then(|| tx["meta"]["err"].to_string())
+            },
             fee: tx["meta"]["fee"].as_u64().unwrap_or(0),
             compute_units: tx["meta"]["computeUnitsConsumed"].as_u64(),
             slot: tx["slot"].as_u64(),

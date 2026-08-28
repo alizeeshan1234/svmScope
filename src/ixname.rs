@@ -224,11 +224,16 @@ pub(crate) fn enrich(
             TOKEN | TOKEN_2022 => token_ix(data).map(String::from),
             SYSTEM => system_ix(data).map(String::from),
             COMPUTE_BUDGET => compute_budget_ix(data).map(String::from),
-            ATA => Some(if data.first() == Some(&1) {
-                "Create Idempotent".into()
-            } else {
-                "Create".into()
-            }),
+            // ATA discriminants: (empty data or) 0 = Create, 1 = CreateIdempotent,
+            // 2 = RecoverNested.
+            ATA => Some(
+                match data.first() {
+                    Some(1) => "Create Idempotent",
+                    Some(2) => "Recover Nested",
+                    _ => "Create",
+                }
+                .into(),
+            ),
             _ => Some("Memo".into()),
         };
         let names = native_account_names(program, data)

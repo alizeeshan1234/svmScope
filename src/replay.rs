@@ -86,9 +86,9 @@ fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Result<LoadedAcc
         )
         .map_err(Error::rpc)?;
 
-    let accounts = resp["value"].as_array().ok_or_else(|| {
-        Error::MalformedRpcResponse("getMultipleAccounts: no value array".into())
-    })?;
+    let accounts = resp["value"]
+        .as_array()
+        .ok_or_else(|| Error::MalformedRpcResponse("getMultipleAccounts: no value array".into()))?;
     let mut out: Vec<(Address, Loaded)> = Vec::new();
     let mut existing: HashMap<String, ()> = HashMap::new();
 
@@ -291,22 +291,27 @@ impl TimeTravel {
     /// Apply this warp to a clock, advancing the related fields together so a
     /// program that reads epoch *and* timestamp sees a consistent world.
     fn apply(&self, clock: &mut Clock) {
+        // Saturating throughout: the warp values come from untrusted JSON, and an
+        // extreme epoch/slot count must clamp, never overflow-panic (debug) or
+        // wrap to a nonsense clock (release).
         let mut slot_delta: i64 = 0;
         if let Some(e) = self.epochs {
-            slot_delta += e * SLOTS_PER_EPOCH;
+            slot_delta = slot_delta.saturating_add(e.saturating_mul(SLOTS_PER_EPOCH));
         }
         if let Some(s) = self.slots {
-            slot_delta += s;
+            slot_delta = slot_delta.saturating_add(s);
         }
         if slot_delta != 0 {
             clock.slot = clock.slot.saturating_add_signed(slot_delta);
             clock.epoch = clock
                 .epoch
                 .saturating_add_signed(slot_delta / SLOTS_PER_EPOCH);
-            clock.unix_timestamp += (slot_delta as f64 * SECS_PER_SLOT) as i64;
+            clock.unix_timestamp = clock
+                .unix_timestamp
+                .saturating_add((slot_delta as f64 * SECS_PER_SLOT) as i64);
         }
         if let Some(secs) = self.seconds {
-            clock.unix_timestamp += secs;
+            clock.unix_timestamp = clock.unix_timestamp.saturating_add(secs);
             // Keep slots roughly in step so slot-based checks move too.
             let by = (secs as f64 / SECS_PER_SLOT) as i64;
             clock.slot = clock.slot.saturating_add_signed(by);
@@ -414,9 +419,14 @@ impl ReplayContext {
         svm
     }
 
-    /// Replay and report **what changed** — every touched account's lamports and
-    /// raw data, before and after. The caller decodes the bytes into named fields.
-    pub(crate) fn run_with_diff(&self, mutations: &[Mutation]) -> Result<(ReplayResult, Vec<RawAccountDiff>)> {
+    /// Replay and report **what changed** among the loaded accounts — each one's
+    /// lamports and raw data, before and after. The caller decodes the bytes into
+    /// named fields. Accounts *created* by the transaction aren't in the loaded
+    /// set, so they don't appear here.
+    pub(crate) fn run_with_diff(
+        &self,
+        mutations: &[Mutation],
+    ) -> Result<(ReplayResult, Vec<RawAccountDiff>)> {
         let (result, svm) = self.run_full(mutations)?;
         let mut diffs = Vec::new();
         for (addr, l) in &self.loaded {
@@ -446,6 +456,17 @@ impl ReplayContext {
             Loaded::Data(acc) if *a == addr => Some(acc),
             _ => None,
         })
+    }
+
+    /// Whether an address is part of the replay's world at all (a loaded data
+    /// account or program). An assertion against an address that is *not* known
+    /// is a typo, not an account that happens to be empty — the difference
+    /// between a hard error and a check that silently reads zero and passes.
+    fn is_known(&self, address: &str) -> bool {
+        match Address::from_str(address) {
+            Ok(addr) => self.loaded.iter().any(|(a, _)| *a == addr),
+            Err(_) => false,
+        }
     }
 
     /// Register a program's IDL for named-field assertion resolution.
@@ -490,7 +511,11 @@ impl ReplayContext {
             .ok_or_else(|| Error::AccountNotFound(format!("{address} (no pre-state)")))?;
         let owner = pre.owner.to_string();
         crate::decode::decode_bytes(&owner, &pre.data)
-            .or_else(|| self.idls.get(&owner).and_then(|i| crate::idl::decode_with_idl(i, &pre.data)))
+            .or_else(|| {
+                self.idls
+                    .get(&owner)
+                    .and_then(|i| crate::idl::decode_with_idl(i, &pre.data))
+            })
             .map(|dec| (dec, pre))
             .ok_or_else(|| Error::UndecodableAccount {
                 address: address.to_string(),
@@ -742,7 +767,11 @@ pub(crate) fn preflight_context(
     // Real wall-clock time for that slot — a pre-flight simulation should run
     // "now", and any date-based program logic depends on this being accurate.
     let block_time = slot.and_then(|s| client.get_block_time(s).ok());
-    let signature = tx.signatures.first().map(|s| s.to_string()).unwrap_or_default();
+    let signature = tx
+        .signatures
+        .first()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
     Ok(ReplayContext {
         signature,
         tx,
@@ -789,7 +818,11 @@ impl ReplayContext {
             captured_block_time: self.block_time,
             tx_b64: b64_encode(&tx_bytes),
             entries,
-            idls: self.idls.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            idls: self
+                .idls
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             recorded: None, // the Replay layer fills this in — it knows the outcome
         })
     }
@@ -818,7 +851,9 @@ impl ReplayContext {
                         .map_err(|_| Error::Fixture(format!("bad owner {owner}")))?;
                     let data = base64::engine::general_purpose::STANDARD
                         .decode(data_b64)
-                        .map_err(|e| Error::Fixture(format!("bad data base64 for {address}: {e}")))?;
+                        .map_err(|e| {
+                            Error::Fixture(format!("bad data base64 for {address}: {e}"))
+                        })?;
                     loaded.push((
                         addr,
                         Loaded::Data(Account {
@@ -835,7 +870,9 @@ impl ReplayContext {
                         .map_err(|_| Error::Fixture(format!("bad address {address}")))?;
                     let elf = base64::engine::general_purpose::STANDARD
                         .decode(elf_b64)
-                        .map_err(|e| Error::Fixture(format!("bad elf base64 for {address}: {e}")))?;
+                        .map_err(|e| {
+                            Error::Fixture(format!("bad elf base64 for {address}: {e}"))
+                        })?;
                     loaded.push((addr, Loaded::Program(elf)));
                 }
             }
@@ -849,7 +886,11 @@ impl ReplayContext {
             time_travel: TimeTravel::default(),
             // v2 fixtures carry their IDLs, so named-field asserts, error
             // names, and decoded diffs resolve offline too.
-            idls: fx.idls.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            idls: fx
+                .idls
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             feature_toggles: Vec::new(),
         })
     }
@@ -946,8 +987,8 @@ impl Mutation {
 /// `expect: revert` scenario.
 fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
     let address = m.address();
-    let addr = Address::from_str(address)
-        .map_err(|_| Error::InvalidAddress(address.to_string()))?;
+    let addr =
+        Address::from_str(address).map_err(|_| Error::InvalidAddress(address.to_string()))?;
     let mut account = svm
         .get_account(&addr)
         .ok_or_else(|| Error::MutationTargetMissing(address.to_string()))?;
@@ -1205,13 +1246,26 @@ impl AccountAssert {
         let addr = Address::from_str(&self.address)
             .map_err(|_| Error::InvalidAddress(self.address.clone()))?;
         let acc = svm.get_account(&addr);
+        // A check against an address the replay never loaded is a typo, not an
+        // account that is legitimately empty. Erroring here (rather than reading
+        // a silent zero) is what stops a mistyped assert from passing vacuously —
+        // the same guarantee the mutation path gives via MutationTargetMissing.
+        // A known account that is now gone (closed/drained) still reads zero,
+        // which is its true post-transaction state.
+        if acc.is_none() && !ctx.is_known(&self.address) {
+            return Err(Error::AccountNotFound(self.address.clone()));
+        }
         match &self.check {
             StateCheck::Lamports { op, value } => {
                 Ok(op.test_i128(acc.map(|a| a.lamports).unwrap_or(0) as i128, *value))
             }
             StateCheck::U64At { offset, op, value } => {
                 let acc = acc.ok_or_else(|| Error::AccountNotFound(self.address.clone()))?;
-                if offset.checked_add(8).filter(|&e| e <= acc.data.len()).is_none() {
+                if offset
+                    .checked_add(8)
+                    .filter(|&e| e <= acc.data.len())
+                    .is_none()
+                {
                     return Err(Error::OutOfRange {
                         what: format!("u64@{offset}"),
                         len: acc.data.len(),
@@ -1253,8 +1307,14 @@ impl AccountAssert {
 }
 
 fn short(s: &str) -> String {
-    if s.len() > 12 {
-        format!("{}…{}", &s[..4], &s[s.len() - 4..])
+    // Count by chars, not bytes: an address string is normally ASCII, but this
+    // also formats arbitrary user-supplied strings (a typo'd assert address),
+    // and byte-slicing one at a non-char-boundary would panic.
+    let count = s.chars().count();
+    if count > 12 {
+        let head: String = s.chars().take(4).collect();
+        let tail: String = s.chars().skip(count - 4).collect();
+        format!("{head}…{tail}")
     } else {
         s.to_string()
     }
@@ -1314,7 +1374,11 @@ impl ReplayContext {
                 })
                 .ok_or_else(|| Error::MutationTargetMissing(address.to_string()))?;
             if let Mutation::DataPatch { offset, bytes, .. } = m {
-                if offset.checked_add(bytes.len()).filter(|&e| e <= data_len).is_none() {
+                if offset
+                    .checked_add(bytes.len())
+                    .filter(|&e| e <= data_len)
+                    .is_none()
+                {
                     return Err(Error::PatchOutOfRange {
                         address: address.to_string(),
                         offset: *offset,
@@ -1581,7 +1645,12 @@ mod tests {
             .is_ok());
         assert!(matches!(
             ctx.validate_mutations(&[Mutation::patch(addr.to_string(), 4, vec![0; 8])]),
-            Err(Error::PatchOutOfRange { offset: 4, len: 8, size: 8, .. })
+            Err(Error::PatchOutOfRange {
+                offset: 4,
+                len: 8,
+                size: 8,
+                ..
+            })
         ));
         // usize overflow in offset + len must not panic either.
         assert!(ctx

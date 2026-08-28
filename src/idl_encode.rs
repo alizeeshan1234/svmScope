@@ -370,14 +370,18 @@ fn json_bytes(path: &str, value: &Value) -> Result<Vec<u8>> {
             .collect();
     }
     if let Some(hex) = value.as_str().and_then(|value| value.strip_prefix("0x")) {
-        if hex.len() % 2 != 0 {
+        // Guard ASCII before byte-slicing: a multi-byte char would otherwise
+        // pass the even-length check and panic on a non-char-boundary slice.
+        if hex.len() % 2 != 0 || !hex.is_ascii() {
             return Err(encoding_error(path, "hex bytes must have an even length"));
         }
-        return (0..hex.len())
+        let bytes = hex.as_bytes();
+        return (0..bytes.len())
             .step_by(2)
             .map(|index| {
-                u8::from_str_radix(&hex[index..index + 2], 16)
-                    .map_err(|_| encoding_error(path, "invalid hex bytes"))
+                let pair =
+                    std::str::from_utf8(&bytes[index..index + 2]).expect("ascii checked above");
+                u8::from_str_radix(pair, 16).map_err(|_| encoding_error(path, "invalid hex bytes"))
             })
             .collect();
     }

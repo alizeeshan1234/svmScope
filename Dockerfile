@@ -24,6 +24,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=build /app/target/release/server /usr/local/bin/svmscope-server
 
+# Drop root: the server needs no privileges at runtime.
+RUN useradd --system --user-group --no-create-home svmscope
+USER svmscope
+
 # The server reads HOST/PORT/SVMSCOPE_RPC_URL from the environment.
 ENV HOST=0.0.0.0 PORT=3000
 EXPOSE 3000

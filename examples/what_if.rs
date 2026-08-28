@@ -9,8 +9,12 @@ use svmscope::{Check, Cmp, Mutation, Scope};
 
 fn main() -> svmscope::Result<()> {
     let mut args = std::env::args().skip(1);
-    let sig = args.next().expect("usage: what_if <signature> <account> [rpc_url]");
-    let account = args.next().expect("usage: what_if <signature> <account> [rpc_url]");
+    let sig = args
+        .next()
+        .expect("usage: what_if <signature> <account> [rpc_url]");
+    let account = args
+        .next()
+        .expect("usage: what_if <signature> <account> [rpc_url]");
     let rpc = args
         .next()
         .unwrap_or_else(|| "https://api.mainnet-beta.solana.com".into());

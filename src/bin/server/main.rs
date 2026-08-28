@@ -215,14 +215,20 @@ async fn index() -> Html<&'static str> {
 /// upstream RPC trouble is 502, everything else the caller can fix is 400.
 fn lib_err(e: svmscope::Error) -> (StatusCode, String) {
     use svmscope::Error as E;
-    let code = match &e {
+    match &e {
         E::TransactionNotFound(_) | E::NoSignatures(_) | E::AccountNotFound(_) => {
-            StatusCode::NOT_FOUND
+            (StatusCode::NOT_FOUND, e.to_string())
         }
-        E::Rpc(_) | E::MalformedRpcResponse(_) => StatusCode::BAD_GATEWAY,
-        _ => StatusCode::BAD_REQUEST,
-    };
-    (code, e.to_string())
+        // An RPC error's Display can echo the upstream request, and a paid RPC
+        // URL commonly carries an ?api-key=… secret. Never pass that back to an
+        // anonymous caller — return a generic gateway message and keep the detail
+        // server-side only.
+        E::Rpc(_) | E::MalformedRpcResponse(_) => {
+            eprintln!("upstream RPC error: {e}");
+            (StatusCode::BAD_GATEWAY, "upstream RPC error".to_string())
+        }
+        _ => (StatusCode::BAD_REQUEST, e.to_string()),
+    }
 }
 
 /// GET /analyze/:signature — decode + replay a transaction, return JSON.
@@ -234,13 +240,13 @@ async fn analyze_handler(
     // `analyze` does blocking I/O (RPC) and heavy CPU work (replay), so run it on
     // the blocking thread pool instead of stalling the async runtime.
     let result = tokio::task::spawn_blocking(move || Scope::new(url).analyze(&signature))
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
 
     match result {
         Ok(analysis) => Ok(Json(analysis)),
@@ -248,10 +254,27 @@ async fn analyze_handler(
     }
 }
 
+/// Per-request work caps for the public server. Each scenario/mutation is a full
+/// LiteSVM replay on a single blocking thread, so an unbounded batch is a CPU/
+/// thread-pool DoS regardless of the 2MB body limit. Generous for real use.
+const MAX_MUTATIONS_PER_REQUEST: usize = 256;
+const MAX_SCENARIOS_PER_REQUEST: usize = 64;
+
+fn cap(count: usize, limit: usize, what: &str) -> Result<(), (StatusCode, String)> {
+    if count > limit {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("too many {what}: {count} (limit {limit})"),
+        ));
+    }
+    Ok(())
+}
+
 /// POST /simulate — apply what-if mutations and return the mutated replay result.
 async fn simulate_handler(
     Json(req): Json<SimRequest>,
 ) -> Result<Json<ReplayResult>, (StatusCode, String)> {
+    cap(req.mutations.len(), MAX_MUTATIONS_PER_REQUEST, "mutations")?;
     let mutations: Vec<Mutation> = req
         .mutations
         .into_iter()
@@ -259,8 +282,8 @@ async fn simulate_handler(
         .collect::<Result<_, _>>()
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let features =
-        svmscope::spec::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let features = svmscope::spec::feature_toggles(req.features)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
@@ -301,6 +324,9 @@ async fn suite_handler(
         .signature
         .clone()
         .ok_or((StatusCode::BAD_REQUEST, "signature is required".to_string()))?;
+    cap(req.scenarios.len(), MAX_SCENARIOS_PER_REQUEST, "scenarios")?;
+    let total_mutations: usize = req.scenarios.iter().map(|s| s.mutations.len()).sum();
+    cap(total_mutations, MAX_MUTATIONS_PER_REQUEST, "mutations")?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let scenarios = req
         .scenarios
@@ -308,24 +334,23 @@ async fn suite_handler(
         .map(|s| s.into_scenario())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let features =
-        svmscope::spec::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let features = svmscope::spec::feature_toggles(req.features)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let result = tokio::task::spawn_blocking(
-        move || -> Result<Vec<ScenarioOutcome>, svmscope::Error> {
+    let result =
+        tokio::task::spawn_blocking(move || -> Result<Vec<ScenarioOutcome>, svmscope::Error> {
             let mut replay = Scope::new(url).replay(&signature)?;
             replay.set_time_travel(req.time_travel);
             replay.set_features(features);
             replay.run_suite(&scenarios)
-        },
-    )
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
 
     match result {
         Ok(outcomes) => Ok(Json(outcomes)),
@@ -357,6 +382,7 @@ struct PreflightRequest {
 async fn preflight_handler(
     Json(req): Json<PreflightRequest>,
 ) -> Result<Json<ReplayResult>, (StatusCode, String)> {
+    cap(req.mutations.len(), MAX_MUTATIONS_PER_REQUEST, "mutations")?;
     let mutations: Vec<Mutation> = req
         .mutations
         .into_iter()
@@ -390,13 +416,13 @@ async fn account_handler(
 ) -> Result<Json<svmscope::AccountOverview>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || Scope::new(url).account(&address))
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
 
     match result {
         Ok(ov) => Ok(Json(ov)),
@@ -411,13 +437,13 @@ async fn signatures_handler(
 ) -> Result<Json<Vec<svmscope::SigInfo>>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || Scope::new(url).signatures(&address, 25))
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
 
     match result {
         Ok(sigs) => Ok(Json(sigs)),
@@ -430,6 +456,7 @@ async fn signatures_handler(
 async fn preflight_report_handler(
     Json(req): Json<PreflightRequest>,
 ) -> Result<Json<svmscope::SimulationReport>, (StatusCode, String)> {
+    cap(req.mutations.len(), MAX_MUTATIONS_PER_REQUEST, "mutations")?;
     let mutations: Vec<Mutation> = req
         .mutations
         .into_iter()
@@ -437,8 +464,8 @@ async fn preflight_report_handler(
         .collect::<Result<_, _>>()
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let features =
-        svmscope::spec::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let features = svmscope::spec::feature_toggles(req.features)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(
@@ -465,6 +492,7 @@ async fn preflight_report_handler(
 async fn replay_report_handler(
     Json(req): Json<SimRequest>,
 ) -> Result<Json<svmscope::SimulationReport>, (StatusCode, String)> {
+    cap(req.mutations.len(), MAX_MUTATIONS_PER_REQUEST, "mutations")?;
     let mutations: Vec<Mutation> = req
         .mutations
         .into_iter()
@@ -472,8 +500,8 @@ async fn replay_report_handler(
         .collect::<Result<_, _>>()
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let features =
-        svmscope::spec::feature_toggles(req.features).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let features = svmscope::spec::feature_toggles(req.features)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(
@@ -523,13 +551,13 @@ async fn decode_account_handler(
 
     let result =
         tokio::task::spawn_blocking(move || Scope::new(url).decode_account(&address, idl.as_ref()))
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("task error: {e}"),
+                )
+            })?;
 
     result.map(Json).map_err(lib_err)
 }
@@ -550,13 +578,13 @@ async fn instructions_handler(
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     let result =
         tokio::task::spawn_blocking(move || Scope::new(url).program_instructions(&program))
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("task error: {e}"),
+                )
+            })?;
 
     result.map(Json).map_err(lib_err)
 }
@@ -591,13 +619,13 @@ async fn freeze_handler(
 ) -> Result<Json<svmscope::Fixture>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || Scope::new(url).capture(&signature))
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
 
     match result {
         Ok(fx) => Ok(Json(fx)),
@@ -627,12 +655,19 @@ async fn api_index() -> Json<serde_json::Value> {
 
 /// The client's address, preferring the proxy-forwarded IP since we run behind
 /// Render's load balancer (otherwise every request looks like the same peer).
+///
+/// Use the *rightmost* `X-Forwarded-For` entry: our trusted proxy appends the
+/// real client IP on the right, while any entries to the left are supplied by
+/// the client itself. Taking the leftmost would let a client send a random
+/// `X-Forwarded-For` per request and mint a fresh identity each time, defeating
+/// the rate limiter (the only DoS defense on the unauthenticated endpoints).
 fn client_id(req: &Request, peer: Option<SocketAddr>) -> String {
     req.headers()
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.split(',').next_back())
         .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
         .or_else(|| peer.map(|p| p.ip().to_string()))
         .unwrap_or_else(|| "unknown".into())
 }
@@ -754,11 +789,21 @@ async fn stats_handler(Query(q): Query<StatsQuery>) -> Response {
         .ok()
         .filter(|t| !t.is_empty());
     match configured {
-        Some(expected) if q.token.as_deref() == Some(expected.as_str()) => {
+        Some(expected) if q.token.as_deref().is_some_and(|t| ct_eq(t, &expected)) => {
             Json(stats::snapshot_json()).into_response()
         }
         _ => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
+}
+
+/// Constant-time string equality for the stats token, so a mismatch can't be
+/// narrowed by response timing. (Length is not treated as secret.)
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 #[tokio::main]

@@ -40,12 +40,26 @@ fn fetch_idl_anchor_account(client: &RpcClient, program_id: Address) -> Option<V
     let len_bytes: [u8; 4] = idl_account.get(40..44)?.try_into().ok()?;
     let len = u32::from_le_bytes(len_bytes) as usize;
     let compressed = idl_account.get(44..44 + len)?;
+    inflate_idl_json(compressed)
+}
 
-    let mut decoder = ZlibDecoder::new(compressed);
+/// Inflate a zlib stream into JSON, refusing to allocate more than
+/// [`MAX_IDL_JSON`]. On-chain IDL bytes are untrusted; without a ceiling a
+/// small high-ratio zlib payload could inflate toward gigabytes and OOM the
+/// process. A truncated read past the cap simply fails to parse and returns
+/// `None`, the same as any other malformed IDL.
+fn inflate_idl_json(compressed: &[u8]) -> Option<Value> {
     let mut out = Vec::new();
-    decoder.read_to_end(&mut out).ok()?;
+    ZlibDecoder::new(compressed)
+        .take(MAX_IDL_JSON)
+        .read_to_end(&mut out)
+        .ok()?;
     serde_json::from_slice::<Value>(&out).ok()
 }
+
+/// Largest inflated IDL JSON we accept. Real IDLs are a few hundred KiB at most;
+/// this leaves generous headroom while capping a decompression bomb.
+const MAX_IDL_JSON: u64 = 16 * 1024 * 1024;
 
 /// Newer: the Program Metadata program's canonical `idl` account. Its inline
 /// data is zlib-compressed JSON after a small fixed header; we scan for the zlib
@@ -61,12 +75,8 @@ fn fetch_idl_program_metadata(client: &RpcClient, program_id: Address) -> Option
 
     for off in 0..data.len().min(256) {
         if data[off] == 0x78 && matches!(data.get(off + 1), Some(0x01 | 0x9c | 0xda)) {
-            let mut dec = ZlibDecoder::new(&data[off..]);
-            let mut out = Vec::new();
-            if dec.read_to_end(&mut out).is_ok() {
-                if let Ok(v) = serde_json::from_slice::<Value>(&out) {
-                    return Some(v);
-                }
+            if let Some(v) = inflate_idl_json(&data[off..]) {
+                return Some(v);
             }
         }
     }
@@ -411,8 +421,10 @@ fn resolve_fixed(ty: &Value) -> Option<Kind> {
     // Fixed arrays keep stable offsets; every other object type stops the walk.
     if let Some(arr) = ty.get("array").and_then(|a| a.as_array()) {
         let inner = resolve_fixed(arr.first()?)?;
-        let count = arr.get(1)?.as_u64()?;
-        return Some(Kind::Bytes(inner.size() * count as usize));
+        let count = usize::try_from(arr.get(1)?.as_u64()?).ok()?;
+        // Untrusted IDL: a bogus element count must not overflow the byte size.
+        let size = inner.size().checked_mul(count)?;
+        return Some(Kind::Bytes(size));
     }
 
     None
@@ -492,6 +504,18 @@ fn enum_variants<'a>(types: &'a [Value], name: &str) -> Option<&'a Vec<Value>> {
 /// inline (that's the recursion). Returns `false` the moment it hits something
 /// variable-length or unknown — the caller stops too, because every offset after
 /// that point would be wrong.
+/// Deepest struct/enum/array nesting we inline before giving up. A hostile or
+/// buggy IDL can define a self-referential type (`A { x: A }`); without a bound
+/// this recurses until the stack overflows and aborts the process. Real Anchor
+/// layouts nest only a handful deep, so this never trips on honest input.
+const MAX_WALK_DEPTH: usize = 32;
+
+/// Most elements of a fixed array we expand into indexed fields. A `[T; N]` with
+/// an enormous `N` (an untrusted IDL can claim `[Empty; u64::MAX]`, and an empty
+/// struct consumes zero bytes) would otherwise spin ~forever; past the cap we
+/// stop cleanly the same way an oversized `vec` does.
+const MAX_ARRAY_ELEMS: u64 = 1024;
+
 fn walk_fields(
     fields_json: &[Value],
     types: &[Value],
@@ -499,7 +523,11 @@ fn walk_fields(
     offset: &mut usize,
     prefix: &str,
     out: &mut Vec<Field>,
+    depth: usize,
 ) -> bool {
+    if depth > MAX_WALK_DEPTH {
+        return false;
+    }
     for f in fields_json {
         // The field's display name, e.g. "bump" at the top level or
         // "flat_fees.numerator" inside a nested struct.
@@ -516,7 +544,15 @@ fn walk_fields(
         // here at the current cursor, by calling ourselves with a dotted prefix.
         if let Some(name) = defined_name(ty) {
             if let Some(sub) = struct_fields(types, name) {
-                if !walk_fields(sub, types, data, offset, &format!("{fname}."), out) {
+                if !walk_fields(
+                    sub,
+                    types,
+                    data,
+                    offset,
+                    &format!("{fname}."),
+                    out,
+                    depth + 1,
+                ) {
                     return false; // the nested struct hit something variable
                 }
                 continue;
@@ -559,7 +595,15 @@ fn walk_fields(
                             }
                         })
                         .collect();
-                    if !walk_fields(&named, types, data, offset, &format!("{fname}."), out) {
+                    if !walk_fields(
+                        &named,
+                        types,
+                        data,
+                        offset,
+                        &format!("{fname}."),
+                        out,
+                        depth + 1,
+                    ) {
                         return false;
                     }
                 }
@@ -576,8 +620,19 @@ fn walk_fields(
                     let Some(sub) = struct_fields(types, name) else {
                         return false;
                     };
+                    if count > MAX_ARRAY_ELEMS {
+                        return false;
+                    }
                     for i in 0..count {
-                        if !walk_fields(sub, types, data, offset, &format!("{fname}[{i}]."), out) {
+                        if !walk_fields(
+                            sub,
+                            types,
+                            data,
+                            offset,
+                            &format!("{fname}[{i}]."),
+                            out,
+                            depth + 1,
+                        ) {
                             return false;
                         }
                     }
@@ -636,7 +691,7 @@ fn walk_fields(
             let Some(arr) = one.as_array() else {
                 return false;
             };
-            if !walk_fields(arr, types, data, offset, "", out) {
+            if !walk_fields(arr, types, data, offset, "", out, depth + 1) {
                 return false;
             }
             continue;
@@ -668,7 +723,7 @@ fn walk_fields(
                 let Some(arr) = one.as_array() else {
                     return false;
                 };
-                if !walk_fields(arr, types, data, offset, "", out) {
+                if !walk_fields(arr, types, data, offset, "", out, depth + 1) {
                     return false;
                 }
             }
@@ -740,7 +795,85 @@ pub(crate) fn decode_with_idl(idl: &Value, data: &[u8]) -> Option<DecodedAccount
     //    reading each into `fields` and stopping at the first variable field.
     let mut fields: Vec<Field> = Vec::new();
     let mut offset = 8usize;
-    walk_fields(fields_json, types, data, &mut offset, "", &mut fields);
+    walk_fields(fields_json, types, data, &mut offset, "", &mut fields, 0);
 
     Some(DecodedAccount { type_name, fields })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Builds an account IDL whose sole account type is `Node`, matched by the
+    // discriminator 1..=8, with the given field/type shape.
+    fn account_idl(node_fields: Value, extra_types: Value) -> Value {
+        let mut types = vec![json!({
+            "name": "Node",
+            "type": { "kind": "struct", "fields": node_fields }
+        })];
+        if let Some(arr) = extra_types.as_array() {
+            types.extend(arr.iter().cloned());
+        }
+        json!({
+            "accounts": [{ "name": "Node", "discriminator": [1,2,3,4,5,6,7,8] }],
+            "types": types,
+        })
+    }
+
+    // These decode calls must terminate. A hang or stack overflow fails the test
+    // by never returning (the process would abort), which is the regression we
+    // are guarding against — a hostile on-chain IDL must not be able to wedge the
+    // decoder.
+
+    #[test]
+    fn self_referential_idl_type_terminates() {
+        let idl = account_idl(
+            json!([{ "name": "next", "type": { "defined": { "name": "Node" } } }]),
+            json!([]),
+        );
+        let mut data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        data.resize(8 + 4096, 0);
+        // Returns (Some or None) — the point is that it returns at all.
+        let _ = decode_with_idl(&idl, &data);
+    }
+
+    #[test]
+    fn mutually_recursive_idl_types_terminate() {
+        let idl = account_idl(
+            json!([{ "name": "b", "type": { "defined": { "name": "B" } } }]),
+            json!([{
+                "name": "B",
+                "type": { "kind": "struct", "fields": [
+                    { "name": "a", "type": { "defined": { "name": "Node" } } }
+                ] }
+            }]),
+        );
+        let mut data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        data.resize(8 + 4096, 0);
+        let _ = decode_with_idl(&idl, &data);
+    }
+
+    #[test]
+    fn huge_fixed_array_of_empty_struct_terminates() {
+        let idl = account_idl(
+            json!([{
+                "name": "items",
+                "type": { "array": [{ "defined": { "name": "Empty" } }, u64::MAX] }
+            }]),
+            json!([{
+                "name": "Empty",
+                "type": { "kind": "struct", "fields": [] }
+            }]),
+        );
+        let mut data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        data.resize(8 + 64, 0);
+        let _ = decode_with_idl(&idl, &data);
+    }
+
+    #[test]
+    fn oversized_fixed_array_size_does_not_overflow() {
+        // resolve_fixed must not overflow computing element_size * count.
+        let ty = json!({ "array": ["u64", u64::MAX] });
+        assert!(resolve_fixed(&ty).is_none());
+    }
 }
