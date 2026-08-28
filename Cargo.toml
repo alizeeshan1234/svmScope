@@ -1,6 +1,6 @@
 [package]
 name = "svmscope"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Transaction autopsy for Solana — decode any mainnet transaction, replay it locally in an embedded SVM, and mutate state to see what happens."
 license = "MIT"
