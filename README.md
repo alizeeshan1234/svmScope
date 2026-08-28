@@ -102,6 +102,40 @@ types as `svmscope::Type`; implementation modules are intentionally private.
 The `idl`, `report`, and `spec` modules are public for IDL inspection, HTML
 reports, and the JSON scenario format respectively.
 
+## Three ways to mutate state
+
+A what-if is one or more `Mutation`s applied before the replay. There are three,
+from coarse to surgical — editing account *bytes* is where most of the power is
+(flip an oracle price, a token balance, a vesting cliff, a config flag):
+
+```rust,no_run
+use svmscope::{Mutation, Scope};
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+# let scope = Scope::new("https://api.mainnet-beta.solana.com");
+# let mut replay = scope.replay("<signature>")?;
+# let (vault, oracle, config) = ("<vault>", "<oracle>", "<config>");
+let out = replay.simulate(&[
+    // 1. Set an account's SOL balance.
+    Mutation::lamports(vault, 0),
+
+    // 2. Patch a slice at a byte offset — the usual surgical what-if.
+    //    e.g. overwrite a u64 price/amount in place with little-endian bytes.
+    Mutation::patch(oracle, 8, 1_000_000_u64.to_le_bytes().to_vec()),
+
+    // 3. Replace an account's data wholesale.
+    Mutation::data(config, vec![0u8; 128]),
+])?;
+assert!(out.result.success || out.result.error.is_some());
+# Ok(())
+# }
+```
+
+Prefer named-field mutations to raw offsets where a layout is known — decode the
+account (`scope.decode_account` or a fixture's IDL) to find a field's offset, or
+assert on it directly with `Check::account(addr).field("amount", Cmp::gt(0))`.
+The JSON [scenario suites](#scenario-suites-json) below express the same patches
+declaratively with `{"kind":"data","offset":…,"bytes_hex":…}`.
+
 ## Build and send the transaction inside the Rust test
 
 You can also start from scratch instead of an existing signature. A Rust test can
