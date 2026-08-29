@@ -126,6 +126,7 @@ mod error;
 mod fixture;
 pub mod idl;
 mod idl_encode;
+mod idl_model;
 pub(crate) mod ixname;
 mod program;
 mod replay;

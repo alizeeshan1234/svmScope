@@ -12,7 +12,8 @@ use solana_signer::Signer;
 use solana_transaction::versioned::VersionedTransaction;
 
 use crate::error::{Error, Result};
-use crate::{idl, idl_encode, CapturedTransaction, Scope};
+use crate::idl_model::{AccountNode, DiscField, IdlModel, IxDef};
+use crate::{idl_encode, CapturedTransaction, Scope};
 
 /// An IDL-backed client for one deployed Solana program.
 pub struct ProgramClient<'a> {
@@ -26,6 +27,7 @@ pub struct MethodBuilder<'a> {
     scope: &'a Scope,
     program_id: Address,
     idl: Value,
+    model: IdlModel,
     method: String,
     args: Map<String, Value>,
     accounts: HashMap<String, Address>,
@@ -57,7 +59,8 @@ impl<'a> ProgramClient<'a> {
     /// Select one instruction by its exact IDL method name.
     pub fn method(&self, name: impl Into<String>) -> Result<MethodBuilder<'a>> {
         let method = name.into();
-        if idl::instruction_by_name(&self.idl, &method).is_none() {
+        let model = IdlModel::parse(&self.idl);
+        if model.instruction(&method).is_none() {
             return Err(Error::MethodNotFound {
                 program: self.program_id.to_string(),
                 method,
@@ -67,6 +70,7 @@ impl<'a> ProgramClient<'a> {
             scope: self.scope,
             program_id: self.program_id,
             idl: self.idl.clone(),
+            model,
             method,
             args: Map::new(),
             accounts: HashMap::new(),
@@ -140,16 +144,12 @@ impl<'a> MethodBuilder<'a> {
 
         let mut account_metas = Vec::new();
         collect_account_specs(
-            instruction
-                .get("accounts")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default(),
+            &instruction.accounts,
             "",
             &mut |full_name, leaf_name, spec| {
                 let address = self.resolve_account(full_name, leaf_name, spec)?;
-                let writable = account_writable(spec);
-                let signer = account_signer(spec);
+                let writable = spec.writable();
+                let signer = spec.signer();
                 account_metas.push(if writable {
                     AccountMeta::new(address, signer)
                 } else {
@@ -158,7 +158,7 @@ impl<'a> MethodBuilder<'a> {
                 Ok(())
             },
         )?;
-        idl_encode::encode_arguments(&self.idl, instruction, &self.args, &mut data)?;
+        idl_encode::encode_arguments(&self.model, instruction, &self.args, &mut data)?;
 
         Ok(Instruction {
             program_id: self.program_id,
@@ -211,15 +211,11 @@ impl<'a> MethodBuilder<'a> {
         })?;
         let instruction = self.idl_instruction();
         collect_account_specs(
-            instruction
-                .get("accounts")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default(),
+            &instruction.accounts,
             "",
             &mut |full_name, leaf_name, spec| {
                 let address = self.resolve_account(full_name, leaf_name, spec)?;
-                if account_signer(spec)
+                if spec.signer()
                     && payer.pubkey() != address
                     && !self.signers.iter().any(|signer| signer.pubkey() == address)
                 {
@@ -232,19 +228,15 @@ impl<'a> MethodBuilder<'a> {
             },
         )?;
 
-        let argument_specs = instruction
-            .get("args")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let known: HashSet<&str> = argument_specs
+        let known: HashSet<&str> = instruction
+            .args
             .iter()
-            .filter_map(|argument| argument.get("name").and_then(Value::as_str))
+            .filter_map(|argument| argument.name.as_deref())
             .collect();
-        for argument in argument_specs {
+        for argument in &instruction.args {
             let name = argument
-                .get("name")
-                .and_then(Value::as_str)
+                .name
+                .as_deref()
                 .ok_or_else(|| Error::InvalidSpec("IDL argument is missing its name".into()))?;
             if !self.args.contains_key(name) {
                 return Err(Error::MissingArgument {
@@ -262,12 +254,18 @@ impl<'a> MethodBuilder<'a> {
         Ok(())
     }
 
-    fn idl_instruction(&self) -> &Value {
-        idl::instruction_by_name(&self.idl, &self.method)
+    fn idl_instruction(&self) -> &IxDef {
+        self.model
+            .instruction(&self.method)
             .expect("method existence checked when the builder was created")
     }
 
-    fn resolve_account(&self, full_name: &str, leaf_name: &str, spec: &Value) -> Result<Address> {
+    fn resolve_account(
+        &self,
+        full_name: &str,
+        leaf_name: &str,
+        spec: &AccountNode,
+    ) -> Result<Address> {
         // Exact dotted name wins.
         if let Some(address) = self.accounts.get(full_name) {
             return Ok(*address);
@@ -287,7 +285,7 @@ impl<'a> MethodBuilder<'a> {
             return Ok(*address);
         }
         // A fixed address pinned by the IDL (e.g. system_program).
-        if let Some(address) = spec.get("address").and_then(Value::as_str) {
+        if let Some(address) = spec.address.as_deref() {
             return Address::from_str(address)
                 .map_err(|_| Error::InvalidAddress(address.to_string()));
         }
@@ -303,11 +301,7 @@ impl<'a> MethodBuilder<'a> {
         let instruction = self.idl_instruction();
         let mut names = Vec::new();
         let _ = collect_account_specs(
-            instruction
-                .get("accounts")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default(),
+            &instruction.accounts,
             "",
             &mut |full_name, leaf_name, _spec| {
                 if leaf_name == leaf {
@@ -330,51 +324,35 @@ impl<'a> MethodBuilder<'a> {
     }
 }
 
-fn account_writable(spec: &Value) -> bool {
-    spec.get("writable")
-        .or_else(|| spec.get("isMut"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
-fn account_signer(spec: &Value) -> bool {
-    spec.get("signer")
-        .or_else(|| spec.get("isSigner"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
 fn collect_account_specs(
-    specs: &[Value],
+    specs: &[AccountNode],
     prefix: &str,
-    visit: &mut impl FnMut(&str, &str, &Value) -> Result<()>,
+    visit: &mut impl FnMut(&str, &str, &AccountNode) -> Result<()>,
 ) -> Result<()> {
     for spec in specs {
         let name = spec
-            .get("name")
-            .and_then(Value::as_str)
+            .name
+            .as_deref()
             .ok_or_else(|| Error::InvalidSpec("IDL account is missing its name".into()))?;
         let full_name = if prefix.is_empty() {
             name.to_string()
         } else {
             format!("{prefix}.{name}")
         };
-        if let Some(children) = spec.get("accounts").and_then(Value::as_array) {
-            collect_account_specs(children, &full_name, visit)?;
-        } else {
-            visit(&full_name, name, spec)?;
+        match &spec.children {
+            Some(children) => collect_account_specs(children, &full_name, visit)?,
+            None => visit(&full_name, name, spec)?,
         }
     }
     Ok(())
 }
 
-fn instruction_discriminator(instruction: &Value, method: &str) -> Result<Vec<u8>> {
-    if let Some(discriminator) = instruction.get("discriminator").and_then(Value::as_array) {
-        let bytes = discriminator
+fn instruction_discriminator(instruction: &IxDef, method: &str) -> Result<Vec<u8>> {
+    if let DiscField::Bytes(entries) = &instruction.discriminator {
+        let bytes = entries
             .iter()
-            .map(|value| {
-                value
-                    .as_u64()
+            .map(|entry| {
+                entry
                     .and_then(|value| u8::try_from(value).ok())
                     .ok_or_else(|| {
                         Error::InvalidSpec(format!("method {method} has an invalid discriminator"))
@@ -487,8 +465,9 @@ mod tests {
 
     #[test]
     fn derives_legacy_anchor_discriminator_from_snake_case_name() {
-        let bytes =
-            instruction_discriminator(&test_idl(None)["instructions"][0], "setConfig").unwrap();
+        let model = IdlModel::parse(&test_idl(None));
+        let bytes = instruction_discriminator(model.instruction("setConfig").unwrap(), "setConfig")
+            .unwrap();
         assert_eq!(bytes, Sha256::digest(b"global:set_config")[..8]);
     }
 
