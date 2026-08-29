@@ -1,0 +1,21 @@
+[package]
+name = "svmscope-server"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.91"
+description = "HTTP API server over the svmscope engine — deployment infrastructure for the hosted UI, not a library artifact."
+license = "MIT"
+# Deployed via Docker; intentionally not published to crates.io.
+publish = false
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[dependencies]
+svmscope = { path = ".." }
+axum = "0.8.9"
+tower-http = { version = "0.6", features = ["cors"] }
+tokio = { version = "1.53.1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

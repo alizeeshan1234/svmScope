@@ -52,12 +52,9 @@ That's the whole loop: **reconstruct once, replay and mutate forever.** The rest
 of this README goes deeper — building and submitting transactions, freezing
 offline fixtures, and the full assertion DSL.
 
-The optional HTTP server is not compiled for normal library users. Enable it
-only when you need the API server:
-
-```toml
-svmscope = { version = "0.2", features = ["server"] }
-```
+The library has no features to configure — the HTTP API server lives in its
+own workspace crate ([`server/`](./server)), so library consumers never
+compile axum/tokio.
 
 ## Library quickstart
 
@@ -385,12 +382,13 @@ tree, edit named account fields, run suites, freeze fixtures — is at
 
 ## Optional HTTP server
 
-The `server` feature (off by default — library consumers never compile axum)
-builds a small HTTP API over the engine, reading `HOST`, `PORT`, and
-`SVMSCOPE_RPC_URL` from the environment:
+A small HTTP API over the engine lives in the [`server/`](./server) workspace
+crate (`svmscope-server` — deployment infrastructure, not published to
+crates.io). It reads `HOST`, `PORT`, and `SVMSCOPE_RPC_URL` from the
+environment:
 
 ```bash
-cargo run --bin server --features server   # → http://127.0.0.1:3000, GET /api lists the surface
+cargo run -p svmscope-server   # → http://127.0.0.1:3000, GET /api lists the surface
 ```
 
 A typed TypeScript client lives in [`sdk/`](./sdk). Point it at your own RPC

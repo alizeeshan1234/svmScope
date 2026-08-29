@@ -208,7 +208,7 @@ struct SimRequest {
 
 /// Serve the static frontend page.
 async fn index() -> Html<&'static str> {
-    Html(include_str!("../../../static/index.html"))
+    Html(include_str!("../../static/index.html"))
 }
 
 /// Map a library error onto an HTTP status + message. Not-found inputs are 404,

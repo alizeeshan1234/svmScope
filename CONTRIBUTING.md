@@ -5,10 +5,10 @@ Thanks for your interest! Issues and pull requests are welcome.
 ## Building and testing
 
 ```bash
-cargo build                 # library + CLI
-cargo test                  # unit, integration, and doctests (offline)
-cargo fmt --check           # CI enforces formatting
-cargo clippy --all-targets --features server -- -D warnings   # CI enforces zero warnings
+cargo build --workspace     # library + CLI + the HTTP server crate
+cargo test --workspace      # unit, integration, and doctests (offline)
+cargo fmt --all --check     # CI enforces formatting
+cargo clippy --workspace --all-targets -- -D warnings   # CI enforces zero warnings
 ```
 
 The minimum supported Rust version is **1.91** (declared in `Cargo.toml` and
