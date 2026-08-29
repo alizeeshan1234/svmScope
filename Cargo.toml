@@ -1,6 +1,6 @@
 [package]
 name = "svmscope"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 # Verified: the full test suite and all targets compile on 1.91, and the
 # dependency tree requires nothing newer.

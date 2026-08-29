@@ -4,7 +4,7 @@ All notable changes to svmscope are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] — 2026-08-29
 
 ### Added
 
@@ -97,7 +97,7 @@ table authority byte, SPL multisig, stake lockup), spoof-resistant compute
 attribution, and a hard no-silent-pass guarantee: a typo'd mutation or assert
 address is an error or failed check, never a vacuous pass.
 
-[Unreleased]: https://github.com/alizeeshan1234/svmScope/compare/v0.2.2...HEAD
+[0.3.0]: https://crates.io/crates/svmscope/0.3.0
 [0.2.2]: https://crates.io/crates/svmscope/0.2.2
 [0.2.1]: https://crates.io/crates/svmscope/0.2.1
 [0.2.0]: https://crates.io/crates/svmscope/0.2.0
