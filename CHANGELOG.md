@@ -4,6 +4,12 @@ All notable changes to svmscope are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — 2026-08-29
+
+Docs-only: the README/lib install snippets said `svmscope = "0.2"`, which
+caret-resolves to 0.2.x and would never install 0.3. Corrected to `"0.3"`.
+No code changes.
+
 ## [0.3.0] — 2026-08-29
 
 ### Added
@@ -97,6 +103,7 @@ table authority byte, SPL multisig, stake lockup), spoof-resistant compute
 attribution, and a hard no-silent-pass guarantee: a typo'd mutation or assert
 address is an error or failed check, never a vacuous pass.
 
+[0.3.1]: https://crates.io/crates/svmscope/0.3.1
 [0.3.0]: https://crates.io/crates/svmscope/0.3.0
 [0.2.2]: https://crates.io/crates/svmscope/0.2.2
 [0.2.1]: https://crates.io/crates/svmscope/0.2.1
