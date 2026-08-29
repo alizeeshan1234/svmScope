@@ -22,6 +22,18 @@ All notable changes to svmscope are documented here. The format follows
 
 ### Changed
 
+- **Internal: typed IDL model.** IDLs are parsed once into typed structs; the
+  account decoder, Borsh argument encoder, instruction builder, lister, and
+  error lookup all consume the model instead of walking `serde_json::Value`.
+  No public API or wire-format change (guarded by the snapshot tests and the
+  external exact-byte suite); unlocks Codama/Shank support cleanly.
+- **The `server` cargo feature is removed** — the HTTP API server now lives in
+  its own unpublished workspace crate (`server/`, `svmscope-server`), so the
+  library has no features at all and consumers never see axum/tokio in any
+  configuration. Run it with `cargo run -p svmscope-server`. The server's HTTP
+  paths and JSON are unchanged; only the build command moved (Dockerfile/CI
+  updated). If you depended on `features = ["server"]`, build the new crate
+  from the repo instead.
 - Declared `rust-version = "1.91"` (MSRV, verified against the full test suite).
 - README: demo all four `Mutation` constructors; link the
   [svmscope_example](https://github.com/alizeeshan1234/svmscope_example)

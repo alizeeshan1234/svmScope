@@ -6044,7 +6044,6 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 name = "svmscope"
 version = "0.2.2"
 dependencies = [
- "axum",
  "base64 0.23.1",
  "bincode",
  "bs58",
@@ -6066,6 +6065,16 @@ dependencies = [
  "solana-system-interface 3.2.0",
  "solana-transaction",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "svmscope-server"
+version = "0.3.0"
+dependencies = [
+ "axum",
+ "serde",
+ "serde_json",
+ "svmscope",
  "tokio",
  "tower-http",
 ]

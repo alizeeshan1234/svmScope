@@ -110,8 +110,9 @@
 //!
 //! # Feature flags
 //!
-//! - `server` — builds the HTTP API server binary (axum); library consumers
-//!   don't need it and it is off by default.
+//! None — the crate is a plain library. The HTTP API server lives in a
+//! separate (unpublished) workspace crate, so library consumers never compile
+//! axum/tokio.
 //!
 //! This same library powers the svmscope CLI, the HTTP API, and the hosted UI
 //! at <https://svmscope.vercel.app> — identical results in all four.

@@ -23,4 +23,4 @@ handy for testing against a local engine:
 The Rust server serves this same page itself, so for local work you don't need
 Vercel at all:
 
-    cargo run --bin server --features server    # → http://127.0.0.1:3000
+    cargo run -p svmscope-server    # → http://127.0.0.1:3000
