@@ -1,4 +1,9 @@
 //! Dynamic Borsh encoding for values described by an Anchor IDL.
+//!
+//! The encoder walks the typed [`crate::idl_model`] — argument values arrive as
+//! JSON, the shapes come from the model, and every mismatch is a typed
+//! [`Error::ArgumentEncoding`] carrying the dotted path (`config.limits[1]`)
+//! where it happened.
 
 use std::str::FromStr;
 
@@ -6,124 +11,44 @@ use serde_json::{Map, Value};
 use solana_address::Address;
 
 use crate::error::{Error, Result};
+use crate::idl_model::{FieldDef, IdlModel, IdlType, IxDef, TypeBody, VariantDef};
 
 pub(crate) fn encode_arguments(
-    idl: &Value,
-    instruction: &Value,
+    model: &IdlModel,
+    instruction: &IxDef,
     args: &Map<String, Value>,
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    for argument in instruction
-        .get("args")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
+    for argument in &instruction.args {
         let name = argument
-            .get("name")
-            .and_then(Value::as_str)
+            .name
+            .as_deref()
             .ok_or_else(|| Error::InvalidSpec("IDL argument is missing its name".into()))?;
         let ty = argument
-            .get("type")
+            .ty
+            .as_ref()
             .ok_or_else(|| Error::InvalidSpec(format!("IDL argument {name} has no type")))?;
         let value = args.get(name).ok_or_else(|| Error::MissingArgument {
             method: instruction
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("<unknown>")
-                .to_string(),
+                .name
+                .clone()
+                .unwrap_or_else(|| "<unknown>".to_string()),
             argument: name.to_string(),
         })?;
-        encode_value(idl, name, ty, value, output)?;
+        encode_value(model, name, ty, value, output)?;
     }
     Ok(())
 }
 
 fn encode_value(
-    idl: &Value,
+    model: &IdlModel,
     path: &str,
-    ty: &Value,
+    ty: &IdlType,
     value: &Value,
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    if let Some(primitive) = ty.as_str() {
-        return encode_primitive(path, primitive, value, output);
-    }
-
-    if let Some(inner) = ty.get("vec") {
-        let values = value
-            .as_array()
-            .ok_or_else(|| encoding_error(path, "expected an array"))?;
-        write_len(path, values.len(), output)?;
-        for (index, value) in values.iter().enumerate() {
-            encode_value(idl, &format!("{path}[{index}]"), inner, value, output)?;
-        }
-        return Ok(());
-    }
-
-    if let Some(inner) = ty.get("option") {
-        if value.is_null() {
-            output.push(0);
-        } else {
-            output.push(1);
-            encode_value(idl, path, inner, value, output)?;
-        }
-        return Ok(());
-    }
-
-    if let Some(array) = ty.get("array").and_then(Value::as_array) {
-        let inner = array
-            .first()
-            .ok_or_else(|| encoding_error(path, "array type is missing its element type"))?;
-        let expected = array
-            .get(1)
-            .and_then(Value::as_u64)
-            .and_then(|length| usize::try_from(length).ok())
-            .ok_or_else(|| encoding_error(path, "array type has an invalid length"))?;
-        let values = value
-            .as_array()
-            .ok_or_else(|| encoding_error(path, "expected an array"))?;
-        if values.len() != expected {
-            return Err(encoding_error(
-                path,
-                format!("expected {expected} elements, got {}", values.len()),
-            ));
-        }
-        for (index, value) in values.iter().enumerate() {
-            encode_value(idl, &format!("{path}[{index}]"), inner, value, output)?;
-        }
-        return Ok(());
-    }
-
-    if let Some(name) = defined_name(ty) {
-        return encode_defined(idl, path, name, value, output);
-    }
-
-    Err(encoding_error(path, format!("unsupported IDL type {ty}")))
-}
-
-fn encode_primitive(path: &str, ty: &str, value: &Value, output: &mut Vec<u8>) -> Result<()> {
-    macro_rules! unsigned {
-        ($kind:ty) => {{
-            let parsed = parse_u128(value)
-                .and_then(|number| <$kind>::try_from(number).ok())
-                .ok_or_else(|| encoding_error(path, format!("expected {ty}")))?;
-            output.extend_from_slice(&parsed.to_le_bytes());
-            Ok(())
-        }};
-    }
-    macro_rules! signed {
-        ($kind:ty) => {{
-            let parsed = parse_i128(value)
-                .and_then(|number| <$kind>::try_from(number).ok())
-                .ok_or_else(|| encoding_error(path, format!("expected {ty}")))?;
-            output.extend_from_slice(&parsed.to_le_bytes());
-            Ok(())
-        }};
-    }
-
     match ty {
-        "bool" => {
+        IdlType::Bool => {
             output.push(
                 value
                     .as_bool()
@@ -131,17 +56,9 @@ fn encode_primitive(path: &str, ty: &str, value: &Value, output: &mut Vec<u8>) -
             );
             Ok(())
         }
-        "u8" => unsigned!(u8),
-        "u16" => unsigned!(u16),
-        "u32" => unsigned!(u32),
-        "u64" => unsigned!(u64),
-        "u128" => unsigned!(u128),
-        "i8" => signed!(i8),
-        "i16" => signed!(i16),
-        "i32" => signed!(i32),
-        "i64" => signed!(i64),
-        "i128" => signed!(i128),
-        "f32" => {
+        IdlType::U(width) => encode_unsigned(path, *width, value, output),
+        IdlType::I(width) => encode_signed(path, *width, value, output),
+        IdlType::F32 => {
             let number = value
                 .as_f64()
                 .ok_or_else(|| encoding_error(path, "expected f32"))?
@@ -149,14 +66,14 @@ fn encode_primitive(path: &str, ty: &str, value: &Value, output: &mut Vec<u8>) -
             output.extend_from_slice(&number.to_le_bytes());
             Ok(())
         }
-        "f64" => {
+        IdlType::F64 => {
             let number = value
                 .as_f64()
                 .ok_or_else(|| encoding_error(path, "expected f64"))?;
             output.extend_from_slice(&number.to_le_bytes());
             Ok(())
         }
-        "pubkey" | "publicKey" => {
+        IdlType::Pubkey { .. } => {
             let address = value
                 .as_str()
                 .and_then(|address| Address::from_str(address).ok())
@@ -164,7 +81,7 @@ fn encode_primitive(path: &str, ty: &str, value: &Value, output: &mut Vec<u8>) -
             output.extend_from_slice(address.as_ref());
             Ok(())
         }
-        "string" => {
+        IdlType::Str => {
             let string = value
                 .as_str()
                 .ok_or_else(|| encoding_error(path, "expected string"))?;
@@ -172,44 +89,118 @@ fn encode_primitive(path: &str, ty: &str, value: &Value, output: &mut Vec<u8>) -
             output.extend_from_slice(string.as_bytes());
             Ok(())
         }
-        "bytes" => {
+        IdlType::Bytes => {
             let bytes = json_bytes(path, value)?;
             write_len(path, bytes.len(), output)?;
             output.extend_from_slice(&bytes);
             Ok(())
         }
-        _ => Err(encoding_error(path, format!("unsupported primitive {ty}"))),
+        IdlType::Vec(inner) => {
+            let values = value
+                .as_array()
+                .ok_or_else(|| encoding_error(path, "expected an array"))?;
+            write_len(path, values.len(), output)?;
+            for (index, value) in values.iter().enumerate() {
+                encode_value(model, &format!("{path}[{index}]"), inner, value, output)?;
+            }
+            Ok(())
+        }
+        IdlType::Option(inner) => {
+            if value.is_null() {
+                output.push(0);
+            } else {
+                output.push(1);
+                encode_value(model, path, inner, value, output)?;
+            }
+            Ok(())
+        }
+        IdlType::Array { inner, len } => {
+            let expected = usize::try_from(*len)
+                .map_err(|_| encoding_error(path, "array type has an invalid length"))?;
+            let values = value
+                .as_array()
+                .ok_or_else(|| encoding_error(path, "expected an array"))?;
+            if values.len() != expected {
+                return Err(encoding_error(
+                    path,
+                    format!("expected {expected} elements, got {}", values.len()),
+                ));
+            }
+            for (index, value) in values.iter().enumerate() {
+                encode_value(model, &format!("{path}[{index}]"), inner, value, output)?;
+            }
+            Ok(())
+        }
+        IdlType::ArrayMalformed { missing_elem: true } => Err(encoding_error(
+            path,
+            "array type is missing its element type",
+        )),
+        IdlType::ArrayMalformed {
+            missing_elem: false,
+        } => Err(encoding_error(path, "array type has an invalid length")),
+        IdlType::Defined(name) => encode_defined(model, path, name, value, output),
+        IdlType::Unknown {
+            raw,
+            primitive: true,
+            ..
+        } => Err(encoding_error(path, format!("unsupported primitive {raw}"))),
+        IdlType::Unknown {
+            raw,
+            primitive: false,
+            ..
+        } => Err(encoding_error(path, format!("unsupported IDL type {raw}"))),
     }
 }
 
+/// Encode an unsigned integer of `width` bytes, range-checked exactly like the
+/// old per-type `try_from` (no silent truncation).
+fn encode_unsigned(path: &str, width: usize, value: &Value, output: &mut Vec<u8>) -> Result<()> {
+    let expected = || encoding_error(path, format!("expected u{}", width * 8));
+    let parsed = parse_u128(value).ok_or_else(expected)?;
+    if width < 16 && (parsed >> (width * 8)) != 0 {
+        return Err(expected());
+    }
+    output.extend_from_slice(&parsed.to_le_bytes()[..width]);
+    Ok(())
+}
+
+/// Encode a signed integer of `width` bytes; the low bytes of the (range-
+/// checked) two's-complement i128 are exactly the narrow encoding.
+fn encode_signed(path: &str, width: usize, value: &Value, output: &mut Vec<u8>) -> Result<()> {
+    let expected = || encoding_error(path, format!("expected i{}", width * 8));
+    let parsed = parse_i128(value).ok_or_else(expected)?;
+    if width < 16 {
+        let bound = 1i128 << (width * 8 - 1);
+        if parsed < -bound || parsed >= bound {
+            return Err(expected());
+        }
+    }
+    output.extend_from_slice(&parsed.to_le_bytes()[..width]);
+    Ok(())
+}
+
 fn encode_defined(
-    idl: &Value,
+    model: &IdlModel,
     path: &str,
     name: &str,
     value: &Value,
     output: &mut Vec<u8>,
 ) -> Result<()> {
-    let definition = idl
-        .get("types")
-        .and_then(Value::as_array)
-        .and_then(|types| {
-            types
-                .iter()
-                .find(|definition| definition.get("name").and_then(Value::as_str) == Some(name))
-        })
+    let definition = model
+        .type_def(name)
         .ok_or_else(|| encoding_error(path, format!("defined type {name} was not found")))?;
-    let body = definition
-        .get("type")
-        .ok_or_else(|| encoding_error(path, format!("defined type {name} has no body")))?;
-
-    match body.get("kind").and_then(Value::as_str) {
-        Some("struct") => encode_struct(idl, path, body, value, output),
-        Some("enum") => encode_enum(idl, path, body, value, output),
-        Some(kind) => Err(encoding_error(
+    match &definition.body {
+        TypeBody::NoBody => Err(encoding_error(
+            path,
+            format!("defined type {name} has no body"),
+        )),
+        TypeBody::Struct { fields } => encode_struct(model, path, fields.as_deref(), value, output),
+        TypeBody::Enum { variants } => encode_enum(model, path, variants.as_deref(), value, output),
+        TypeBody::Other { kind: Some(kind) } => Err(encoding_error(
             path,
             format!("unsupported defined type kind {kind}"),
         )),
-        None => Err(encoding_error(
+        TypeBody::Other { kind: None } => Err(encoding_error(
             path,
             format!("defined type {name} has no kind"),
         )),
@@ -217,40 +208,36 @@ fn encode_defined(
 }
 
 fn encode_struct(
-    idl: &Value,
+    model: &IdlModel,
     path: &str,
-    definition: &Value,
+    fields: Option<&[FieldDef]>,
     value: &Value,
     output: &mut Vec<u8>,
 ) -> Result<()> {
     let object = value
         .as_object()
         .ok_or_else(|| encoding_error(path, "expected an object"))?;
-    for field in definition
-        .get("fields")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
+    for field in fields.into_iter().flatten() {
         let name = field
-            .get("name")
-            .and_then(Value::as_str)
+            .name
+            .as_deref()
             .ok_or_else(|| encoding_error(path, "struct field has no name"))?;
         let ty = field
-            .get("type")
+            .ty
+            .as_ref()
             .ok_or_else(|| encoding_error(path, format!("struct field {name} has no type")))?;
         let value = object
             .get(name)
             .ok_or_else(|| encoding_error(&format!("{path}.{name}"), "missing field"))?;
-        encode_value(idl, &format!("{path}.{name}"), ty, value, output)?;
+        encode_value(model, &format!("{path}.{name}"), ty, value, output)?;
     }
     Ok(())
 }
 
 fn encode_enum(
-    idl: &Value,
+    model: &IdlModel,
     path: &str,
-    definition: &Value,
+    variants: Option<&[VariantDef]>,
     value: &Value,
     output: &mut Vec<u8>,
 ) -> Result<()> {
@@ -269,42 +256,40 @@ fn encode_enum(
         let (name, payload) = object.iter().next().expect("length checked");
         (name.as_str(), Some(payload))
     };
-    let variants = definition
-        .get("variants")
-        .and_then(Value::as_array)
-        .ok_or_else(|| encoding_error(path, "enum has no variants"))?;
+    let variants = variants.ok_or_else(|| encoding_error(path, "enum has no variants"))?;
     let (index, variant) = variants
         .iter()
         .enumerate()
-        .find(|(_, variant)| variant.get("name").and_then(Value::as_str) == Some(variant_name))
+        .find(|(_, variant)| variant.name.as_deref() == Some(variant_name))
         .ok_or_else(|| encoding_error(path, format!("unknown enum variant {variant_name}")))?;
     output.push(
         u8::try_from(index).map_err(|_| encoding_error(path, "enum has more than 256 variants"))?,
     );
 
-    let Some(fields) = variant.get("fields").and_then(Value::as_array) else {
+    let Some(fields) = &variant.fields else {
         return Ok(());
     };
     if fields.is_empty() {
         return Ok(());
     }
     let payload = payload.ok_or_else(|| encoding_error(path, "enum variant needs a payload"))?;
-    if fields.iter().all(|field| field.get("name").is_some()) {
+    if fields.iter().all(|field| field.name_key) {
         let object = payload
             .as_object()
             .ok_or_else(|| encoding_error(path, "expected an object variant payload"))?;
         for field in fields {
             let name = field
-                .get("name")
-                .and_then(Value::as_str)
+                .name
+                .as_deref()
                 .ok_or_else(|| encoding_error(path, "named enum variant field has no name"))?;
             let ty = field
-                .get("type")
+                .ty
+                .as_ref()
                 .ok_or_else(|| encoding_error(path, format!("enum field {name} has no type")))?;
             let value = object
                 .get(name)
                 .ok_or_else(|| encoding_error(&format!("{path}.{name}"), "missing field"))?;
-            encode_value(idl, &format!("{path}.{name}"), ty, value, output)?;
+            encode_value(model, &format!("{path}.{name}"), ty, value, output)?;
         }
     } else {
         let values = payload
@@ -321,18 +306,13 @@ fn encode_enum(
             ));
         }
         for (index, (field, value)) in fields.iter().zip(values).enumerate() {
-            let ty = field.get("type").unwrap_or(field);
-            encode_value(idl, &format!("{path}[{index}]"), ty, value, output)?;
+            // A `{name, type}` object uses its `type`; a bare type value IS the
+            // type (the old `field.get("type").unwrap_or(field)` fallback).
+            let ty = field.ty.clone().unwrap_or_else(|| field.whole.clone());
+            encode_value(model, &format!("{path}[{index}]"), &ty, value, output)?;
         }
     }
     Ok(())
-}
-
-fn defined_name(ty: &Value) -> Option<&str> {
-    let defined = ty.get("defined")?;
-    defined
-        .as_str()
-        .or_else(|| defined.get("name").and_then(Value::as_str))
 }
 
 fn parse_u128(value: &Value) -> Option<u128> {
@@ -404,6 +384,11 @@ mod tests {
 
     use super::*;
 
+    /// Parse a bare instruction JSON the way the old tests passed one in.
+    fn instruction_model(instruction: Value) -> IdlModel {
+        IdlModel::parse(&json!({ "instructions": [instruction] }))
+    }
+
     #[test]
     fn encodes_nested_anchor_types_as_borsh() {
         let idl = json!({
@@ -457,8 +442,11 @@ mod tests {
             "payload": "0xdeadbeef",
             "amounts": [7, 8, 9]
         });
+        let model = IdlModel::parse(&idl);
+        let ix_model = instruction_model(instruction);
+        let ix = ix_model.instruction("configure").unwrap();
         let mut output = Vec::new();
-        encode_arguments(&idl, &instruction, args.as_object().unwrap(), &mut output).unwrap();
+        encode_arguments(&model, ix, args.as_object().unwrap(), &mut output).unwrap();
 
         let mut expected = vec![1];
         expected.extend_from_slice(&10_u16.to_le_bytes());
@@ -489,14 +477,11 @@ mod tests {
             "unsigned": "340282366920938463463374607431768211455",
             "signed": "-170141183460469231731687303715884105728"
         });
+        let model = IdlModel::parse(&json!({}));
+        let ix_model = instruction_model(instruction);
+        let ix = ix_model.instruction("large").unwrap();
         let mut output = Vec::new();
-        encode_arguments(
-            &json!({}),
-            &instruction,
-            args.as_object().unwrap(),
-            &mut output,
-        )
-        .unwrap();
+        encode_arguments(&model, ix, args.as_object().unwrap(), &mut output).unwrap();
 
         assert_eq!(&output[..16], &u128::MAX.to_le_bytes());
         assert_eq!(&output[16..], &i128::MIN.to_le_bytes());
@@ -518,13 +503,11 @@ mod tests {
             "args": [{ "name": "config", "type": { "defined": "Config" } }]
         });
         let args = json!({ "config": { "count": 300 } });
-        let error = encode_arguments(
-            &idl,
-            &instruction,
-            args.as_object().unwrap(),
-            &mut Vec::new(),
-        )
-        .unwrap_err();
+        let model = IdlModel::parse(&idl);
+        let ix_model = instruction_model(instruction);
+        let ix = ix_model.instruction("configure").unwrap();
+        let error =
+            encode_arguments(&model, ix, args.as_object().unwrap(), &mut Vec::new()).unwrap_err();
 
         assert!(matches!(
             error,

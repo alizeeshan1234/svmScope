@@ -250,20 +250,18 @@ pub(crate) fn enrich(
         });
         match idl.as_ref().and_then(|i| idl::find_ix(i, data)) {
             Some(ix) => {
-                let name = ix.get("name").and_then(|n| n.as_str()).map(titleize);
-                let args = idl::decode_ix_args(ix, data)
+                let name = ix.name.as_deref().map(titleize);
+                let args = idl::decode_ix_args(&ix, data)
                     .into_iter()
                     .map(|(name, ty, value)| IxArg { name, ty, value })
                     .collect();
+                // Top-level entries only (groups keep their group name), exactly
+                // like the old flat read of the instruction's `accounts` array.
                 let named: Vec<Option<String>> = ix
-                    .get("accounts")
-                    .and_then(|a| a.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .map(|acc| acc.get("name").and_then(|n| n.as_str()).map(titleize))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                    .accounts
+                    .iter()
+                    .map(|acc| acc.name.as_deref().map(titleize))
+                    .collect();
                 (name, args, named)
             }
             None => (None, vec![], vec![]),
