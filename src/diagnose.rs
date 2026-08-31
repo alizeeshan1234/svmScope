@@ -116,7 +116,7 @@ pub(crate) fn diagnose_tx(tx: &Value, idl_for: impl Fn(&str) -> Option<Value>) -
         let c = error_code.unwrap_or_default();
         format!(
             "This is a token swap (through an aggregator). Every hop of the route executed, then \
-             the router reverted at the end with its own **error {c}** — on a completed swap that \
+             the router reverted at the end with its own **error {c} (0x{c:x})** — on a completed swap that \
              almost always means the final output landed **below your minimum** (slippage). The \
              program publishes no IDL, so the exact name isn't on-chain, but the pattern is clear."
         )
