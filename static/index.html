@@ -716,6 +716,11 @@ body::after {
 .bp-row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; border-top: 1px solid rgba(255,255,255,.05); font-size: 12.5px; }
 .bp-row:first-of-type { border-top: none; }
 .bp-when { color: var(--text-2); white-space: nowrap; }
+.ai-card { margin-top: 12px; padding: 14px var(--s-3); border: 1px solid var(--border); border-left: 2px solid #a78bfa; border-radius: var(--r-md); background: var(--bg-2); }
+.ai-head { font-size: 12.5px; font-weight: 650; color: #c4b5fd; margin-bottom: 8px; }
+.ai-card p { margin: 0 0 9px; font-size: 13px; line-height: 1.62; color: var(--text-1); }
+.ai-card p:last-child { margin-bottom: 0; }
+.ai-card b { color: var(--text-1); }
 
 /* ---------- badges / replay ---------- */
 .badge {
@@ -1947,6 +1952,7 @@ function renderReplayPanel() {
   $('reconSlot')?.addEventListener('click', reconstructAtSlot);
   $('cfRun')?.addEventListener('click', runCounterfactual);
   $('cfScanAll')?.addEventListener('click', runScan);
+  $('cfNarrate')?.addEventListener('click', runNarrate);
 }
 // Fetch the baseline replay once and cache it on `analysis.replay`.
 async function ensureBaseline() {
@@ -1990,9 +1996,11 @@ function cfBox() {
     <div id="cfResult"></div>
     <div class="cf-scan-row">
       <button class="btn ghost sm" id="cfScanAll">⚡ Scan for all breaking points</button>
-      <span class="cu-note">Or automatically test every account &amp; field to find every threshold that breaks this transaction.</span>
+      <button class="btn ghost sm" id="cfNarrate">🧠 AI security read-out</button>
+      <span class="cu-note">Scan finds every threshold that breaks this transaction; the AI read-out explains them in plain English.</span>
     </div>
     <div id="cfScanResult"></div>
+    <div id="cfNarrateResult"></div>
   </div>`;
 }
 function renderReplay(r) {
@@ -2066,6 +2074,35 @@ async function runScan() {
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '⚡ Scan for all breaking points'; }
   }
+}
+
+// AI security read-out — narrates the transaction + its breaking points.
+async function runNarrate() {
+  const btn = $('cfNarrate');
+  const out = $('cfNarrateResult');
+  if (btn) { btn.disabled = true; btn.textContent = '🧠 Analyzing…'; }
+  if (out) out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>the auditor is reviewing this transaction…</div>';
+  try {
+    const qs = new URLSearchParams(clusterParams()).toString();
+    const res = await api('/narrate/' + encodeURIComponent(currentSig) + (qs ? '?' + qs : ''));
+    if (!res.ok) throw new Error(await res.text());
+    const d = await res.json();
+    if (out) out.innerHTML = renderNarration(d.narration);
+  } catch (e) {
+    if (out) out.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🧠 AI security read-out'; }
+  }
+}
+
+function renderNarration(text) {
+  // Render the prose as paragraphs, bolding **spans**.
+  const html = esc(text || '')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .split(/\n\n+/)
+    .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
+    .join('');
+  return `<div class="ai-card"><div class="ai-head">🧠 AI security read-out</div>${html}</div>`;
 }
 
 function renderBreakingPoints(bps) {
