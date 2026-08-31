@@ -130,6 +130,7 @@ mod idl_encode;
 mod idl_model;
 pub(crate) mod ixname;
 mod program;
+mod diagnose;
 mod invariant;
 pub mod reconstruct;
 mod replay;
@@ -163,6 +164,7 @@ pub use scope::{
     Provenance, Replay, Replayed, Scope,
 };
 pub use invariant::Invariant;
+pub use diagnose::Diagnosis;
 pub use scan::{scan_breaking_points, BreakingPoint, ScanOptions};
 pub use search::Threshold;
 pub use submit::CapturedTransaction;

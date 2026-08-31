@@ -1,0 +1,334 @@
+//! "Why did my transaction fail — and how do I fix it?" — the everyday front
+//! door. Reads the *recorded* on-chain failure (not a drift-prone re-simulation),
+//! resolves the error to a plain name and message (Anchor logs first, then the
+//! program's IDL), and adds a concrete fix. Deterministic and free.
+
+use crate::idl::error_for_code;
+use serde::Serialize;
+use serde_json::Value;
+
+/// A plain-English diagnosis of a transaction's outcome.
+#[derive(Debug, Clone, Serialize)]
+pub struct Diagnosis {
+    /// Whether the transaction failed on-chain.
+    pub failed: bool,
+    /// A short headline — the resolved error name, or "Transaction succeeded".
+    pub headline: String,
+    /// Plain-English explanation of what happened.
+    pub explanation: String,
+    /// A concrete suggested fix, when the failure is a recognized pattern.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
+    /// The program that failed, when identifiable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    /// The custom error code, when the failure carried one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<i64>,
+    /// The failing instruction's index, when the error is an InstructionError.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_index: Option<i64>,
+    /// The tail of the program logs, for context.
+    pub logs: Vec<String>,
+}
+
+/// Diagnose a transaction from its `getTransaction` JSON. `idl_for(program)`
+/// resolves a program id to its IDL JSON (for naming custom error codes).
+pub(crate) fn diagnose_tx(tx: &Value, idl_for: impl Fn(&str) -> Option<Value>) -> Diagnosis {
+    let meta = &tx["meta"];
+    let logs: Vec<String> = meta["logMessages"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let err = &meta["err"];
+
+    if err.is_null() && meta.is_object() {
+        return Diagnosis {
+            failed: false,
+            headline: "Transaction succeeded".into(),
+            explanation: "This transaction landed successfully on-chain — no error to diagnose."
+                .into(),
+            fix: None,
+            program: None,
+            error_code: None,
+            instruction_index: None,
+            logs: tail(&logs),
+        };
+    }
+    if !meta.is_object() {
+        return Diagnosis {
+            failed: true,
+            headline: "Outcome unavailable".into(),
+            explanation: "The RPC returned no metadata for this transaction, so its outcome can't be read.".into(),
+            fix: Some("Try a different RPC endpoint, or a transaction that has finalized.".into()),
+            program: None,
+            error_code: None,
+            instruction_index: None,
+            logs: tail(&logs),
+        };
+    }
+
+    let (instruction_index, error_code) = parse_instruction_error(err);
+    let program = logs.iter().rev().find_map(|l| parse_failed_program(l));
+    let anchor = logs.iter().find_map(|l| parse_anchor_error(l));
+
+    // Resolve the error to a name + message: Anchor logs are richest; otherwise
+    // name the custom code via the failing program's IDL.
+    let (name, message) = if let Some((n, _num, m)) = &anchor {
+        (Some(n.clone()), Some(m.clone()))
+    } else if let (Some(prog), Some(code)) = (&program, error_code) {
+        match idl_for(prog).and_then(|idl| error_for_code(&idl, code as u64)) {
+            Some(e) => (Some(e.name), Some(e.msg)),
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+
+    let headline = name.clone().unwrap_or_else(|| describe_error(err));
+    let explanation = build_explanation(
+        name.as_deref(),
+        message.as_deref(),
+        error_code,
+        instruction_index,
+        program.as_deref(),
+    );
+    let fix = fix_hint(&headline, message.as_deref(), &logs, error_code, name.is_some());
+
+    Diagnosis {
+        failed: true,
+        headline,
+        explanation,
+        fix,
+        program,
+        error_code,
+        instruction_index,
+        logs: tail(&logs),
+    }
+}
+
+/// `{"InstructionError": [index, {"Custom": code}]}` → (index, code).
+fn parse_instruction_error(err: &Value) -> (Option<i64>, Option<i64>) {
+    let arr = match err.get("InstructionError").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return (None, None),
+    };
+    let index = arr.first().and_then(|v| v.as_i64());
+    let code = arr
+        .get(1)
+        .and_then(|v| v.get("Custom"))
+        .and_then(|v| v.as_i64());
+    (index, code)
+}
+
+/// "Program <id> failed: ..." → the program id.
+fn parse_failed_program(log: &str) -> Option<String> {
+    let rest = log.strip_prefix("Program ")?;
+    let (prog, tail) = rest.split_once(' ')?;
+    if tail.starts_with("failed") {
+        Some(prog.to_string())
+    } else {
+        None
+    }
+}
+
+/// Parse an Anchor error log → (name, number, message).
+fn parse_anchor_error(log: &str) -> Option<(String, i64, String)> {
+    if !log.contains("Error Code:") || !log.contains("Error Number:") {
+        return None;
+    }
+    let name = between(log, "Error Code: ", ".")?.trim().to_string();
+    let number = between(log, "Error Number: ", ".")?
+        .trim()
+        .parse::<i64>()
+        .ok()?;
+    let message = log
+        .split("Error Message: ")
+        .nth(1)
+        .map(|m| m.trim_end_matches('.').trim().to_string())
+        .unwrap_or_default();
+    Some((name, number, message))
+}
+
+fn between<'a>(s: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let after = &s[s.find(start)? + start.len()..];
+    Some(&after[..after.find(end).unwrap_or(after.len())])
+}
+
+/// A fallback description for non-custom errors (`InsufficientFundsForFee`, a
+/// named `InstructionError` variant, a bare string).
+fn describe_error(err: &Value) -> String {
+    if let Some(s) = err.as_str() {
+        return s.to_string();
+    }
+    if let Some(ie) = err.get("InstructionError").and_then(|v| v.as_array()) {
+        if let Some(name) = ie.get(1).and_then(|v| v.as_str()) {
+            return name.to_string();
+        }
+        if let Some(c) = ie.get(1).and_then(|v| v.get("Custom")).and_then(|v| v.as_i64()) {
+            return format!("custom error {c}");
+        }
+    }
+    // First key of an object error (e.g. "InsufficientFundsForFee").
+    err.as_object()
+        .and_then(|o| o.keys().next())
+        .cloned()
+        .unwrap_or_else(|| "Transaction failed".to_string())
+}
+
+fn build_explanation(
+    name: Option<&str>,
+    message: Option<&str>,
+    code: Option<i64>,
+    ix: Option<i64>,
+    program: Option<&str>,
+) -> String {
+    let where_ = match (ix, program) {
+        (Some(i), Some(p)) => format!("Instruction {i} (program {}) reverted", short(p)),
+        (Some(i), None) => format!("Instruction {i} reverted"),
+        (None, Some(p)) => format!("Program {} reverted", short(p)),
+        (None, None) => "The transaction reverted".to_string(),
+    };
+    let with = match (name, code, message) {
+        (Some(n), Some(c), Some(m)) if !m.is_empty() => format!(" with **{n}** (error {c}): {m}"),
+        (Some(n), Some(c), _) => format!(" with **{n}** (error {c})"),
+        (Some(n), None, Some(m)) if !m.is_empty() => format!(" with **{n}**: {m}"),
+        (Some(n), None, _) => format!(" with **{n}**"),
+        // Unresolved custom code — no public IDL to name it.
+        (None, Some(c), _) => {
+            format!(" with the program's own **custom error {c}** (no public IDL was available to name it)")
+        }
+        (None, None, _) => " and failed".to_string(),
+    };
+    format!("{where_}{with}.")
+}
+
+/// Deterministic fix suggestions from recognized failure patterns.
+fn fix_hint(
+    headline: &str,
+    message: Option<&str>,
+    logs: &[String],
+    code: Option<i64>,
+    resolved: bool,
+) -> Option<String> {
+    // Only match on the error name + message + non-"Program …" log lines, so a
+    // hex error code in the failure line can't be mistaken for a pattern.
+    let log_text: String = logs
+        .iter()
+        .filter(|l| !l.starts_with("Program ") || l.contains("log:"))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let blob = format!("{headline} {} {log_text}", message.unwrap_or("")).to_lowercase();
+    let table: &[(&[&str], &str)] = &[
+        (
+            &["slippage", "exceededslippage", "price impact", "min out"],
+            "The pool price moved between your quote and execution. Increase the slippage tolerance, or re-quote closer to send time.",
+        ),
+        (
+            &["insufficient funds", "insufficient lamports", "not enough", "insufficient balance"],
+            "An account didn't hold enough SOL or tokens. Fund the account, or lower the amount being moved.",
+        ),
+        (
+            &["blockhash not found", "blockhashnotfound", "expired", "block height exceeded"],
+            "The transaction's blockhash expired before it landed. Fetch a fresh recent blockhash and resend promptly.",
+        ),
+        (
+            &["accountnotfound", "could not find account", "uninitialized", "account does not exist", "notinitialized"],
+            "A required account doesn't exist yet. Create/initialize it (or its associated token account) before this instruction.",
+        ),
+        (
+            &["already in use", "alreadyinitialized", "already initialized"],
+            "The account you're creating already exists. Skip creation, or use the existing account.",
+        ),
+        (
+            &["overflow", "underflow", "divisionbyzero", "arithmetic"],
+            "An arithmetic overflow/underflow — usually a decimals or amount mismatch. Check token decimals and the magnitudes you're passing.",
+        ),
+        (
+            &["invalidaccountdata", "accountownedbywrongprogram", "wrong program"],
+            "An account isn't in the state/owner this program expects — often it was closed, reallocated, or you passed the wrong one. Double-check the account addresses.",
+        ),
+        (
+            &["signature verification failed", "missing required signature", "signer"],
+            "A required signer didn't sign. Make sure every account marked as a signer is included and signs the transaction.",
+        ),
+    ];
+    for (needles, fix) in table {
+        if needles.iter().any(|n| blob.contains(n)) {
+            return Some((*fix).to_string());
+        }
+    }
+    // No recognized pattern: give a useful generic pointer for a custom error.
+    match (code, resolved) {
+        (Some(c), false) => Some(format!(
+            "The program rejected the inputs with its own error {c}, but it publishes no on-chain IDL, so svmscope can't name it. Check the program's source or docs for what error {c} means, and the values this instruction expects."
+        )),
+        (Some(_), true) => Some(
+            "The program rejected the inputs with this error. Review what that instruction requires and adjust the accounts or arguments accordingly.".into(),
+        ),
+        _ => None,
+    }
+}
+
+fn tail(logs: &[String]) -> Vec<String> {
+    let n = logs.len();
+    logs[n.saturating_sub(16)..].to_vec()
+}
+
+fn short(a: &str) -> String {
+    if a.len() > 12 {
+        format!("{}…{}", &a[..4], &a[a.len() - 4..])
+    } else {
+        a.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn diagnoses_an_anchor_slippage_failure_with_a_fix() {
+        let tx = json!({
+            "meta": {
+                "err": { "InstructionError": [2, { "Custom": 6001 }] },
+                "logMessages": [
+                    "Program Whirl invoke [1]",
+                    "Program log: AnchorError occurred. Error Code: SlippageToleranceExceeded. Error Number: 6001. Error Message: Slippage tolerance exceeded.",
+                    "Program Whirl failed: custom program error: 0x1771"
+                ]
+            }
+        });
+        let d = diagnose_tx(&tx, |_| None);
+        assert!(d.failed);
+        assert_eq!(d.headline, "SlippageToleranceExceeded");
+        assert_eq!(d.error_code, Some(6001));
+        assert_eq!(d.instruction_index, Some(2));
+        assert!(d.explanation.contains("Instruction 2"));
+        assert!(d.fix.as_deref().unwrap().to_lowercase().contains("slippage"));
+    }
+
+    #[test]
+    fn names_a_custom_code_via_the_idl_when_no_anchor_log() {
+        let tx = json!({
+            "meta": {
+                "err": { "InstructionError": [0, { "Custom": 6024 }] },
+                "logMessages": ["Program Pmp invoke [1]", "Program Pmp failed: custom program error: 0x1788"]
+            }
+        });
+        let idl = json!({ "errors": [{ "code": 6024, "name": "PoolPaused", "msg": "The pool is paused" }] });
+        let d = diagnose_tx(&tx, |_| Some(idl.clone()));
+        assert_eq!(d.headline, "PoolPaused");
+        assert!(d.explanation.contains("The pool is paused"));
+    }
+
+    #[test]
+    fn reports_success_cleanly() {
+        let tx = json!({ "meta": { "err": null, "logMessages": [] } });
+        let d = diagnose_tx(&tx, |_| None);
+        assert!(!d.failed);
+        assert_eq!(d.headline, "Transaction succeeded");
+    }
+}

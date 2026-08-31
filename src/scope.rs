@@ -222,6 +222,18 @@ impl Scope {
         })
     }
 
+    /// Diagnose a transaction: **why did it fail, and how do I fix it?** Reads the
+    /// *recorded* on-chain outcome (not a drift-prone re-simulation), resolves the
+    /// error to a plain name and message — from the Anchor logs, or the failing
+    /// program's on-chain IDL — and suggests a concrete fix. Free.
+    pub fn diagnose(&self, input: &str) -> Result<crate::Diagnosis> {
+        let signature = self.resolve_signature(input)?;
+        let tx = self.transaction_json(&signature)?;
+        Ok(crate::diagnose::diagnose_tx(&tx, |program| {
+            self.idl_for(program)
+        }))
+    }
+
     /// Reconstruct the transaction's world for local replay — every touched
     /// account, every program ELF, the on-chain outcome, and the IDLs needed to
     /// name errors and fields. **All RPC happens here**; every run of the
