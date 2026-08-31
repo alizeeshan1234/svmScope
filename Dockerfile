@@ -1,5 +1,8 @@
 # ---- build ----
-FROM rust:1-slim AS build
+# Pinned to bookworm: the runtime stage below is bookworm (glibc 2.36), and the
+# unpinned rust:1-slim moved to trixie (glibc 2.41), producing binaries that
+# fail at startup with "GLIBC_2.38 not found".
+FROM rust:1-slim-bookworm AS build
 WORKDIR /app
 
 # Native deps for solana-client (TLS, protobuf) and the build. litesvm 0.15
