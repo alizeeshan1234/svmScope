@@ -1,30 +1,36 @@
-//! Auto breaking-point scan — the deterministic "agent" that finds *every* way a
-//! transaction can be broken, across all its accounts.
+//! Auto breaking-point scan — the deterministic "beast" that finds *every*
+//! single-change way a transaction can break, driven by each account's schema.
 //!
-//! For each account it tests the full break surface:
-//! - **closed** — remove the account (drop it to 0 lamports);
-//! - **frozen** — flip a token account's state to frozen;
-//! - **authority changed** — swap a token account's owner/authority;
-//! - **balance thresholds** — binary-search SOL, and each numeric field, for the
-//!   value where the outcome flips.
+//! For every touched account it tests, by type:
+//! - **existence** — close the account (0 lamports);
+//! - **owner program** — reassign the program that owns it;
+//! - **every decoded field** — numeric fields binary-searched for the threshold
+//!   that flips the outcome; pubkey fields (authority, mint, delegate…)
+//!   substituted; enum/flag bytes (state…) swept for a breaking value.
 //!
 //! The replay's world is fetched once; every candidate is a *local* LiteSVM run,
 //! so a whole sweep costs no extra RPC. Free — pure current-state replay.
 
+use crate::decode::DecodedAccount;
 use crate::error::Result;
 use crate::replay::Mutation;
 use crate::scope::Scope;
 use crate::search::search_threshold;
+use crate::Replay;
 use serde::Serialize;
+
+const SYSTEM: &str = "11111111111111111111111111111111";
+const TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
 /// One way the transaction can be broken.
 #[derive(Debug, Clone, Serialize)]
 pub struct BreakingPoint {
     /// The account whose change breaks it.
     pub account: String,
-    /// The field or knob — `SOL balance`, `existence`, `state`, `authority`, `reserveA`…
+    /// The field or knob — `existence`, `owner program`, `SOL balance`, `state`,
+    /// `authority`, `reserveA`…
     pub field: String,
-    /// A human description: "is closed", "is frozen", "changes", "drops below 12,985".
+    /// A human description: "is closed", "changes", "is frozen", "drops below N".
     pub condition: String,
     /// The field's current value where relevant (0 otherwise).
     pub current: u64,
@@ -35,7 +41,7 @@ pub struct BreakingPoint {
 pub struct ScanOptions {
     /// Maximum accounts to scan (touched-account order).
     pub max_accounts: usize,
-    /// Maximum decoded numeric fields to try per account.
+    /// Maximum decoded fields to probe per account.
     pub max_fields_per_account: usize,
 }
 
@@ -43,7 +49,7 @@ impl Default for ScanOptions {
     fn default() -> Self {
         ScanOptions {
             max_accounts: 32,
-            max_fields_per_account: 12,
+            max_fields_per_account: 24,
         }
     }
 }
@@ -54,8 +60,8 @@ fn is_infra(address: &str) -> bool {
     address.starts_with("Sysvar")
         || matches!(
             address,
-            "11111111111111111111111111111111"
-                | "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+            SYSTEM
+                | TOKEN
                 | "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
                 | "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
                 | "ComputeBudget111111111111111111111111111111"
@@ -65,7 +71,7 @@ fn is_infra(address: &str) -> bool {
         )
 }
 
-/// Scan a transaction for every way it can be broken.
+/// Scan a transaction for every single-change way it can be broken.
 pub fn scan_breaking_points(
     scope: &Scope,
     signature: &str,
@@ -88,85 +94,102 @@ pub fn scan_breaking_points(
             continue;
         }
 
-        // 1) SOL balance — closed (needs to exist) vs a real balance floor.
+        // Existence — close the account (0 lamports) / a real SOL floor.
         if info.lamports > 0 {
-            let hi = info.lamports.saturating_mul(2);
             let acct = account.clone();
-            if let Some(th) = search_threshold(0, hi, |v| {
-                Ok(replay
-                    .simulate(&[Mutation::lamports(acct.clone(), v)])?
-                    .result
-                    .success)
-            })? {
-                let (field, condition) = if th.flips_at <= 1 {
-                    ("existence".to_string(), "is closed".to_string())
+            if let Some(th) = search_threshold(0, info.lamports.saturating_mul(2), |v| sim(&replay, &[Mutation::lamports(acct.clone(), v)]))? {
+                if th.flips_at <= 1 {
+                    out.push(bp(account, "existence", "is closed", info.lamports));
                 } else {
-                    (
-                        "SOL balance".to_string(),
+                    out.push(bp(
+                        account,
+                        "SOL balance",
                         threshold_phrase(th.flips_at, !th.low_success),
-                    )
-                };
-                out.push(bp(account, field, condition, info.lamports));
+                        info.lamports,
+                    ));
+                }
             }
+        }
+
+        // Owner program — reassign it (any program that checks ownership breaks).
+        let other_owner = if info.owner == SYSTEM { TOKEN } else { SYSTEM };
+        if flips(&replay, baseline, &[Mutation::owner(account.clone(), other_owner)])? {
+            out.push(bp(account, "owner program", "changes", 0));
         }
 
         let Some(decoded) = info.decoded else {
             continue;
         };
-        let is_token = decoded.type_name == "SPL Token Account";
 
-        // 2) Numeric u64 field thresholds.
+        // Every decoded field, dispatched by type.
         let mut tried = 0usize;
         for f in &decoded.fields {
             if tried >= opts.max_fields_per_account {
                 break;
             }
-            if f.ty != "u64" || !f.editable {
-                continue;
+            if !f.editable {
+                continue; // coption / non-scalar fields we can't safely perturb
             }
-            let Ok(current) = f.value.parse::<u64>() else {
-                continue;
+            let probed = match f.ty.as_str() {
+                "u64" => probe_u64(&replay, account, f, &mut out)?,
+                "u8" => probe_u8(&replay, baseline, account, f, &mut out)?,
+                "pubkey" => probe_pubkey(&replay, baseline, account, f, &decoded, &mut out)?,
+                _ => false,
             };
-            if current == 0 {
-                continue;
-            }
-            tried += 1;
-            let (acct, off) = (account.clone(), f.offset);
-            if let Some(th) = search_threshold(0, current.saturating_mul(2), |v| {
-                Ok(replay
-                    .simulate(&[Mutation::patch(acct.clone(), off, v.to_le_bytes().to_vec())])?
-                    .result
-                    .success)
-            })? {
-                out.push(bp(
-                    account,
-                    f.name.clone(),
-                    threshold_phrase(th.flips_at, !th.low_success),
-                    current,
-                ));
-            }
-        }
-
-        // 3) Discrete token-account breaks: frozen, authority changed.
-        if is_token {
-            // Frozen — state → 2 blocks any transfer in or out.
-            if let Some(off) = field_offset(&decoded, "state") {
-                let frozen = field_value(&decoded, "state") == Some("2");
-                if !frozen && flips(&replay, baseline, account, off, vec![2])? {
-                    out.push(bp(account, "state", "is frozen", 0));
-                }
-            }
-            // Authority changed — swap the owner/authority pubkey (offset 32).
-            if let Some(off) = field_offset(&decoded, "owner") {
-                let other = [0x11u8; 32];
-                if flips(&replay, baseline, account, off, other.to_vec())? {
-                    out.push(bp(account, "authority", "changes", 0));
-                }
+            if probed {
+                tried += 1;
             }
         }
     }
 
     Ok(out)
+}
+
+/// A numeric field: binary-search its threshold. Returns whether it was probed.
+fn probe_u64(replay: &Replay, account: &str, f: &crate::decode::Field, out: &mut Vec<BreakingPoint>) -> Result<bool> {
+    let Ok(current) = f.value.parse::<u64>() else {
+        return Ok(false);
+    };
+    if current == 0 {
+        return Ok(false);
+    }
+    let (acct, off) = (account.to_string(), f.offset);
+    if let Some(th) = search_threshold(0, current.saturating_mul(2), |v| sim(replay, &[Mutation::patch(acct.clone(), off, v.to_le_bytes().to_vec())]))? {
+        out.push(bp(account, f.name.clone(), threshold_phrase(th.flips_at, !th.low_success), current));
+    }
+    Ok(true)
+}
+
+/// A small enum/flag byte: try a few distinct values for one that breaks it.
+fn probe_u8(replay: &Replay, baseline: bool, account: &str, f: &crate::decode::Field, out: &mut Vec<BreakingPoint>) -> Result<bool> {
+    let current = f.value.parse::<u8>().ok();
+    // Try the recognizable "frozen" (2) first so a token state reports as frozen.
+    for cand in [2u8, 0, 255] {
+        if Some(cand) == current {
+            continue;
+        }
+        if flips(replay, baseline, &[Mutation::patch(account.to_string(), f.offset, vec![cand])])? {
+            let cond = if f.name == "state" && cand == 2 {
+                "is frozen".to_string()
+            } else {
+                format!("changes (e.g. set to {cand})")
+            };
+            out.push(bp(account, f.name.clone(), cond, current.unwrap_or(0) as u64));
+            break;
+        }
+    }
+    Ok(true)
+}
+
+/// A pubkey field (authority, mint, delegate…): substitute it and see if the
+/// program's check breaks.
+fn probe_pubkey(replay: &Replay, baseline: bool, account: &str, f: &crate::decode::Field, _d: &DecodedAccount, out: &mut Vec<BreakingPoint>) -> Result<bool> {
+    let sentinel = vec![0x11u8; f.size.max(32)];
+    if flips(replay, baseline, &[Mutation::patch(account.to_string(), f.offset, sentinel)])? {
+        let label = if f.name == "owner" { "authority" } else { f.name.as_str() };
+        out.push(bp(account, label, "changes", 0));
+    }
+    Ok(true)
 }
 
 fn bp(account: &str, field: impl Into<String>, condition: impl Into<String>, current: u64) -> BreakingPoint {
@@ -178,30 +201,16 @@ fn bp(account: &str, field: impl Into<String>, condition: impl Into<String>, cur
     }
 }
 
-fn field_offset(d: &crate::decode::DecodedAccount, name: &str) -> Option<usize> {
-    d.fields.iter().find(|f| f.name == name).map(|f| f.offset)
+/// Simulate one mutation set; the transaction's success.
+fn sim(replay: &Replay, muts: &[Mutation]) -> Result<bool> {
+    Ok(replay.simulate(muts)?.result.success)
 }
 
-fn field_value<'a>(d: &'a crate::decode::DecodedAccount, name: &str) -> Option<&'a str> {
-    d.fields.iter().find(|f| f.name == name).map(|f| f.value.as_str())
+/// Whether a mutation set flips the outcome vs `baseline`.
+fn flips(replay: &Replay, baseline: bool, muts: &[Mutation]) -> Result<bool> {
+    Ok(sim(replay, muts)? != baseline)
 }
 
-/// Whether patching `bytes` at `offset` flips the outcome vs `baseline`.
-fn flips(
-    replay: &crate::Replay,
-    baseline: bool,
-    account: &str,
-    offset: usize,
-    bytes: Vec<u8>,
-) -> Result<bool> {
-    let out = replay
-        .simulate(&[Mutation::patch(account.to_string(), offset, bytes)])?
-        .result
-        .success;
-    Ok(out != baseline)
-}
-
-/// Phrase a numeric threshold.
 fn threshold_phrase(flips_at: u64, breaks_below: bool) -> String {
     if breaks_below {
         format!("drops below {flips_at}")

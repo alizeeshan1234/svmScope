@@ -1191,6 +1191,15 @@ pub enum Mutation {
         /// out-of-range value is a hard error, never a silent truncation.
         value: i128,
     },
+    /// Reassign the program that **owns** an account (not a data field — the
+    /// account's owner program itself). Breaks any program that checks it owns
+    /// its accounts.
+    Owner {
+        /// The account to mutate.
+        address: String,
+        /// The new owner program, base58.
+        owner: String,
+    },
 }
 
 impl Mutation {
@@ -1207,6 +1216,14 @@ impl Mutation {
         Mutation::Data {
             address: address.into(),
             bytes,
+        }
+    }
+
+    /// Reassign an account's owner program.
+    pub fn owner(address: impl Into<String>, owner: impl Into<String>) -> Mutation {
+        Mutation::Owner {
+            address: address.into(),
+            owner: owner.into(),
         }
     }
 
@@ -1244,7 +1261,8 @@ impl Mutation {
             Mutation::Lamports { address, .. }
             | Mutation::Data { address, .. }
             | Mutation::DataPatch { address, .. }
-            | Mutation::Field { address, .. } => address,
+            | Mutation::Field { address, .. }
+            | Mutation::Owner { address, .. } => address,
         }
     }
 }
@@ -1324,6 +1342,10 @@ fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
             return Err(Error::InvalidSpec(format!(
                 "field mutation \"{field}\" was not resolved before application"
             )));
+        }
+        Mutation::Owner { owner, .. } => {
+            account.owner = Address::from_str(owner)
+                .map_err(|_| Error::InvalidAddress(owner.to_string()))?;
         }
     }
     svm.set_account(addr, account).map_err(|e| {
