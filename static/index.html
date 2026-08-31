@@ -712,6 +712,10 @@ body::after {
 .cf-select { background: var(--bg-2); color: var(--text-1); border: 1px solid var(--border-strong); border-radius: var(--r-sm); padding: 4px 8px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 .cf-card { margin-top: 10px; padding: 10px var(--s-3); border-radius: var(--r-sm); background: var(--green-soft); border: 1px solid rgba(52,211,153,.24); font-size: 13px; color: var(--text-1); }
 .cf-card b { color: var(--text-1); }
+.cf-scan-row { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bp-row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; border-top: 1px solid rgba(255,255,255,.05); font-size: 12.5px; }
+.bp-row:first-of-type { border-top: none; }
+.bp-when { color: var(--text-2); white-space: nowrap; }
 
 /* ---------- badges / replay ---------- */
 .badge {
@@ -1942,6 +1946,7 @@ function renderReplayPanel() {
   });
   $('reconSlot')?.addEventListener('click', reconstructAtSlot);
   $('cfRun')?.addEventListener('click', runCounterfactual);
+  $('cfScanAll')?.addEventListener('click', runScan);
 }
 // Fetch the baseline replay once and cache it on `analysis.replay`.
 async function ensureBaseline() {
@@ -1983,6 +1988,11 @@ function cfBox() {
       <button class="btn ghost sm" id="cfRun">Find it</button>
     </div>
     <div id="cfResult"></div>
+    <div class="cf-scan-row">
+      <button class="btn ghost sm" id="cfScanAll">⚡ Scan for all breaking points</button>
+      <span class="cu-note">Or automatically test every account &amp; field to find every threshold that breaks this transaction.</span>
+    </div>
+    <div id="cfScanResult"></div>
   </div>`;
 }
 function renderReplay(r) {
@@ -2037,6 +2047,43 @@ function renderCounterfactual(d) {
   return `<div class="cf-card">
     <div><b class="mono">${esc(short(d.account))}</b> needs at least <b>${fmt(d.flips_at)}</b> lamports for this transaction to work.</div>
     <div class="cu-note" style="margin-top:4px">${line} &nbsp;·&nbsp; (tried ${d.evaluations} times to pin down the exact number.)</div>
+  </div>`;
+}
+
+// Auto-scan: test every account & field for the thresholds that break the tx.
+async function runScan() {
+  const btn = $('cfScanAll');
+  const out = $('cfScanResult');
+  if (btn) { btn.disabled = true; btn.textContent = '⚡ Scanning…'; }
+  if (out) out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>testing every account &amp; field…</div>';
+  try {
+    const qs = new URLSearchParams(clusterParams()).toString();
+    const res = await api('/scan/' + encodeURIComponent(currentSig) + (qs ? '?' + qs : ''));
+    if (!res.ok) throw new Error(await res.text());
+    if (out) out.innerHTML = renderBreakingPoints(await res.json());
+  } catch (e) {
+    if (out) out.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⚡ Scan for all breaking points'; }
+  }
+}
+
+function renderBreakingPoints(bps) {
+  if (!bps.length) {
+    return `<div class="drift-inline">No breaking points found in the tested range — this transaction is robust to the balances and fields checked.</div>`;
+  }
+  const rows = bps.map(bp => {
+    const when = bp.breaks_below
+      ? `drops below <b>${fmt(bp.flips_at)}</b>`
+      : `reaches <b>${fmt(bp.flips_at)}</b> or above`;
+    const label = bp.field === 'SOL balance'
+      ? `${esc(short(bp.account))} · SOL balance`
+      : `${esc(short(bp.account))} · <span class="mono">${esc(bp.field)}</span>`;
+    return `<div class="bp-row"><span>${label}</span><span class="bp-when">${when}</span></div>`;
+  }).join('');
+  return `<div class="cf-card">
+    <div style="margin-bottom:8px"><b>${bps.length}</b> breaking point${bps.length === 1 ? '' : 's'} found — this transaction breaks when:</div>
+    ${rows}
   </div>`;
 }
 

@@ -746,6 +746,42 @@ async fn counterfactual_handler(
     }
 }
 
+/// GET /scan/:signature — auto-scan every account field (and SOL balance) for
+/// the numeric thresholds that flip the transaction's outcome. Free: local
+/// current-state replays, no archive.
+async fn scan_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<ClusterQuery>,
+) -> Result<Json<Vec<svmscope::BreakingPoint>>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let out = tokio::task::spawn_blocking(
+        move || -> Result<Vec<svmscope::BreakingPoint>, svmscope::Error> {
+            let scope = Scope::new(url);
+            let analysis = scope.analyze(&signature)?;
+            let accounts: Vec<String> =
+                analysis.accounts.iter().map(|a| a.address.clone()).collect();
+            svmscope::scan_breaking_points(
+                &scope,
+                &signature,
+                &accounts,
+                svmscope::ScanOptions::default(),
+            )
+        },
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
+
+    match out {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err(lib_err(e)),
+    }
+}
+
 /// GET /freeze/:signature — capture a self-contained fixture for offline replay.
 async fn freeze_handler(
     Path(signature): Path<String>,
@@ -966,6 +1002,7 @@ async fn main() {
         .route("/replay/{signature}", get(replay_handler))
         .route("/replay_at_slot/{signature}", get(replay_at_slot_handler))
         .route("/counterfactual/{signature}", get(counterfactual_handler))
+        .route("/scan/{signature}", get(scan_handler))
         .route("/freeze/{signature}", get(freeze_handler))
         .route("/stats", get(stats_handler))
         // Order matters: rate limit first (cheapest rejection), then serve from
