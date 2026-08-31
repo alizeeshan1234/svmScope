@@ -85,14 +85,41 @@ pub(crate) fn diagnose_tx(tx: &Value, idl_for: impl Fn(&str) -> Option<Value>) -
         (None, None)
     };
 
-    let headline = name.clone().unwrap_or_else(|| describe_error(err));
-    let explanation = build_explanation(
-        name.as_deref(),
-        message.as_deref(),
-        error_code,
-        instruction_index,
-        program.as_deref(),
-    );
+    // When the error can't be named (no IDL / no Anchor log), interpret it from
+    // context: an aggregator swap that ran every hop and then reverted on its own
+    // final check is, in practice, a slippage / minimum-output failure. Lead with
+    // that meaning instead of a bare code.
+    let is_swap = logs.iter().any(|l| {
+        let ll = l.to_lowercase();
+        ll.contains("log:") && (ll.contains("swap") || ll.contains("route"))
+    });
+    let swap_slippage = name.is_none() && error_code.is_some() && is_swap;
+
+    let headline = if let Some(n) = &name {
+        n.clone()
+    } else if swap_slippage {
+        "Slippage — output below your minimum (likely)".to_string()
+    } else {
+        describe_error(err)
+    };
+
+    let explanation = if swap_slippage {
+        let c = error_code.unwrap_or_default();
+        format!(
+            "This is a token swap (through an aggregator). Every hop of the route executed, then \
+             the router reverted at the end with its own **error {c}** — on a completed swap that \
+             almost always means the final output landed **below your minimum** (slippage). The \
+             program publishes no IDL, so the exact name isn't on-chain, but the pattern is clear."
+        )
+    } else {
+        build_explanation(
+            name.as_deref(),
+            message.as_deref(),
+            error_code,
+            instruction_index,
+            program.as_deref(),
+        )
+    };
     let fix = fix_hint(&headline, message.as_deref(), &logs, error_code, name.is_some());
 
     Diagnosis {
