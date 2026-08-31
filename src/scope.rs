@@ -1196,6 +1196,21 @@ impl Replay {
         fx.recorded = self.recorded.clone();
         Ok(fx)
     }
+
+    /// Generate a self-contained Rust regression test that freezes this incident
+    /// permanently: it loads the fixture at `fixture_path` (write
+    /// `to_fixture()?.to_json()?` there next to your test), rebuilds the replay
+    /// fully offline, and asserts the same outcome this replay produces now — a
+    /// reverting incident also pins the exact error. Returns the test source.
+    pub fn regression_test(&self, test_name: &str, fixture_path: &str) -> Result<String> {
+        let outcome = self.run()?;
+        Ok(crate::report::rust_regression_test(
+            test_name,
+            fixture_path,
+            outcome.result.success,
+            outcome.result.error.as_deref(),
+        ))
+    }
 }
 
 /// The outcome of one local replay: the result itself, what changed, and — on
