@@ -490,6 +490,20 @@ impl ReplayContext {
         self.time_travel = tt;
     }
 
+    /// Replace a loaded program's ELF bytecode (for A/B patch comparison).
+    /// Returns the previous ELF, or `None` if `program_id` isn't loaded here as
+    /// an executable program.
+    pub(crate) fn replace_program(&mut self, program_id: &str, elf: Vec<u8>) -> Option<Vec<u8>> {
+        for (addr, l) in self.loaded.iter_mut() {
+            if addr.to_string() == program_id {
+                if let Loaded::Program(existing) = l {
+                    return Some(std::mem::replace(existing, elf));
+                }
+            }
+        }
+        None
+    }
+
     /// Enumerate every loaded account with the facts a fidelity certificate
     /// needs — provenance and hashing are derived from this in the scope layer.
     pub(crate) fn loaded_info(&self) -> Vec<LoadedInfo> {

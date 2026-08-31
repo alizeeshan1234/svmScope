@@ -820,6 +820,57 @@ impl FidelityCertificate {
     }
 }
 
+/// The result of replaying a transaction against an original program and a
+/// patched one — the pre-deployment "does this patch change what happened?" gate.
+#[derive(Debug, Clone, Serialize)]
+pub struct PatchComparison {
+    /// The program whose ELF was swapped.
+    pub program: String,
+    /// The outcome with the original (currently-loaded) program.
+    pub before: ReplayResult,
+    /// The outcome with the patched program.
+    pub after: ReplayResult,
+}
+
+impl PatchComparison {
+    /// Whether the patch flipped success ↔ failure.
+    pub fn success_changed(&self) -> bool {
+        self.before.success != self.after.success
+    }
+
+    /// Whether the patch changed the (formatted) error.
+    pub fn error_changed(&self) -> bool {
+        self.before.error != self.after.error
+    }
+
+    /// The change in compute units (patched − original), which may be negative.
+    pub fn compute_delta(&self) -> i64 {
+        self.after.compute_units as i64 - self.before.compute_units as i64
+    }
+
+    /// Whether the patch changed anything observable (outcome, error, or compute).
+    pub fn changed(&self) -> bool {
+        self.success_changed() || self.error_changed() || self.compute_delta() != 0
+    }
+
+    /// A one-line human summary of what the patch changed.
+    pub fn summary(&self) -> String {
+        if !self.changed() {
+            return format!("{}: no observable change", self.program);
+        }
+        let outcome = match (self.before.success, self.after.success) {
+            (false, true) => "revert → success".to_string(),
+            (true, false) => "success → revert".to_string(),
+            _ => format!(
+                "{:?} → {:?}",
+                self.before.error.as_deref().unwrap_or("ok"),
+                self.after.error.as_deref().unwrap_or("ok")
+            ),
+        };
+        format!("{}: {outcome} · compute {:+}", self.program, self.compute_delta())
+    }
+}
+
 /// A transaction's reconstructed world — fetched once via [`Scope::replay`],
 /// then replayed locally any number of times. Every run builds a pristine SVM,
 /// so runs are independent, repeatable, and free.
@@ -1078,6 +1129,42 @@ impl Replay {
         Ok(keep)
     }
 
+    // --- patch lab -----------------------------------------------------------
+
+    /// Replace a program's ELF bytecode in this replay's world, for A/B patch
+    /// testing. Returns the previous ELF (restore it by calling again with that).
+    /// Errors if `program_id` isn't loaded as a program in this replay.
+    pub fn replace_program(&mut self, program_id: &str, elf: Vec<u8>) -> Result<Vec<u8>> {
+        self.ctx.replace_program(program_id, elf).ok_or_else(|| {
+            Error::InvalidSpec(format!(
+                "{program_id} is not a loaded program in this replay"
+            ))
+        })
+    }
+
+    /// Replay the transaction against the original program and against
+    /// `patched_elf`, and report the difference — the pre-deployment gate "does
+    /// this patch change what really happened?". `mutations` apply to both runs.
+    /// `self` is left unchanged: the patch is swapped in for the comparison, then
+    /// the original restored.
+    pub fn compare_patch(
+        &mut self,
+        program_id: &str,
+        patched_elf: Vec<u8>,
+        mutations: &[Mutation],
+    ) -> Result<PatchComparison> {
+        let before = self.simulate(mutations)?.result;
+        let original = self.replace_program(program_id, patched_elf)?;
+        let after = self.simulate(mutations)?.result;
+        // Restore the original ELF so the replay is reusable afterwards.
+        self.ctx.replace_program(program_id, original);
+        Ok(PatchComparison {
+            program: program_id.to_string(),
+            before,
+            after,
+        })
+    }
+
     /// Run a suite of scenarios, each against a fresh copy of the state.
     /// Mutations across the whole suite are validated before anything executes.
     pub fn run_suite(&self, scenarios: &[Scenario]) -> Result<Vec<ScenarioOutcome>> {
@@ -1289,6 +1376,35 @@ mod wait_tests {
             "reconstructed@442384762"
         );
         assert_eq!(Fidelity::Exact { slot: 100 }.label(), "exact@100");
+    }
+
+    #[test]
+    fn patch_comparison_reports_what_changed() {
+        let mk = |success: bool, err: Option<&str>, cu: u64| ReplayResult {
+            success,
+            error: err.map(String::from),
+            error_name: None,
+            logs: Vec::new(),
+            compute_units: cu,
+        };
+
+        let fixed = PatchComparison {
+            program: "P".to_string(),
+            before: mk(false, Some("Custom(6001)"), 100),
+            after: mk(true, None, 120),
+        };
+        assert!(fixed.success_changed());
+        assert!(fixed.changed());
+        assert_eq!(fixed.compute_delta(), 20);
+        assert!(fixed.summary().contains("revert → success"), "{}", fixed.summary());
+
+        let unchanged = PatchComparison {
+            program: "P".to_string(),
+            before: mk(true, None, 100),
+            after: mk(true, None, 100),
+        };
+        assert!(!unchanged.changed());
+        assert!(unchanged.summary().contains("no observable change"));
     }
 
     #[test]
