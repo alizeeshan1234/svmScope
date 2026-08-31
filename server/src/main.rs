@@ -782,6 +782,22 @@ async fn scan_handler(
     }
 }
 
+/// GET /diagnose/:signature — plain-English "why did it fail, and how do I fix
+/// it?" over the recorded on-chain outcome. Free.
+async fn diagnose_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<ClusterQuery>,
+) -> Result<Json<svmscope::Diagnosis>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let out = tokio::task::spawn_blocking(move || Scope::new(url).diagnose(&signature))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+    match out {
+        Ok(d) => Ok(Json(d)),
+        Err(e) => Err(lib_err(e)),
+    }
+}
+
 /// GET /freeze/:signature — capture a self-contained fixture for offline replay.
 async fn freeze_handler(
     Path(signature): Path<String>,
@@ -1003,6 +1019,7 @@ async fn main() {
         .route("/replay_at_slot/{signature}", get(replay_at_slot_handler))
         .route("/counterfactual/{signature}", get(counterfactual_handler))
         .route("/scan/{signature}", get(scan_handler))
+        .route("/diagnose/{signature}", get(diagnose_handler))
         .route("/freeze/{signature}", get(freeze_handler))
         .route("/stats", get(stats_handler))
         // Order matters: rate limit first (cheapest rejection), then serve from

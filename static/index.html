@@ -721,6 +721,14 @@ body::after {
 .ai-card p { margin: 0 0 9px; font-size: 13px; line-height: 1.62; color: var(--text-1); }
 .ai-card p:last-child { margin-bottom: 0; }
 .ai-card b { color: var(--text-1); }
+.dx-card { margin-bottom: 16px; padding: 16px 18px; border: 1px solid rgba(248,113,113,.3); border-left: 3px solid var(--red); border-radius: var(--r-md); background: var(--red-soft); }
+.dx-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.dx-badge { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--red); background: rgba(248,113,113,.14); padding: 3px 9px; border-radius: 6px; }
+.dx-title { font-weight: 700; font-size: 15px; color: var(--text-1); }
+.dx-why { font-size: 13.5px; line-height: 1.6; color: var(--text-1); }
+.dx-why b { color: var(--text-1); }
+.dx-fix { margin-top: 11px; padding: 10px 12px; border-radius: var(--r-sm); background: var(--green-soft); border: 1px solid rgba(52,211,153,.24); font-size: 13px; line-height: 1.55; color: var(--text-1); }
+.dx-fix-tag { display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--green); margin-right: 6px; }
 
 /* ---------- badges / replay ---------- */
 .badge {
@@ -1478,6 +1486,7 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
     </div>
 
     <div id="out" class="hidden">
+      <div id="diagnoseCard"></div>
       <div id="overview"></div>
 
       <div class="grid">
@@ -1735,6 +1744,31 @@ function primaryProgram(top, compute) {
   const pool = app.length ? app : top;
   return pool.slice().sort((a, b) => (cu[b] || 0) - (cu[a] || 0))[0] || null;
 }
+// The everyday front door: if the transaction failed on-chain, immediately show
+// a plain-English "why it failed and how to fix it" card at the top.
+async function diagnoseIfFailed() {
+  const card = $('diagnoseCard');
+  if (!card) return;
+  card.innerHTML = '';
+  if (analysis?.overview?.success) return; // only for failures
+  card.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>diagnosing the failure…</div>';
+  try {
+    const res = await api('/diagnose/' + encodeURIComponent(currentSig) + clusterQ());
+    if (!res.ok) throw new Error(await res.text());
+    const d = await res.json();
+    if (!d.failed) { card.innerHTML = ''; return; }
+    const bold = s => esc(s || '').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+    const fix = d.fix ? `<div class="dx-fix"><span class="dx-fix-tag">How to fix</span> ${esc(d.fix)}</div>` : '';
+    card.innerHTML = `<div class="dx-card">
+      <div class="dx-head"><span class="dx-badge">✕ failed on-chain</span><span class="dx-title">${esc(d.headline)}</span></div>
+      <div class="dx-why">${bold(d.explanation)}</div>
+      ${fix}
+    </div>`;
+  } catch (e) {
+    card.innerHTML = `<div class="err-box">couldn't diagnose: ${esc(e.message)}</div>`;
+  }
+}
+
 function renderOverview(o, compute) {
   const ok = o.success;
   const prim = primaryProgram(o.top_programs, compute);
@@ -2738,6 +2772,7 @@ async function analyze() {
       $('sig').value = analysis.signature;
     }
     renderOverview(analysis.overview, analysis.compute);
+    diagnoseIfFailed();
     renderTree(analysis.cpi_tree);
     renderCompute(analysis.compute);
     renderDiffs(analysis.balance_change);
