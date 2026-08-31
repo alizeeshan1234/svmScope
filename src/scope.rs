@@ -35,6 +35,7 @@ use crate::fixture::Fixture;
 use crate::replay::{
     FeatureToggle, Mutation, PreState, ReplayContext, ReplayResult, ScenarioOutcome, TimeTravel,
 };
+use crate::search::{search_threshold, Threshold};
 use crate::{cpi_tree, decode, diffs, idl, ixname, utils, CapturedTransaction};
 
 /// An RPC-backed client with caches. Everything svmscope fetches — transaction
@@ -43,6 +44,9 @@ use crate::{cpi_tree, decode, diffs, idl, ixname, utils, CapturedTransaction};
 /// repeated simulations cost zero.
 pub struct Scope {
     client: RpcClient,
+
+    archive: Option<RpcClient>,
+
     /// getTransaction (json encoding) responses by signature.
     tx_cache: Mutex<HashMap<String, serde_json::Value>>,
     /// On-chain IDL by program id; `None` = checked, program publishes none.
@@ -76,9 +80,17 @@ impl Scope {
     pub fn from_client(client: RpcClient) -> Scope {
         Scope {
             client,
+            archive: None,
             tx_cache: Mutex::new(HashMap::new()),
             idl_cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Attach an archival RPC endpoint (e.g. Alchemy's Account Archive) so
+    /// `replay_at_slot` can fetch account state as of a transaction's slot.
+    pub fn with_archive(mut self, archive_url: impl Into<String>) -> Scope {
+        self.archive = Some(RpcClient::new(archive_url.into()));
+        self
     }
 
     /// The underlying RPC client — the escape hatch for anything svmscope
@@ -210,6 +222,18 @@ impl Scope {
         })
     }
 
+    /// Diagnose a transaction: **why did it fail, and how do I fix it?** Reads the
+    /// *recorded* on-chain outcome (not a drift-prone re-simulation), resolves the
+    /// error to a plain name and message — from the Anchor logs, or the failing
+    /// program's on-chain IDL — and suggests a concrete fix. Free.
+    pub fn diagnose(&self, input: &str) -> Result<crate::Diagnosis> {
+        let signature = self.resolve_signature(input)?;
+        let tx = self.transaction_json(&signature)?;
+        Ok(crate::diagnose::diagnose_tx(&tx, |program| {
+            self.idl_for(program)
+        }))
+    }
+
     /// Reconstruct the transaction's world for local replay — every touched
     /// account, every program ELF, the on-chain outcome, and the IDLs needed to
     /// name errors and fields. **All RPC happens here**; every run of the
@@ -231,7 +255,136 @@ impl Scope {
             recorded: Some(OnchainRecord::from_tx_json(&tx)),
             ctx,
             time_travel: TimeTravel::default(),
+            fidelity: Fidelity::Current,
         })
+    }
+
+    /// Replay a transaction as of its own slot, at the best fidelity the
+    /// available data allows — see [`Replay::fidelity`] for what you actually got.
+    /// Mutations compose on top: the returned [`Replay`]'s [`Replay::simulate`] /
+    /// [`Replay::verify`] apply what-if changes to that same state, so you can
+    /// mutate at a specific slot too.
+    ///
+    /// Two tiers, chosen automatically:
+    /// - **Exact** — when an archival endpoint is set via [`Scope::with_archive`]
+    ///   *and* it honors the historical `slot` parameter (e.g. Alchemy's Account
+    ///   Archive). Accounts and program ELFs are loaded at the true slot.
+    /// - **Reconstructed** — the free path, no archive required. Accounts load at
+    ///   current state, then SOL and SPL-token balances are rewound to their
+    ///   pre-transaction values from the transaction's own metadata, and the clock
+    ///   is set to the transaction's slot. Faithful for balances and time; account
+    ///   *data* (pool reserves, oracle prices) is still current — [`Fidelity`]
+    ///   reports this honestly rather than pretending the replay is exact.
+    pub fn replay_at_slot(&self, input: &str) -> Result<Replay> {
+        let signature = self.resolve_signature(input)?;
+        let tx = self.transaction_json(&signature)?;
+        let slot = tx["slot"]
+            .as_u64()
+            .ok_or_else(|| Error::MalformedRpcResponse("transaction has no slot".into()))?;
+        let account_keys = utils::resolve_account_keys(&tx);
+        let pre = PreState::from_meta(&tx, &account_keys);
+
+        // Exact tier: only when an archive is set AND actually honors the slot.
+        let archive = self
+            .archive
+            .as_ref()
+            .filter(|a| crate::replay::archive_honors_slot(a, slot));
+
+        let (mut ctx, fidelity) = match archive {
+            Some(archive) => {
+                let ctx = crate::replay::build_context_at_slot(
+                    archive,
+                    &signature,
+                    &account_keys,
+                    slot,
+                    tx["blockTime"].as_i64(),
+                    &pre,
+                )?;
+                (ctx, Fidelity::Exact { slot })
+            }
+            None => {
+                // Free reconstruction: current accounts + metadata balance rewind.
+                let ctx = crate::replay::build_context(
+                    &self.client,
+                    &signature,
+                    &account_keys,
+                    Some(slot),
+                    &pre,
+                )?;
+                (ctx, Fidelity::Reconstructed { slot })
+            }
+        };
+
+        self.preload_idls(&mut ctx);
+
+        let mut replay = Replay {
+            recorded: Some(OnchainRecord::from_tx_json(&tx)),
+            ctx,
+            time_travel: TimeTravel::default(),
+            fidelity: Fidelity::Current,
+        };
+        replay.set_fidelity(fidelity);
+        // Anchor the clock to the transaction's slot/time for both tiers.
+        replay.warp_to_slot(slot);
+        if let Some(ts) = tx["blockTime"].as_i64() {
+            replay.warp_to_timestamp(ts);
+        }
+        Ok(replay)
+    }
+
+    /// Replay a transaction against archival account state at a **slot you
+    /// choose** — the "what if this ran at slot N?" primitive. Every account and
+    /// program ELF is loaded as of `slot`, and the clock is set to `slot`.
+    ///
+    /// Unlike [`Scope::replay_at_slot`] (which reconstructs the transaction's own
+    /// slot for free from metadata), an *arbitrary* slot needs real historical
+    /// account state, so this **requires** an archival endpoint set via
+    /// [`Scope::with_archive`] that honors the historical `slot` parameter (e.g.
+    /// Alchemy's Account Archive). A non-archival endpoint is detected and
+    /// refused rather than silently returning current state.
+    pub fn replay_at(&self, input: &str, slot: u64) -> Result<Replay> {
+        let archive = self.archive.as_ref().ok_or_else(|| {
+            Error::InvalidSpec(
+                "replaying at an arbitrary slot needs historical account state — set an archival \
+                 endpoint with Scope::with_archive(url) (e.g. Alchemy PAYG)"
+                    .into(),
+            )
+        })?;
+        if !crate::replay::archive_honors_slot(archive, slot) {
+            return Err(Error::InvalidSpec(format!(
+                "the archive endpoint ignored historical slot {slot} and returned current state — \
+                 replay_at needs an endpoint with account archival; a public node or Helius will not work"
+            )));
+        }
+
+        let signature = self.resolve_signature(input)?;
+        let tx = self.transaction_json(&signature)?;
+        let account_keys = utils::resolve_account_keys(&tx);
+        // The transaction's own metadata pre-state is only valid at its own slot;
+        // at an arbitrary slot the archive is authoritative, so pass none.
+        let pre = PreState::default();
+        let block_time = archive.get_block_time(slot).ok();
+        let mut ctx = crate::replay::build_context_at_slot(
+            archive,
+            &signature,
+            &account_keys,
+            slot,
+            block_time,
+            &pre,
+        )?;
+        self.preload_idls(&mut ctx);
+
+        let mut replay = Replay {
+            recorded: Some(OnchainRecord::from_tx_json(&tx)),
+            ctx,
+            time_travel: TimeTravel::default(),
+            fidelity: Fidelity::Exact { slot },
+        };
+        replay.warp_to_slot(slot);
+        if let Some(ts) = block_time {
+            replay.warp_to_timestamp(ts);
+        }
+        Ok(replay)
     }
 
     /// Reconstruct the world for an **unsigned / not-yet-sent** transaction
@@ -258,6 +411,7 @@ impl Scope {
             recorded: None,
             ctx,
             time_travel: TimeTravel::default(),
+            fidelity: Fidelity::Current,
         })
     }
 
@@ -415,6 +569,20 @@ impl Scope {
     /// `Ok(None)` means the account genuinely does not exist; `Err` means the
     /// RPC call itself failed. Keeping these distinct stops a network outage from
     /// masquerading as "account not found".
+    /// The account's current raw state on-chain — data bytes, lamports, owner —
+    /// or `None` if it doesn't exist. The free anchor and comparison point for
+    /// historical reconstruction (see the [`reconstruct`](crate::reconstruct)
+    /// module).
+    pub fn account_data(&self, address: &str) -> Result<Option<AccountState>> {
+        Ok(self
+            .account_raw(address)?
+            .map(|(owner, lamports, _executable, data)| AccountState {
+                data,
+                lamports,
+                owner,
+            }))
+    }
+
     fn account_raw(&self, address: &str) -> Result<Option<RawAccount>> {
         use base64::Engine;
         let resp: serde_json::Value = self
@@ -635,6 +803,166 @@ impl OnchainRecord {
     }
 }
 
+/// How faithful a replay's starting state is to the transaction's real slot —
+/// the honest label on every replay, so a convincing-but-drifted run is never
+/// mistaken for an exact one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Fidelity {
+    /// Current-state replay ([`Scope::replay`]) — no historical anchoring.
+    Current,
+    /// Balances rewound to their pre-transaction values from the transaction's
+    /// own metadata, clock set to the transaction's slot; account *data* is still
+    /// current-state. Free — no archive needed.
+    Reconstructed {
+        /// The transaction's own slot, that the clock is anchored to.
+        slot: u64,
+    },
+    /// Every account and program ELF loaded at the true slot from an archive.
+    Exact {
+        /// The transaction's own slot, that state was loaded at.
+        slot: u64,
+    },
+}
+
+impl Fidelity {
+    /// A short human label: `current`, `reconstructed@<slot>`, `exact@<slot>`.
+    pub fn label(&self) -> String {
+        match self {
+            Fidelity::Current => "current".to_string(),
+            Fidelity::Reconstructed { slot } => format!("reconstructed@{slot}"),
+            Fidelity::Exact { slot } => format!("exact@{slot}"),
+        }
+    }
+}
+
+/// A reconstructed account's raw state — its data bytes, lamports, and owner.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountState {
+    /// The account's raw data bytes.
+    pub data: Vec<u8>,
+    /// The account's lamport balance.
+    pub lamports: u64,
+    /// The account's owner program, base58.
+    pub owner: String,
+}
+
+/// Where an account's loaded bytes came from — the honest per-account source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Provenance {
+    /// A frozen fixture — offline, content-addressed.
+    Fixture,
+    /// A historical archive, at the transaction's true slot.
+    HistoricalArchive,
+    /// Reconstructed from the transaction's own metadata (a pre-tx balance, or a
+    /// since-closed account rebuilt from `preTokenBalances`).
+    MetadataRewind,
+    /// Loaded at current state from a normal RPC — may differ from the true slot.
+    CurrentRpc,
+}
+
+/// One account's provenance within a replay.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountProvenance {
+    /// The account address.
+    pub address: String,
+    /// Where its loaded bytes came from.
+    pub source: Provenance,
+    /// Whether it was loaded as an executable program (its ELF) rather than data.
+    pub is_program: bool,
+    /// A blake3 hash of the exact bytes loaded, for content addressing.
+    pub hash: String,
+}
+
+/// An honest report of how faithful a replay's starting state is: the verdict,
+/// where every account's bytes came from, which accounts may have drifted from
+/// the transaction's true slot, and whether there is a recorded on-chain outcome
+/// to check the replay against. Trust is a product feature — svmscope should
+/// never silently hand back a convincing but historically inaccurate replay.
+#[derive(Debug, Clone, Serialize)]
+pub struct FidelityCertificate {
+    /// The overall fidelity tier of this replay.
+    pub fidelity: Fidelity,
+    /// The (possibly warped) clock the replay runs at, human-readable.
+    pub clock: String,
+    /// Provenance and hash of every loaded account.
+    pub accounts: Vec<AccountProvenance>,
+    /// Addresses whose bytes are current-state in a historical replay, so their
+    /// data may differ from the true slot. Empty for an exact or current replay.
+    pub drifted: Vec<String>,
+    /// Whether a recorded on-chain outcome exists to verify the replay against.
+    pub verifiable: bool,
+}
+
+impl FidelityCertificate {
+    /// A one-line human summary of the certificate.
+    pub fn summary(&self) -> String {
+        let n = self.accounts.len();
+        let verify = if self.verifiable {
+            "verifiable against mainnet"
+        } else {
+            "no recorded outcome"
+        };
+        match self.drifted.len() {
+            0 => format!("{} · {n} accounts, none drifted · {verify}", self.fidelity.label()),
+            d => format!(
+                "{} · {n} accounts, {d} may have drifted · {verify}",
+                self.fidelity.label()
+            ),
+        }
+    }
+}
+
+/// The result of replaying a transaction against an original program and a
+/// patched one — the pre-deployment "does this patch change what happened?" gate.
+#[derive(Debug, Clone, Serialize)]
+pub struct PatchComparison {
+    /// The program whose ELF was swapped.
+    pub program: String,
+    /// The outcome with the original (currently-loaded) program.
+    pub before: ReplayResult,
+    /// The outcome with the patched program.
+    pub after: ReplayResult,
+}
+
+impl PatchComparison {
+    /// Whether the patch flipped success ↔ failure.
+    pub fn success_changed(&self) -> bool {
+        self.before.success != self.after.success
+    }
+
+    /// Whether the patch changed the (formatted) error.
+    pub fn error_changed(&self) -> bool {
+        self.before.error != self.after.error
+    }
+
+    /// The change in compute units (patched − original), which may be negative.
+    pub fn compute_delta(&self) -> i64 {
+        self.after.compute_units as i64 - self.before.compute_units as i64
+    }
+
+    /// Whether the patch changed anything observable (outcome, error, or compute).
+    pub fn changed(&self) -> bool {
+        self.success_changed() || self.error_changed() || self.compute_delta() != 0
+    }
+
+    /// A one-line human summary of what the patch changed.
+    pub fn summary(&self) -> String {
+        if !self.changed() {
+            return format!("{}: no observable change", self.program);
+        }
+        let outcome = match (self.before.success, self.after.success) {
+            (false, true) => "revert → success".to_string(),
+            (true, false) => "success → revert".to_string(),
+            _ => format!(
+                "{:?} → {:?}",
+                self.before.error.as_deref().unwrap_or("ok"),
+                self.after.error.as_deref().unwrap_or("ok")
+            ),
+        };
+        format!("{}: {outcome} · compute {:+}", self.program, self.compute_delta())
+    }
+}
+
 /// A transaction's reconstructed world — fetched once via [`Scope::replay`],
 /// then replayed locally any number of times. Every run builds a pristine SVM,
 /// so runs are independent, repeatable, and free.
@@ -644,11 +972,79 @@ pub struct Replay {
     /// fixtures captured before outcomes were recorded).
     recorded: Option<OnchainRecord>,
     time_travel: TimeTravel,
+    fidelity: Fidelity,
 }
 
 impl Replay {
     pub(crate) fn set_recorded(&mut self, recorded: OnchainRecord) {
         self.recorded = Some(recorded);
+    }
+
+    pub(crate) fn set_fidelity(&mut self, fidelity: Fidelity) {
+        self.fidelity = fidelity;
+    }
+
+    /// How faithful this replay's starting state is to the transaction's slot.
+    pub fn fidelity(&self) -> Fidelity {
+        self.fidelity
+    }
+
+    /// An honest fidelity certificate for this replay: the verdict, per-account
+    /// provenance and hashes, which accounts may have drifted from the true slot,
+    /// and whether there is a recorded on-chain outcome to verify against.
+    pub fn certificate(&self) -> FidelityCertificate {
+        let accounts: Vec<AccountProvenance> = self
+            .ctx
+            .loaded_info()
+            .into_iter()
+            .map(|i| {
+                let source = match self.fidelity {
+                    Fidelity::Exact { .. } => Provenance::HistoricalArchive,
+                    // A balance-only account (system-owned, no data) is faithfully
+                    // rewound from metadata; program ELFs and program-owned data
+                    // accounts are still current-state.
+                    Fidelity::Reconstructed { .. }
+                        if !i.is_program && i.owner_is_system && i.data_len == 0 =>
+                    {
+                        Provenance::MetadataRewind
+                    }
+                    Fidelity::Reconstructed { .. } => Provenance::CurrentRpc,
+                    Fidelity::Current => Provenance::CurrentRpc,
+                };
+                AccountProvenance {
+                    address: i.address,
+                    source,
+                    is_program: i.is_program,
+                    hash: i.hash,
+                }
+            })
+            .collect();
+
+        // In a historical replay, any account still on current-state bytes is a
+        // potential drift point. A plainly-current replay isn't "drifted" — it
+        // never claimed to be historical.
+        let drifted = if matches!(self.fidelity, Fidelity::Current) {
+            Vec::new()
+        } else {
+            accounts
+                .iter()
+                .filter(|a| a.source == Provenance::CurrentRpc)
+                .map(|a| a.address.clone())
+                .collect()
+        };
+
+        let verifiable = self
+            .recorded
+            .as_ref()
+            .is_some_and(|r| r.error.as_deref() != Some("transaction metadata unavailable"));
+
+        FidelityCertificate {
+            fidelity: self.fidelity,
+            clock: self.ctx.describe_clock(),
+            accounts,
+            drifted,
+            verifiable,
+        }
     }
 
     /// Rebuild a replay from a frozen fixture — fully offline, no RPC. A v2
@@ -658,6 +1054,7 @@ impl Replay {
             ctx: ReplayContext::from_fixture(fx)?,
             recorded: fx.recorded.clone(),
             time_travel: TimeTravel::default(),
+            fidelity: Fidelity::Current,
         })
     }
 
@@ -768,6 +1165,118 @@ impl Replay {
         })
     }
 
+    /// Replay with `mutations` and read one account's raw post-execution state.
+    /// The building block of historical reconstruction (see the [`reconstruct`]
+    /// module): chain it by injecting an account's reconstructed bytes, replaying
+    /// its next write, and reading it out again. `None` if the account does not
+    /// exist after the replay.
+    ///
+    /// [`reconstruct`]: crate::reconstruct
+    pub fn account_after(
+        &self,
+        mutations: &[Mutation],
+        address: &str,
+    ) -> Result<Option<AccountState>> {
+        let (_result, acc) = self.ctx.run_and_read_account(mutations, address)?;
+        Ok(acc.map(|a| AccountState {
+            data: a.data,
+            lamports: a.lamports,
+            owner: a.owner.to_string(),
+        }))
+    }
+
+    // --- counterfactual search -----------------------------------------------
+
+    /// Binary-search a numeric knob for the value at which the outcome flips —
+    /// "at what oracle price does this stop succeeding?", "what is the minimum
+    /// balance that avoids the revert?". `mutate(v)` builds the mutation(s) that
+    /// set the knob to candidate `v`; the search runs over the inclusive range
+    /// `[lo, hi]` and returns the boundary (or `None` if the outcome is the same
+    /// at both bounds). Every candidate is a fresh, independent replay, so the
+    /// search never mutates shared state. Assumes a single crossing.
+    ///
+    /// ```no_run
+    /// # use svmscope::{Mutation, Scope};
+    /// # let replay = Scope::new("").replay("")?;
+    /// // Lowest fee-payer balance at which the transaction still lands:
+    /// let payer = "…".to_string();
+    /// let boundary = replay.find_threshold(0, 5_000_000_000, |v| {
+    ///     vec![Mutation::lamports(payer.clone(), v)]
+    /// })?;
+    /// # Ok::<(), svmscope::Error>(())
+    /// ```
+    pub fn find_threshold(
+        &self,
+        lo: u64,
+        hi: u64,
+        mutate: impl Fn(u64) -> Vec<Mutation>,
+    ) -> Result<Option<Threshold>> {
+        search_threshold(lo, hi, |v| Ok(self.simulate(&mutate(v))?.result.success))
+    }
+
+    /// Shrink a set of mutations to a minimal subset that still flips the
+    /// outcome — "which of these changes actually caused the difference?".
+    ///
+    /// "Flips" means the subset's success differs from the un-mutated baseline.
+    /// Runs a greedy delta-debugging pass: drop each mutation whose removal keeps
+    /// the outcome flipped. Returns the minimal subset (input order preserved),
+    /// or an empty vec if the full set doesn't change the baseline outcome at all.
+    pub fn minimize_mutations(&self, mutations: &[Mutation]) -> Result<Vec<Mutation>> {
+        let baseline = self.run()?.result.success;
+        let target = self.simulate(mutations)?.result.success;
+        if target == baseline {
+            return Ok(Vec::new());
+        }
+        let mut keep = mutations.to_vec();
+        let mut i = 0;
+        while i < keep.len() {
+            let mut trial = keep.clone();
+            trial.remove(i);
+            if self.simulate(&trial)?.result.success == target {
+                keep = trial; // mutation i wasn't needed to keep the flip
+            } else {
+                i += 1; // it's load-bearing; keep it and move on
+            }
+        }
+        Ok(keep)
+    }
+
+    // --- patch lab -----------------------------------------------------------
+
+    /// Replace a program's ELF bytecode in this replay's world, for A/B patch
+    /// testing. Returns the previous ELF (restore it by calling again with that).
+    /// Errors if `program_id` isn't loaded as a program in this replay.
+    pub fn replace_program(&mut self, program_id: &str, elf: Vec<u8>) -> Result<Vec<u8>> {
+        self.ctx.replace_program(program_id, elf).ok_or_else(|| {
+            Error::InvalidSpec(format!(
+                "{program_id} is not a loaded program in this replay"
+            ))
+        })
+    }
+
+    /// Replay the transaction against the original program and against
+    /// `patched_elf`, and report the difference — the pre-deployment gate "does
+    /// this patch change what really happened?". `mutations` apply to both runs.
+    /// `self` is left unchanged: the patch is swapped in for the comparison, then
+    /// the original restored.
+    pub fn compare_patch(
+        &mut self,
+        program_id: &str,
+        patched_elf: Vec<u8>,
+        mutations: &[Mutation],
+    ) -> Result<PatchComparison> {
+        let before = self.simulate(mutations)?.result;
+        let original = self.replace_program(program_id, patched_elf)?;
+        let after = self.simulate(mutations)?.result;
+        // Restore the original ELF so the replay is reusable afterwards.
+        self.ctx.replace_program(program_id, original);
+        Ok(PatchComparison {
+            program: program_id.to_string(),
+            before,
+            after,
+        })
+    }
+
     /// Run a suite of scenarios, each against a fresh copy of the state.
     /// Mutations across the whole suite are validated before anything executes.
     pub fn run_suite(&self, scenarios: &[Scenario]) -> Result<Vec<ScenarioOutcome>> {
@@ -798,6 +1307,21 @@ impl Replay {
         let mut fx = self.ctx.to_fixture()?;
         fx.recorded = self.recorded.clone();
         Ok(fx)
+    }
+
+    /// Generate a self-contained Rust regression test that freezes this incident
+    /// permanently: it loads the fixture at `fixture_path` (write
+    /// `to_fixture()?.to_json()?` there next to your test), rebuilds the replay
+    /// fully offline, and asserts the same outcome this replay produces now — a
+    /// reverting incident also pins the exact error. Returns the test source.
+    pub fn regression_test(&self, test_name: &str, fixture_path: &str) -> Result<String> {
+        let outcome = self.run()?;
+        Ok(crate::report::rust_regression_test(
+            test_name,
+            fixture_path,
+            outcome.result.success,
+            outcome.result.error.as_deref(),
+        ))
     }
 }
 
@@ -969,6 +1493,71 @@ mod wait_tests {
         });
 
         assert!(status_is_confirmed(&status));
+    }
+
+    #[test]
+    fn fidelity_labels_are_honest() {
+        assert_eq!(Fidelity::Current.label(), "current");
+        assert_eq!(
+            Fidelity::Reconstructed { slot: 442384762 }.label(),
+            "reconstructed@442384762"
+        );
+        assert_eq!(Fidelity::Exact { slot: 100 }.label(), "exact@100");
+    }
+
+    #[test]
+    fn patch_comparison_reports_what_changed() {
+        let mk = |success: bool, err: Option<&str>, cu: u64| ReplayResult {
+            success,
+            error: err.map(String::from),
+            error_name: None,
+            logs: Vec::new(),
+            compute_units: cu,
+        };
+
+        let fixed = PatchComparison {
+            program: "P".to_string(),
+            before: mk(false, Some("Custom(6001)"), 100),
+            after: mk(true, None, 120),
+        };
+        assert!(fixed.success_changed());
+        assert!(fixed.changed());
+        assert_eq!(fixed.compute_delta(), 20);
+        assert!(fixed.summary().contains("revert → success"), "{}", fixed.summary());
+
+        let unchanged = PatchComparison {
+            program: "P".to_string(),
+            before: mk(true, None, 100),
+            after: mk(true, None, 100),
+        };
+        assert!(!unchanged.changed());
+        assert!(unchanged.summary().contains("no observable change"));
+    }
+
+    #[test]
+    fn certificate_summary_discloses_drift_and_verifiability() {
+        let drifted = FidelityCertificate {
+            fidelity: Fidelity::Reconstructed { slot: 442384762 },
+            clock: "slot 442384762".to_string(),
+            accounts: Vec::new(),
+            drifted: vec!["AccA".to_string(), "AccB".to_string()],
+            verifiable: true,
+        };
+        let s = drifted.summary();
+        assert!(s.contains("reconstructed@442384762"), "{s}");
+        assert!(s.contains("2 may have drifted"), "{s}");
+        assert!(s.contains("verifiable against mainnet"), "{s}");
+
+        let clean = FidelityCertificate {
+            fidelity: Fidelity::Exact { slot: 5 },
+            clock: String::new(),
+            accounts: Vec::new(),
+            drifted: Vec::new(),
+            verifiable: false,
+        };
+        let s = clean.summary();
+        assert!(s.contains("none drifted"), "{s}");
+        assert!(s.contains("no recorded outcome"), "{s}");
     }
 
     #[test]

@@ -10,6 +10,61 @@ fn esc(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Turn an arbitrary label into a valid Rust function identifier.
+fn ident(name: &str) -> String {
+    let mut s: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if s.is_empty() {
+        s.push_str("regression");
+    }
+    if s.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        s.insert(0, '_');
+    }
+    s
+}
+
+/// Emit a self-contained Rust `#[test]` that freezes an incident as a permanent
+/// regression test: it loads a frozen fixture (write `to_fixture()?.to_json()?`
+/// to `fixture_path`), rebuilds the replay fully offline, runs it, and asserts
+/// the same outcome the incident produces now. A reverting incident also pins
+/// the exact error, so a program change that alters the revert fails the test.
+///
+/// The `{…:?}` debug formatting emits correctly-escaped Rust string literals for
+/// the path and error, so arbitrary text is embedded safely.
+pub fn rust_regression_test(
+    test_name: &str,
+    fixture_path: &str,
+    expect_success: bool,
+    expect_error: Option<&str>,
+) -> String {
+    let mut s = String::new();
+    s.push_str("#[test]\n");
+    s.push_str(&format!("fn {}() {{\n", ident(test_name)));
+    s.push_str("    // Frozen from mainnet by svmscope — replays fully offline, no RPC.\n");
+    s.push_str(&format!(
+        "    let fixture = svmscope::Fixture::from_json(include_str!({fixture_path:?}))\n"
+    ));
+    s.push_str("        .expect(\"load fixture\");\n");
+    s.push_str(
+        "    let replay = svmscope::Replay::from_fixture(&fixture).expect(\"rebuild replay\");\n",
+    );
+    s.push_str("    let outcome = replay.run().expect(\"replay\");\n");
+    s.push_str(&format!(
+        "    assert_eq!(outcome.result.success, {expect_success}, \"incident outcome changed\");\n"
+    ));
+    if !expect_success {
+        if let Some(err) = expect_error {
+            s.push_str(&format!(
+                "    assert_eq!(outcome.result.error.as_deref(), Some({err:?}), \"revert changed\");\n"
+            ));
+        }
+    }
+    s.push_str("}\n");
+    s
+}
+
 /// Render the outcomes of a suite run to a standalone HTML document.
 pub fn render_html(title: &str, outcomes: &[ScenarioOutcome]) -> String {
     let passed = outcomes.iter().filter(|o| o.pass).count();
@@ -121,4 +176,33 @@ pub fn render_html(title: &str, outcomes: &[ScenarioOutcome]) -> String {
 </main></body></html>"#,
         title = esc(title),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regression_test_source_pins_a_reverting_incident() {
+        let src = rust_regression_test(
+            "avici drain #1",
+            "fixtures/avici.json",
+            false,
+            Some("Custom(3002)"),
+        );
+        // Valid, sanitized identifier and offline structure.
+        assert!(src.contains("fn avici_drain__1()"), "{src}");
+        assert!(src.contains("include_str!(\"fixtures/avici.json\")"));
+        assert!(src.contains("from_fixture"));
+        assert!(src.contains("assert_eq!(outcome.result.success, false"));
+        // A revert pins the exact error too.
+        assert!(src.contains("Some(\"Custom(3002)\")"), "{src}");
+    }
+
+    #[test]
+    fn regression_test_source_for_success_omits_error_assert() {
+        let src = rust_regression_test("ok", "f.json", true, None);
+        assert!(src.contains("assert_eq!(outcome.result.success, true"));
+        assert!(!src.contains("revert changed"));
+    }
 }

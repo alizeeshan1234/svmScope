@@ -699,6 +699,38 @@ body::after {
   color: var(--text-2); font-size: 12px; line-height: 1.55;
 }
 .drift-inline b { color: var(--text-1); }
+.slot-cta { margin-top: var(--s-3); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cert-card {
+  margin-top: var(--s-3); padding: 11px var(--s-3);
+  border: 1px solid var(--border); border-left: 2px solid var(--green);
+  border-radius: var(--r-md); background: var(--bg-2);
+}
+.cert-card .drift-list { margin-top: 6px; font-size: 12px; line-height: 1.7; color: var(--text-2); word-break: break-all; }
+.cf-panel { margin-top: var(--s-3); padding: 12px var(--s-3); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-2); }
+.cf-title { font-size: 12.5px; font-weight: 650; color: var(--text-1); margin-bottom: 9px; }
+.cf-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cf-select { background: var(--bg-2); color: var(--text-1); border: 1px solid var(--border-strong); border-radius: var(--r-sm); padding: 4px 8px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.cf-card { margin-top: 10px; padding: 10px var(--s-3); border-radius: var(--r-sm); background: var(--green-soft); border: 1px solid rgba(52,211,153,.24); font-size: 13px; color: var(--text-1); }
+.cf-card b { color: var(--text-1); }
+.cf-scan-row { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bp-row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; border-top: 1px solid rgba(255,255,255,.05); font-size: 12.5px; }
+.bp-row:first-of-type { border-top: none; }
+.bp-when { color: var(--text-2); white-space: nowrap; }
+.ai-card { margin-top: 12px; padding: 14px var(--s-3); border: 1px solid var(--border); border-left: 2px solid #a78bfa; border-radius: var(--r-md); background: var(--bg-2); }
+.ai-head { font-size: 12.5px; font-weight: 650; color: #c4b5fd; margin-bottom: 8px; }
+.ai-card p { margin: 0 0 9px; font-size: 13px; line-height: 1.62; color: var(--text-1); }
+.ai-card p:last-child { margin-bottom: 0; }
+.ai-card b { color: var(--text-1); }
+.dx-card { margin-bottom: 16px; padding: 16px 18px; border: 1px solid rgba(248,113,113,.3); border-left: 3px solid var(--red); border-radius: var(--r-md); background: var(--red-soft); }
+.dx-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.dx-badge { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--red); background: rgba(248,113,113,.14); padding: 3px 9px; border-radius: 6px; }
+.dx-title { font-weight: 700; font-size: 15px; color: var(--text-1); }
+.dx-why { font-size: 13.5px; line-height: 1.6; color: var(--text-1); }
+.dx-why b { color: var(--text-1); }
+.dx-fix { margin-top: 11px; padding: 10px 12px; border-radius: var(--r-sm); background: var(--green-soft); border: 1px solid rgba(52,211,153,.24); font-size: 13px; line-height: 1.55; color: var(--text-1); }
+.dx-fix-tag { display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--green); margin-right: 6px; }
+.dx-note { margin-top: 10px; font-size: 11.5px; line-height: 1.55; color: var(--text-2); }
+.dx-note b { color: var(--text-1); }
 
 /* ---------- badges / replay ---------- */
 .badge {
@@ -1456,6 +1488,7 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
     </div>
 
     <div id="out" class="hidden">
+      <div id="diagnoseCard"></div>
       <div id="overview"></div>
 
       <div class="grid">
@@ -1713,6 +1746,33 @@ function primaryProgram(top, compute) {
   const pool = app.length ? app : top;
   return pool.slice().sort((a, b) => (cu[b] || 0) - (cu[a] || 0))[0] || null;
 }
+// The everyday front door: if the transaction failed on-chain, immediately show
+// a plain-English "why it failed and how to fix it" card at the top.
+async function diagnoseIfFailed() {
+  const card = $('diagnoseCard');
+  if (!card) return;
+  card.innerHTML = '';
+  if (analysis?.overview?.success) return; // only for failures
+  card.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>diagnosing the failure…</div>';
+  try {
+    const res = await api('/diagnose/' + encodeURIComponent(currentSig) + clusterQ());
+    if (!res.ok) throw new Error(await res.text());
+    const d = await res.json();
+    if (!d.failed) { card.innerHTML = ''; return; }
+    const bold = s => esc(s || '').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+    const fix = d.fix ? `<div class="dx-fix"><span class="dx-fix-tag">How to fix</span> ${esc(d.fix)}</div>` : '';
+    const note = `<div class="dx-note">This is the <b>real on-chain reason</b>, read from the recorded outcome. A local replay (below) can show a <i>different</i> error — it runs against <i>today's</i> state, so time- or price-sensitive checks (e.g. an oracle freshness check → <span class="mono">InvalidTimestamp</span>) may trip first. That's state drift, not the original cause.</div>`;
+    card.innerHTML = `<div class="dx-card">
+      <div class="dx-head"><span class="dx-badge">✕ failed on-chain</span><span class="dx-title">${esc(d.headline)}</span></div>
+      <div class="dx-why">${bold(d.explanation)}</div>
+      ${fix}
+      ${note}
+    </div>`;
+  } catch (e) {
+    card.innerHTML = `<div class="err-box">couldn't diagnose: ${esc(e.message)}</div>`;
+  }
+}
+
 function renderOverview(o, compute) {
   const ok = o.success;
   const prim = primaryProgram(o.top_programs, compute);
@@ -1914,15 +1974,23 @@ function renderReplayPanel() {
 
   const body = analysis.replay
     ? renderReplay(analysis.replay)
-    : `<button class="btn ghost sm" id="runReplay">▶ Run local replay</button>
-       <span class="cu-note" style="margin-left:10px">Re-execute this transaction locally against current state
-         (it succeeded on-chain; local replay can differ if state has since moved).</span>`;
+    : `<div class="slot-cta">
+         <button class="btn ghost sm" id="runReplay">▶ Replay now</button>
+         <button class="btn ghost sm" id="reconSlot">⟲ Replay as it happened</button>
+       </div>
+       <span class="cu-note" style="display:block;margin-top:8px"><b>Replay now</b> re-runs this transaction against <i>today's</i> on-chain state. <b>Replay as it happened</b> rewinds the balances and clock back to the exact moment it originally landed — free, and it tells you how accurate the result is.</span>
+       <div id="certPanel"></div>
+       ${cfBox()}`;
   $('replay').innerHTML = body;
   $('runReplay')?.addEventListener('click', async () => {
     const b = $('runReplay'); b.disabled = true; b.textContent = '▶ Replaying…';
     try { await ensureBaseline(); renderReplayPanel(); }
     catch (e) { $('replay').innerHTML = `<div class="err-box">${esc(e.message)}</div>`; }
   });
+  $('reconSlot')?.addEventListener('click', reconstructAtSlot);
+  $('cfRun')?.addEventListener('click', runCounterfactual);
+  $('cfScanAll')?.addEventListener('click', runScan);
+  $('cfNarrate')?.addEventListener('click', runNarrate);
 }
 // Fetch the baseline replay once and cache it on `analysis.replay`.
 async function ensureBaseline() {
@@ -1948,6 +2016,31 @@ function driftHint(r) {
   for (const [re, why] of table) if (re.test(blob)) return why;
   return '';
 }
+// The counterfactual control — an account picker + "Find flip point". Shown in
+// the replay panel from the start (not gated behind a specific replay button).
+function cfBox() {
+  const opts = (analysis.balance_change || [])
+    .map((b, i) => `<option value="${esc(b.address)}">${i === 0 ? '⛽ ' : ''}${esc(short(b.address))}</option>`)
+    .join('');
+  if (!opts) return '';
+  return `<div class="cf-panel">
+    <div class="cf-title">◎ What-if: find the breaking point</div>
+    <div class="cf-row">
+      <span class="cu-note">how low can</span>
+      <select id="cfAccount" class="cf-select">${opts}</select>
+      <span class="cu-note">'s SOL balance go before this transaction fails?</span>
+      <button class="btn ghost sm" id="cfRun">Find it</button>
+    </div>
+    <div id="cfResult"></div>
+    <div class="cf-scan-row">
+      <button class="btn ghost sm" id="cfScanAll">⚡ Scan for all breaking points</button>
+      <button class="btn ghost sm" id="cfNarrate">📋 Explain in plain English</button>
+      <span class="cu-note">Scan lists every threshold that breaks this transaction; the read-out explains them as a security briefing — instant, free, no account needed.</span>
+    </div>
+    <div id="cfScanResult"></div>
+    <div id="cfNarrateResult"></div>
+  </div>`;
+}
 function renderReplay(r) {
   const badge = r.success ? `<span class="badge ok"><span class="b-dot"></span>replay success</span>`
                           : `<span class="badge fail"><span class="b-dot"></span>replay failed</span>`;
@@ -1959,7 +2052,211 @@ function renderReplay(r) {
   const errText = r.error ? (r.error_name ? `${r.error_name} — ${r.error}` : r.error) : '';
   const err = errText ? `<div class="err-box">${esc(errText)}</div>` : '';
   const logs = r.logs && r.logs.length ? `<div class="logs">${renderLogs(r.logs)}</div>` : '';
-  return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}`;
+  return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}
+    <div class="slot-cta">
+      <button class="btn ghost sm" id="reconSlot">⟲ Replay as it happened</button>
+      <span class="cu-note">Rewind the balances and clock back to the moment this transaction landed — free, with an accuracy report.</span>
+    </div>
+    <div id="certPanel"></div>
+    ${cfBox()}`;
+}
+
+// Counterfactual search — binary-search an account's balance for the outcome
+// flip. Free: pure current-state replay, no archive.
+async function runCounterfactual() {
+  const acct = $('cfAccount')?.value;
+  if (!acct) return;
+  const btn = $('cfRun');
+  const out = $('cfResult');
+  if (btn) { btn.disabled = true; btn.textContent = 'Searching…'; }
+  if (out) out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>binary-searching the flip point…</div>';
+  try {
+    const qs = new URLSearchParams({ account: acct, ...clusterParams() }).toString();
+    const res = await api('/counterfactual/' + encodeURIComponent(currentSig) + '?' + qs);
+    if (!res.ok) throw new Error(await res.text());
+    if (out) out.innerHTML = renderCounterfactual(await res.json());
+  } catch (e) {
+    if (out) out.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Find it'; }
+  }
+}
+
+function renderCounterfactual(d) {
+  if (d.flips_at == null) {
+    return `<div class="drift-inline">This account's balance doesn't decide the outcome — the transaction stays <b>${d.low_success ? 'a success' : 'a failure'}</b> anywhere from ${fmt(d.lo)} to ${fmt(d.hi)} lamports.</div>`;
+  }
+  const lands = d.high_success; // outcome at the high (fuller-balance) end
+  const line = lands
+    ? `Below <b>${fmt(d.flips_at)}</b> lamports it <b>fails</b>; at <b>${fmt(d.flips_at)}</b> or above it <b>succeeds</b>.`
+    : `Below <b>${fmt(d.flips_at)}</b> lamports it <b>succeeds</b>; at <b>${fmt(d.flips_at)}</b> or above it <b>fails</b>.`;
+  return `<div class="cf-card">
+    <div><b class="mono">${esc(short(d.account))}</b> needs at least <b>${fmt(d.flips_at)}</b> lamports for this transaction to work.</div>
+    <div class="cu-note" style="margin-top:4px">${line} &nbsp;·&nbsp; (tried ${d.evaluations} times to pin down the exact number.)</div>
+  </div>`;
+}
+
+// Auto-scan: test every account & field for the thresholds that break the tx.
+async function runScan() {
+  const btn = $('cfScanAll');
+  const out = $('cfScanResult');
+  if (btn) { btn.disabled = true; btn.textContent = '⚡ Scanning…'; }
+  if (out) out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>testing every account &amp; field…</div>';
+  try {
+    const qs = new URLSearchParams(clusterParams()).toString();
+    const res = await api('/scan/' + encodeURIComponent(currentSig) + (qs ? '?' + qs : ''));
+    if (!res.ok) throw new Error(await res.text());
+    if (out) out.innerHTML = renderBreakingPoints(await res.json());
+  } catch (e) {
+    if (out) out.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⚡ Scan for all breaking points'; }
+  }
+}
+
+// Plain-English read-out — a deterministic narrator over the scan's findings.
+// Pure client-side: no model, no API, no cost, and it can't hallucinate because
+// it only restates what the scan proved.
+async function runNarrate() {
+  const btn = $('cfNarrate');
+  const out = $('cfNarrateResult');
+  if (btn) { btn.disabled = true; btn.textContent = '📋 Reading…'; }
+  if (out) out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>reviewing this transaction…</div>';
+  try {
+    const qs = new URLSearchParams(clusterParams()).toString();
+    const res = await api('/scan/' + encodeURIComponent(currentSig) + (qs ? '?' + qs : ''));
+    if (!res.ok) throw new Error(await res.text());
+    const bps = await res.json();
+    if (out) out.innerHTML = renderNarration(narrateScan(bps));
+  } catch (e) {
+    if (out) out.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '📋 Explain in plain English'; }
+  }
+}
+
+// Turn the structured breaking points into a grounded plain-English briefing.
+function narrateScan(bps) {
+  if (!bps.length) {
+    return "svmscope found no way to break this transaction within the ranges tested — it's robust to the account and field changes checked.";
+  }
+  const names = list => {
+    const u = [...new Set(list.map(b => short(b.account)))];
+    if (u.length === 1) return `**${u[0]}**`;
+    if (u.length === 2) return `**${u[0]}** and **${u[1]}**`;
+    return u.slice(0, -1).map(a => `**${a}**`).join(', ') + `, and **${u[u.length - 1]}**`;
+  };
+
+  const existence = bps.filter(b => b.field === 'existence');
+  const owner = bps.filter(b => b.field === 'owner program');
+  const frozen = bps.filter(b => b.condition === 'is frozen');
+  const authority = bps.filter(b => b.field === 'authority');
+  const mint = bps.filter(b => b.field === 'mint');
+  const sol = bps.filter(b => b.field === 'SOL balance');
+  const known = new Set(['existence', 'owner program', 'authority', 'mint', 'SOL balance', 'state']);
+  const fields = bps.filter(b => !known.has(b.field));
+
+  const nAcc = new Set(bps.map(b => b.account)).size;
+  const paras = [];
+  paras.push(`svmscope automatically found **${bps.length}** way${bps.length === 1 ? '' : 's'} this transaction can break, across **${nAcc}** account${nAcc === 1 ? '' : 's'}.`);
+
+  // Structural dependencies — the routine ones.
+  const structural = [];
+  if (existence.length) structural.push(`close ${names(existence)} (each must stay open)`);
+  if (owner.length) structural.push(`reassign the owner program of an involved account`);
+  if (structural.length) {
+    paras.push(`**Structural dependencies** — normal, but worth knowing: it reverts if you ${structural.join(', or if you ')}. These are the accounts the transaction simply needs present and intact.`);
+  }
+
+  // The notable security-relevant ones.
+  const notable = [];
+  if (frozen.length) notable.push(`${names(frozen)} must **not be frozen** — a frozen token account can't move funds, so freezing it blocks the transfer`);
+  if (authority.length) notable.push(`the **authority** of ${names(authority)} must not change — it signs the transfer, so its ownership is security-critical`);
+  if (mint.length) notable.push(`the **mint** on ${names(mint)} must match — the transfer is checked against it on both sides`);
+  fields.forEach(b => notable.push(`${short(b.account)}'s **${b.field}** ${b.condition}`));
+  if (notable.length) {
+    paras.push(`**Notable conditions:** ${notable.join('; ')}.`);
+  }
+
+  // Economic requirement.
+  if (sol.length) {
+    const s = sol[0];
+    paras.push(`**Economically**, ${short(s.account)} needs at least **${fmt(s.flips_at || Number((s.condition.match(/\d[\d,]*/) || [])[0]?.replace(/,/g, '')) || 0)}** lamports (essentially the fee) for the transaction to land.`);
+  }
+
+  return paras.join('\n\n');
+}
+
+function renderNarration(text) {
+  const html = esc(text || '')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .split(/\n\n+/)
+    .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
+    .join('');
+  return `<div class="ai-card"><div class="ai-head">📋 Plain-English read-out</div>${html}</div>`;
+}
+
+function renderBreakingPoints(bps) {
+  if (!bps.length) {
+    return `<div class="drift-inline">No breaking points found in the tested range — this transaction is robust to the balances and fields checked.</div>`;
+  }
+  const rows = bps.map(bp => {
+    // Bold + comma-format any number inside the condition phrase.
+    const when = esc(bp.condition).replace(/\d{4,}/g, m => '<b>' + fmt(parseInt(m)) + '</b>');
+    const label = bp.field === 'SOL balance'
+      ? `${esc(short(bp.account))} · SOL balance`
+      : `${esc(short(bp.account))} · <span class="mono">${esc(bp.field)}</span>`;
+    return `<div class="bp-row"><span>${label}</span><span class="bp-when">${when}</span></div>`;
+  }).join('');
+  return `<div class="cf-card">
+    <div style="margin-bottom:8px"><b>${bps.length}</b> breaking point${bps.length === 1 ? '' : 's'} found — this transaction breaks when:</div>
+    ${rows}
+  </div>`;
+}
+
+// Reconstructed replay-at-slot + fidelity certificate — the honest, precise
+// version of the heuristic drift hint above. Opt-in, so the default replay
+// (clock at now) is never changed underneath the user.
+async function reconstructAtSlot() {
+  const btn = $('reconSlot');
+  const panel = $('certPanel');
+  if (btn) { btn.disabled = true; btn.textContent = '⟲ Replaying…'; }
+  if (panel) panel.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>reconstructing at the transaction\'s slot…</div>';
+  try {
+    const res = await api('/replay_at_slot/' + encodeURIComponent(currentSig) + clusterQ());
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    if (panel) panel.innerHTML = renderCertificate(data);
+    $('driftToggle')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      const d = $('driftList'); if (d) d.classList.toggle('hidden');
+    });
+  } catch (e) {
+    if (panel) panel.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⟲ Replay as it happened'; }
+  }
+}
+
+function renderCertificate(d) {
+  const r = d.result;
+  const badge = r.success
+    ? `<span class="badge ok"><span class="b-dot"></span>replayed as it happened</span>`
+    : `<span class="badge fail"><span class="b-dot"></span>replay failed</span>`;
+  const errText = r.error ? (r.error_name ? `${r.error_name} — ${r.error}` : r.error) : '';
+  const err = errText ? `<div class="err-box">${esc(errText)}</div>` : '';
+  const n = (d.drifted || []).length;
+  const drift = n
+    ? `<div class="drift-inline"><b>${n}</b> account${n === 1 ? '' : 's'} still use <b>today's data</b>, so those parts may differ from back then
+         (<a href="#" id="driftToggle">show which</a>). Getting them exactly right needs a paid history archive — but the SOL &amp; token balances and the clock are already correct.
+         <div id="driftList" class="drift-list hidden">${d.drifted.map(esc).join('<br>')}</div></div>`
+    : `<div class="drift-inline">Every account was rebuilt correctly — this replay is fully faithful to that moment.</div>`;
+  const verify = d.verifiable ? ' · matches the real on-chain result' : '';
+  return `<div class="cert-card">
+    <div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>
+    <div class="cu-note" style="margin:6px 0 2px">Replayed as of the moment it landed — <span class="mono">${esc(d.clock)}</span>${verify}</div>
+    ${err}${drift}
+  </div>`;
 }
 
 // ---------------- one-click what-if scenarios ----------------
@@ -2479,6 +2776,7 @@ async function analyze() {
       $('sig').value = analysis.signature;
     }
     renderOverview(analysis.overview, analysis.compute);
+    diagnoseIfFailed();
     renderTree(analysis.cpi_tree);
     renderCompute(analysis.compute);
     renderDiffs(analysis.balance_change);

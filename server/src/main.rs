@@ -14,7 +14,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use svmscope::spec::{MutationInput, SuiteRequest};
@@ -612,6 +612,192 @@ async fn replay_handler(
     }
 }
 
+/// The reconstructed replay-at-slot response: the outcome plus an honest
+/// fidelity certificate the UI can show instead of guessing at state drift.
+#[derive(Serialize)]
+struct ReplayAtSlotResponse {
+    result: ReplayResult,
+    /// The fidelity label, e.g. `reconstructed@442384762`.
+    fidelity: String,
+    /// One-line certificate summary.
+    certificate: String,
+    /// The (anchored) clock the replay ran at.
+    clock: String,
+    /// Addresses still on current-state data that may differ from the true slot.
+    drifted: Vec<String>,
+    /// Whether a recorded on-chain outcome exists to verify against.
+    verifiable: bool,
+}
+
+/// GET /replay_at_slot/:signature — replay against the transaction's slot at the
+/// best fidelity the free data allows, with a per-account drift certificate.
+async fn replay_at_slot_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<ClusterQuery>,
+) -> Result<Json<ReplayAtSlotResponse>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let out = tokio::task::spawn_blocking(
+        move || -> Result<ReplayAtSlotResponse, svmscope::Error> {
+            let replay = Scope::new(url).replay_at_slot(&signature)?;
+            let cert = replay.certificate();
+            let result = replay.run()?.result;
+            Ok(ReplayAtSlotResponse {
+                result,
+                fidelity: cert.fidelity.label(),
+                certificate: cert.summary(),
+                clock: cert.clock.clone(),
+                drifted: cert.drifted.clone(),
+                verifiable: cert.verifiable,
+            })
+        },
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
+
+    match out {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err(lib_err(e)),
+    }
+}
+
+#[derive(Deserialize)]
+struct CounterfactualQuery {
+    /// The account whose lamport balance to search.
+    account: String,
+    /// Search range (lamports); defaults 0 .. 0.1 SOL.
+    lo: Option<u64>,
+    hi: Option<u64>,
+    cluster: Option<String>,
+    rpc: Option<String>,
+}
+
+/// The counterfactual threshold result — the balance at which the outcome flips.
+#[derive(Serialize)]
+struct CounterfactualResponse {
+    account: String,
+    lo: u64,
+    hi: u64,
+    /// The lowest balance in range whose outcome differs from the low bound, or
+    /// null if the outcome is the same across the whole range (no flip).
+    flips_at: Option<u64>,
+    /// Outcome (success) at the low and high bounds.
+    low_success: bool,
+    high_success: bool,
+    /// How many replays the binary search ran.
+    evaluations: u32,
+}
+
+/// GET /counterfactual/:signature — binary-search an account's lamport balance
+/// for the point where the transaction's outcome flips. Free: pure current-state
+/// replay, no archive.
+async fn counterfactual_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<CounterfactualQuery>,
+) -> Result<Json<CounterfactualResponse>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let lo = q.lo.unwrap_or(0);
+    let hi = q.hi.unwrap_or(100_000_000);
+    let account = q.account.clone();
+
+    let out = tokio::task::spawn_blocking(
+        move || -> Result<CounterfactualResponse, svmscope::Error> {
+            let replay = Scope::new(url).replay(&signature)?;
+            let acct = account.clone();
+            let threshold =
+                replay.find_threshold(lo, hi, move |v| vec![Mutation::lamports(acct.clone(), v)])?;
+            Ok(match threshold {
+                Some(t) => CounterfactualResponse {
+                    account,
+                    lo,
+                    hi,
+                    flips_at: Some(t.flips_at),
+                    low_success: t.low_success,
+                    high_success: t.high_success,
+                    evaluations: t.evaluations,
+                },
+                None => CounterfactualResponse {
+                    account,
+                    lo,
+                    hi,
+                    flips_at: None,
+                    low_success: false,
+                    high_success: false,
+                    evaluations: 2,
+                },
+            })
+        },
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
+
+    match out {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err(lib_err(e)),
+    }
+}
+
+/// GET /scan/:signature — auto-scan every account field (and SOL balance) for
+/// the numeric thresholds that flip the transaction's outcome. Free: local
+/// current-state replays, no archive.
+async fn scan_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<ClusterQuery>,
+) -> Result<Json<Vec<svmscope::BreakingPoint>>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let out = tokio::task::spawn_blocking(
+        move || -> Result<Vec<svmscope::BreakingPoint>, svmscope::Error> {
+            let scope = Scope::new(url);
+            let analysis = scope.analyze(&signature)?;
+            let accounts: Vec<String> =
+                analysis.accounts.iter().map(|a| a.address.clone()).collect();
+            svmscope::scan_breaking_points(
+                &scope,
+                &signature,
+                &accounts,
+                svmscope::ScanOptions::default(),
+            )
+        },
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
+
+    match out {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err(lib_err(e)),
+    }
+}
+
+/// GET /diagnose/:signature — plain-English "why did it fail, and how do I fix
+/// it?" over the recorded on-chain outcome. Free.
+async fn diagnose_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<ClusterQuery>,
+) -> Result<Json<svmscope::Diagnosis>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let out = tokio::task::spawn_blocking(move || Scope::new(url).diagnose(&signature))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+    match out {
+        Ok(d) => Ok(Json(d)),
+        Err(e) => Err(lib_err(e)),
+    }
+}
+
 /// GET /freeze/:signature — capture a self-contained fixture for offline replay.
 async fn freeze_handler(
     Path(signature): Path<String>,
@@ -830,6 +1016,10 @@ async fn main() {
         .route("/account/{address}", get(account_handler))
         .route("/signatures/{address}", get(signatures_handler))
         .route("/replay/{signature}", get(replay_handler))
+        .route("/replay_at_slot/{signature}", get(replay_at_slot_handler))
+        .route("/counterfactual/{signature}", get(counterfactual_handler))
+        .route("/scan/{signature}", get(scan_handler))
+        .route("/diagnose/{signature}", get(diagnose_handler))
         .route("/freeze/{signature}", get(freeze_handler))
         .route("/stats", get(stats_handler))
         // Order matters: rate limit first (cheapest rejection), then serve from
