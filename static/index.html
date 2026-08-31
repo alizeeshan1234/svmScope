@@ -706,6 +706,12 @@ body::after {
   border-radius: var(--r-md); background: var(--bg-2);
 }
 .cert-card .drift-list { margin-top: 6px; font-size: 12px; line-height: 1.7; color: var(--text-2); word-break: break-all; }
+.cf-panel { margin-top: var(--s-3); padding: 12px var(--s-3); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-2); }
+.cf-title { font-size: 12.5px; font-weight: 650; color: var(--text-1); margin-bottom: 9px; }
+.cf-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cf-select { background: var(--bg-2); color: var(--text-1); border: 1px solid var(--border-strong); border-radius: var(--r-sm); padding: 4px 8px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.cf-card { margin-top: 10px; padding: 10px var(--s-3); border-radius: var(--r-sm); background: var(--green-soft); border: 1px solid rgba(52,211,153,.24); font-size: 13px; color: var(--text-1); }
+.cf-card b { color: var(--text-1); }
 
 /* ---------- badges / replay ---------- */
 .badge {
@@ -1934,6 +1940,7 @@ function renderReplayPanel() {
     catch (e) { $('replay').innerHTML = `<div class="err-box">${esc(e.message)}</div>`; }
   });
   $('reconSlot')?.addEventListener('click', reconstructAtSlot);
+  $('cfRun')?.addEventListener('click', runCounterfactual);
 }
 // Fetch the baseline replay once and cache it on `analysis.replay`.
 async function ensureBaseline() {
@@ -1970,12 +1977,63 @@ function renderReplay(r) {
   const errText = r.error ? (r.error_name ? `${r.error_name} — ${r.error}` : r.error) : '';
   const err = errText ? `<div class="err-box">${esc(errText)}</div>` : '';
   const logs = r.logs && r.logs.length ? `<div class="logs">${renderLogs(r.logs)}</div>` : '';
+  const cfAccounts = (analysis.balance_change || [])
+    .map((b, i) => `<option value="${esc(b.address)}">${i === 0 ? '⛽ ' : ''}${esc(short(b.address))}</option>`)
+    .join('');
+  const cf = cfAccounts
+    ? `<div class="cf-panel">
+         <div class="cf-title">◎ Counterfactual — the smallest change that flips this</div>
+         <div class="cf-row">
+           <span class="cu-note">at what balance of</span>
+           <select id="cfAccount" class="cf-select">${cfAccounts}</select>
+           <span class="cu-note">does the outcome flip?</span>
+           <button class="btn ghost sm" id="cfRun">Find flip point</button>
+         </div>
+         <div id="cfResult"></div>
+       </div>`
+    : '';
   return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}
     <div class="slot-cta">
       <button class="btn ghost sm" id="reconSlot">⟲ Replay at slot</button>
       <span class="cu-note">Rewind SOL &amp; token balances and the clock to when this landed — free, with a fidelity certificate.</span>
     </div>
-    <div id="certPanel"></div>`;
+    <div id="certPanel"></div>
+    ${cf}`;
+}
+
+// Counterfactual search — binary-search an account's balance for the outcome
+// flip. Free: pure current-state replay, no archive.
+async function runCounterfactual() {
+  const acct = $('cfAccount')?.value;
+  if (!acct) return;
+  const btn = $('cfRun');
+  const out = $('cfResult');
+  if (btn) { btn.disabled = true; btn.textContent = 'Searching…'; }
+  if (out) out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>binary-searching the flip point…</div>';
+  try {
+    const qs = new URLSearchParams({ account: acct, ...clusterParams() }).toString();
+    const res = await api('/counterfactual/' + encodeURIComponent(currentSig) + '?' + qs);
+    if (!res.ok) throw new Error(await res.text());
+    if (out) out.innerHTML = renderCounterfactual(await res.json());
+  } catch (e) {
+    if (out) out.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Find flip point'; }
+  }
+}
+
+function renderCounterfactual(d) {
+  if (d.flips_at == null) {
+    return `<div class="drift-inline">No flip in range — the outcome stays <b>${d.low_success ? 'success' : 'revert'}</b> across ${fmt(d.lo)}–${fmt(d.hi)} lamports, so this account's balance isn't the deciding factor.</div>`;
+  }
+  const lands = d.high_success; // at the high bound
+  const line = lands
+    ? `reverts below <b>${fmt(d.flips_at)}</b> lamports · lands at ≥ <b>${fmt(d.flips_at)}</b>`
+    : `lands below <b>${fmt(d.flips_at)}</b> lamports · reverts at ≥ <b>${fmt(d.flips_at)}</b>`;
+  return `<div class="cf-card">
+    <div><b class="mono">${esc(short(d.account))}</b> — flip point at <b>${fmt(d.flips_at)}</b> lamports</div>
+    <div class="cu-note" style="margin-top:4px">${line} &nbsp;·&nbsp; found in ${d.evaluations} replays</div>
+  </div>`;
 }
 
 // Reconstructed replay-at-slot + fidelity certificate — the honest, precise

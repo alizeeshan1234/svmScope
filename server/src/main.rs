@@ -665,6 +665,87 @@ async fn replay_at_slot_handler(
     }
 }
 
+#[derive(Deserialize)]
+struct CounterfactualQuery {
+    /// The account whose lamport balance to search.
+    account: String,
+    /// Search range (lamports); defaults 0 .. 0.1 SOL.
+    lo: Option<u64>,
+    hi: Option<u64>,
+    cluster: Option<String>,
+    rpc: Option<String>,
+}
+
+/// The counterfactual threshold result — the balance at which the outcome flips.
+#[derive(Serialize)]
+struct CounterfactualResponse {
+    account: String,
+    lo: u64,
+    hi: u64,
+    /// The lowest balance in range whose outcome differs from the low bound, or
+    /// null if the outcome is the same across the whole range (no flip).
+    flips_at: Option<u64>,
+    /// Outcome (success) at the low and high bounds.
+    low_success: bool,
+    high_success: bool,
+    /// How many replays the binary search ran.
+    evaluations: u32,
+}
+
+/// GET /counterfactual/:signature — binary-search an account's lamport balance
+/// for the point where the transaction's outcome flips. Free: pure current-state
+/// replay, no archive.
+async fn counterfactual_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<CounterfactualQuery>,
+) -> Result<Json<CounterfactualResponse>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let lo = q.lo.unwrap_or(0);
+    let hi = q.hi.unwrap_or(100_000_000);
+    let account = q.account.clone();
+
+    let out = tokio::task::spawn_blocking(
+        move || -> Result<CounterfactualResponse, svmscope::Error> {
+            let replay = Scope::new(url).replay(&signature)?;
+            let acct = account.clone();
+            let threshold =
+                replay.find_threshold(lo, hi, move |v| vec![Mutation::lamports(acct.clone(), v)])?;
+            Ok(match threshold {
+                Some(t) => CounterfactualResponse {
+                    account,
+                    lo,
+                    hi,
+                    flips_at: Some(t.flips_at),
+                    low_success: t.low_success,
+                    high_success: t.high_success,
+                    evaluations: t.evaluations,
+                },
+                None => CounterfactualResponse {
+                    account,
+                    lo,
+                    hi,
+                    flips_at: None,
+                    low_success: false,
+                    high_success: false,
+                    evaluations: 2,
+                },
+            })
+        },
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
+
+    match out {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err(lib_err(e)),
+    }
+}
+
 /// GET /freeze/:signature — capture a self-contained fixture for offline replay.
 async fn freeze_handler(
     Path(signature): Path<String>,
@@ -884,6 +965,7 @@ async fn main() {
         .route("/signatures/{address}", get(signatures_handler))
         .route("/replay/{signature}", get(replay_handler))
         .route("/replay_at_slot/{signature}", get(replay_at_slot_handler))
+        .route("/counterfactual/{signature}", get(counterfactual_handler))
         .route("/freeze/{signature}", get(freeze_handler))
         .route("/stats", get(stats_handler))
         // Order matters: rate limit first (cheapest rejection), then serve from
