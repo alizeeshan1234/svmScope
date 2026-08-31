@@ -729,6 +729,8 @@ body::after {
 .dx-why b { color: var(--text-1); }
 .dx-fix { margin-top: 11px; padding: 10px 12px; border-radius: var(--r-sm); background: var(--green-soft); border: 1px solid rgba(52,211,153,.24); font-size: 13px; line-height: 1.55; color: var(--text-1); }
 .dx-fix-tag { display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--green); margin-right: 6px; }
+.dx-note { margin-top: 10px; font-size: 11.5px; line-height: 1.55; color: var(--text-2); }
+.dx-note b { color: var(--text-1); }
 
 /* ---------- badges / replay ---------- */
 .badge {
@@ -1759,10 +1761,12 @@ async function diagnoseIfFailed() {
     if (!d.failed) { card.innerHTML = ''; return; }
     const bold = s => esc(s || '').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
     const fix = d.fix ? `<div class="dx-fix"><span class="dx-fix-tag">How to fix</span> ${esc(d.fix)}</div>` : '';
+    const note = `<div class="dx-note">This is the <b>real on-chain reason</b>, read from the recorded outcome. A local replay (below) can show a <i>different</i> error — it runs against <i>today's</i> state, so time- or price-sensitive checks (e.g. an oracle freshness check → <span class="mono">InvalidTimestamp</span>) may trip first. That's state drift, not the original cause.</div>`;
     card.innerHTML = `<div class="dx-card">
       <div class="dx-head"><span class="dx-badge">✕ failed on-chain</span><span class="dx-title">${esc(d.headline)}</span></div>
       <div class="dx-why">${bold(d.explanation)}</div>
       ${fix}
+      ${note}
     </div>`;
   } catch (e) {
     card.innerHTML = `<div class="err-box">couldn't diagnose: ${esc(e.message)}</div>`;
