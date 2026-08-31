@@ -315,6 +315,16 @@ fn svm_from_loaded(loaded: &[(Address, Loaded)], features: &[FeatureToggle], slo
     svm
 }
 
+/// Per-account load info for building a fidelity report: the address, what kind
+/// of load it was, and a blake3 content hash of the bytes actually loaded.
+pub(crate) struct LoadedInfo {
+    pub address: String,
+    pub is_program: bool,
+    pub owner_is_system: bool,
+    pub data_len: usize,
+    pub hash: String,
+}
+
 /// The reconstructed world a transaction ran in, fetched once. Run any number of
 /// scenarios against it with [`ReplayContext::run`] — each gets a pristine SVM.
 pub(crate) struct ReplayContext {
@@ -478,6 +488,30 @@ impl ReplayContext {
     /// Warp the clock for subsequent runs (see [`TimeTravel`]).
     pub(crate) fn set_time_travel(&mut self, tt: TimeTravel) {
         self.time_travel = tt;
+    }
+
+    /// Enumerate every loaded account with the facts a fidelity certificate
+    /// needs — provenance and hashing are derived from this in the scope layer.
+    pub(crate) fn loaded_info(&self) -> Vec<LoadedInfo> {
+        self.loaded
+            .iter()
+            .map(|(addr, l)| match l {
+                Loaded::Data(a) => LoadedInfo {
+                    address: addr.to_string(),
+                    is_program: false,
+                    owner_is_system: a.owner == Address::default(),
+                    data_len: a.data.len(),
+                    hash: solana_blake3_hasher::hash(&a.data).to_string(),
+                },
+                Loaded::Program(elf) => LoadedInfo {
+                    address: addr.to_string(),
+                    is_program: true,
+                    owner_is_system: false,
+                    data_len: elf.len(),
+                    hash: solana_blake3_hasher::hash(elf).to_string(),
+                },
+            })
+            .collect()
     }
 
     /// Flip runtime feature gates for subsequent runs (see [`FeatureToggle`]).

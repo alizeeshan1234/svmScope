@@ -6303,6 +6303,7 @@ dependencies = [
  "sha2 0.10.9",
  "solana-account 4.3.2",
  "solana-address 2.6.1",
+ "solana-blake3-hasher",
  "solana-client",
  "solana-clock",
  "solana-instruction",

@@ -753,6 +753,72 @@ impl Fidelity {
     }
 }
 
+/// Where an account's loaded bytes came from — the honest per-account source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Provenance {
+    /// A frozen fixture — offline, content-addressed.
+    Fixture,
+    /// A historical archive, at the transaction's true slot.
+    HistoricalArchive,
+    /// Reconstructed from the transaction's own metadata (a pre-tx balance, or a
+    /// since-closed account rebuilt from `preTokenBalances`).
+    MetadataRewind,
+    /// Loaded at current state from a normal RPC — may differ from the true slot.
+    CurrentRpc,
+}
+
+/// One account's provenance within a replay.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountProvenance {
+    /// The account address.
+    pub address: String,
+    /// Where its loaded bytes came from.
+    pub source: Provenance,
+    /// Whether it was loaded as an executable program (its ELF) rather than data.
+    pub is_program: bool,
+    /// A blake3 hash of the exact bytes loaded, for content addressing.
+    pub hash: String,
+}
+
+/// An honest report of how faithful a replay's starting state is: the verdict,
+/// where every account's bytes came from, which accounts may have drifted from
+/// the transaction's true slot, and whether there is a recorded on-chain outcome
+/// to check the replay against. Trust is a product feature — svmscope should
+/// never silently hand back a convincing but historically inaccurate replay.
+#[derive(Debug, Clone, Serialize)]
+pub struct FidelityCertificate {
+    /// The overall fidelity tier of this replay.
+    pub fidelity: Fidelity,
+    /// The (possibly warped) clock the replay runs at, human-readable.
+    pub clock: String,
+    /// Provenance and hash of every loaded account.
+    pub accounts: Vec<AccountProvenance>,
+    /// Addresses whose bytes are current-state in a historical replay, so their
+    /// data may differ from the true slot. Empty for an exact or current replay.
+    pub drifted: Vec<String>,
+    /// Whether a recorded on-chain outcome exists to verify the replay against.
+    pub verifiable: bool,
+}
+
+impl FidelityCertificate {
+    /// A one-line human summary of the certificate.
+    pub fn summary(&self) -> String {
+        let n = self.accounts.len();
+        let verify = if self.verifiable {
+            "verifiable against mainnet"
+        } else {
+            "no recorded outcome"
+        };
+        match self.drifted.len() {
+            0 => format!("{} · {n} accounts, none drifted · {verify}", self.fidelity.label()),
+            d => format!(
+                "{} · {n} accounts, {d} may have drifted · {verify}",
+                self.fidelity.label()
+            ),
+        }
+    }
+}
+
 /// A transaction's reconstructed world — fetched once via [`Scope::replay`],
 /// then replayed locally any number of times. Every run builds a pristine SVM,
 /// so runs are independent, repeatable, and free.
@@ -777,6 +843,64 @@ impl Replay {
     /// How faithful this replay's starting state is to the transaction's slot.
     pub fn fidelity(&self) -> Fidelity {
         self.fidelity
+    }
+
+    /// An honest fidelity certificate for this replay: the verdict, per-account
+    /// provenance and hashes, which accounts may have drifted from the true slot,
+    /// and whether there is a recorded on-chain outcome to verify against.
+    pub fn certificate(&self) -> FidelityCertificate {
+        let accounts: Vec<AccountProvenance> = self
+            .ctx
+            .loaded_info()
+            .into_iter()
+            .map(|i| {
+                let source = match self.fidelity {
+                    Fidelity::Exact { .. } => Provenance::HistoricalArchive,
+                    // A balance-only account (system-owned, no data) is faithfully
+                    // rewound from metadata; program ELFs and program-owned data
+                    // accounts are still current-state.
+                    Fidelity::Reconstructed { .. }
+                        if !i.is_program && i.owner_is_system && i.data_len == 0 =>
+                    {
+                        Provenance::MetadataRewind
+                    }
+                    Fidelity::Reconstructed { .. } => Provenance::CurrentRpc,
+                    Fidelity::Current => Provenance::CurrentRpc,
+                };
+                AccountProvenance {
+                    address: i.address,
+                    source,
+                    is_program: i.is_program,
+                    hash: i.hash,
+                }
+            })
+            .collect();
+
+        // In a historical replay, any account still on current-state bytes is a
+        // potential drift point. A plainly-current replay isn't "drifted" — it
+        // never claimed to be historical.
+        let drifted = if matches!(self.fidelity, Fidelity::Current) {
+            Vec::new()
+        } else {
+            accounts
+                .iter()
+                .filter(|a| a.source == Provenance::CurrentRpc)
+                .map(|a| a.address.clone())
+                .collect()
+        };
+
+        let verifiable = self
+            .recorded
+            .as_ref()
+            .is_some_and(|r| r.error.as_deref() != Some("transaction metadata unavailable"));
+
+        FidelityCertificate {
+            fidelity: self.fidelity,
+            clock: self.ctx.describe_clock(),
+            accounts,
+            drifted,
+            verifiable,
+        }
     }
 
     /// Rebuild a replay from a frozen fixture — fully offline, no RPC. A v2
@@ -1108,6 +1232,32 @@ mod wait_tests {
             "reconstructed@442384762"
         );
         assert_eq!(Fidelity::Exact { slot: 100 }.label(), "exact@100");
+    }
+
+    #[test]
+    fn certificate_summary_discloses_drift_and_verifiability() {
+        let drifted = FidelityCertificate {
+            fidelity: Fidelity::Reconstructed { slot: 442384762 },
+            clock: "slot 442384762".to_string(),
+            accounts: Vec::new(),
+            drifted: vec!["AccA".to_string(), "AccB".to_string()],
+            verifiable: true,
+        };
+        let s = drifted.summary();
+        assert!(s.contains("reconstructed@442384762"), "{s}");
+        assert!(s.contains("2 may have drifted"), "{s}");
+        assert!(s.contains("verifiable against mainnet"), "{s}");
+
+        let clean = FidelityCertificate {
+            fidelity: Fidelity::Exact { slot: 5 },
+            clock: String::new(),
+            accounts: Vec::new(),
+            drifted: Vec::new(),
+            verifiable: false,
+        };
+        let s = clean.summary();
+        assert!(s.contains("none drifted"), "{s}");
+        assert!(s.contains("no recorded outcome"), "{s}");
     }
 
     #[test]

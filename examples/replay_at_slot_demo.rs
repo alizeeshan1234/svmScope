@@ -46,10 +46,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         b.result.error
     );
     println!("clock anchored to:    {}", recon.describe_clock());
-    if !b.result.logs.is_empty() {
-        println!("--- program logs ---");
-        for l in b.result.logs.iter().take(12) {
-            println!("  {l}");
+
+    // The fidelity certificate — honest provenance for the reconstructed replay.
+    let cert = recon.certificate();
+    println!("\nfidelity certificate: {}", cert.summary());
+    if !cert.drifted.is_empty() {
+        println!(
+            "  {} account(s) on current-state data (may differ from slot {}):",
+            cert.drifted.len(),
+            cert.fidelity.label()
+        );
+        for addr in cert.drifted.iter().take(8) {
+            println!("    drift  {addr}");
         }
     }
 
