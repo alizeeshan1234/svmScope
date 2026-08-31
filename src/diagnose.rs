@@ -74,15 +74,24 @@ pub(crate) fn diagnose_tx(tx: &Value, idl_for: impl Fn(&str) -> Option<Value>) -
 
     // Resolve the error to a name + message: Anchor logs are richest; otherwise
     // name the custom code via the failing program's IDL.
-    let (name, message) = if let Some((n, _num, m)) = &anchor {
+    let (name, message): (Option<String>, Option<String>) = if let Some((n, _num, m)) = &anchor {
         (Some(n.clone()), Some(m.clone()))
-    } else if let (Some(prog), Some(code)) = (&program, error_code) {
-        match idl_for(prog).and_then(|idl| error_for_code(&idl, code as u64)) {
-            Some(e) => (Some(e.name), Some(e.msg)),
+    } else {
+        // Try the failing program's IDL, then the shared Anchor framework map
+        // (framework error codes mean the same thing across every program, so it
+        // resolves even when the program isn't identified or has no IDL).
+        let from_idl = match (&program, error_code) {
+            (Some(prog), Some(code)) => {
+                idl_for(prog).and_then(|idl| error_for_code(&idl, code as u64)).map(|e| (e.name, e.msg))
+            }
+            _ => None,
+        };
+        match from_idl
+            .or_else(|| error_code.and_then(framework_error).map(|(n, m)| (n.to_string(), m.to_string())))
+        {
+            Some((n, m)) => (Some(n), Some(m)),
             None => (None, None),
         }
-    } else {
-        (None, None)
     };
 
     // When the error can't be named (no IDL / no Anchor log), interpret it from
@@ -175,6 +184,55 @@ fn parse_anchor_error(log: &str) -> Option<(String, i64, String)> {
         .map(|m| m.trim_end_matches('.').trim().to_string())
         .unwrap_or_default();
     Some((name, number, message))
+}
+
+/// The Anchor framework error codes (accurate, from anchor-lang's `ErrorCode`).
+/// These are the constraint/account failures every Anchor program shares — a
+/// custom code in one of these framework ranges resolves to the same name
+/// regardless of which program raised it. Program-specific errors (>= 6000) are
+/// deliberately not here; they need the program's own IDL.
+fn framework_error(code: i64) -> Option<(&'static str, &'static str)> {
+    Some(match code {
+        100 => ("InstructionMissing", "8-byte instruction identifier not provided"),
+        102 => ("InstructionDidNotDeserialize", "The program could not deserialize the given instruction"),
+        103 => ("InstructionDidNotSerialize", "The program could not serialize the given instruction"),
+        2000 => ("ConstraintMut", "A `mut` constraint was violated — an account expected to be writable wasn't marked writable"),
+        2001 => ("ConstraintHasOne", "A `has_one` constraint was violated — a stored field didn't match the account you passed"),
+        2002 => ("ConstraintSigner", "A `signer` constraint was violated — an account that must sign didn't"),
+        2003 => ("ConstraintRaw", "A raw constraint was violated"),
+        2004 => ("ConstraintOwner", "An `owner` constraint was violated — an account is owned by the wrong program"),
+        2005 => ("ConstraintRentExempt", "A rent-exemption constraint was violated"),
+        2006 => ("ConstraintSeeds", "A `seeds` constraint was violated — the PDA you passed doesn't match the expected seeds"),
+        2007 => ("ConstraintExecutable", "An `executable` constraint was violated"),
+        2011 => ("ConstraintClose", "A `close` constraint was violated"),
+        2012 => ("ConstraintAddress", "An `address` constraint was violated — an account address didn't match the required one"),
+        2014 => ("ConstraintTokenMint", "A token mint constraint was violated — the token account's mint is wrong"),
+        2015 => ("ConstraintTokenOwner", "A token owner constraint was violated"),
+        2019 => ("ConstraintSpace", "A `space` constraint was violated"),
+        2500 => ("RequireViolated", "A `require!` expression was violated"),
+        2501 => ("RequireEqViolated", "A `require_eq!` expression was violated"),
+        2502 => ("RequireKeysEqViolated", "A `require_keys_eq!` expression was violated"),
+        2503 => ("RequireNeqViolated", "A `require_neq!` expression was violated"),
+        2504 => ("RequireKeysNeqViolated", "A `require_keys_neq!` expression was violated"),
+        2505 => ("RequireGtViolated", "A `require_gt!` expression was violated"),
+        2506 => ("RequireGteViolated", "A `require_gte!` expression was violated"),
+        3001 => ("AccountDiscriminatorNotFound", "No 8-byte discriminator on the account — it's likely uninitialized or the wrong account"),
+        3002 => ("AccountDiscriminatorMismatch", "The account's discriminator didn't match — you passed the wrong account type"),
+        3003 => ("AccountDidNotDeserialize", "Failed to deserialize the account — its data doesn't match the expected layout"),
+        3005 => ("AccountNotEnoughKeys", "Not enough account keys given to the instruction"),
+        3006 => ("AccountNotMutable", "The given account is not mutable"),
+        3007 => ("AccountOwnedByWrongProgram", "The account is owned by a different program than expected"),
+        3008 => ("InvalidProgramId", "A program id was not as expected"),
+        3009 => ("InvalidProgramExecutable", "A program account is not executable"),
+        3010 => ("AccountNotSigner", "The given account did not sign"),
+        3011 => ("AccountNotSystemOwned", "The account is not owned by the System program"),
+        3012 => ("AccountNotInitialized", "The program expected this account to already be initialized"),
+        3014 => ("AccountNotAssociatedTokenAccount", "The given account is not the associated token account"),
+        3016 => ("AccountReallocExceedsLimit", "The account reallocation exceeds the per-instruction growth limit"),
+        4100 => ("DeclaredProgramIdMismatch", "The declared program id does not match the actual program id"),
+        4102 => ("InvalidNumericConversion", "A numeric conversion overflowed or was invalid"),
+        _ => return None,
+    })
 }
 
 fn between<'a>(s: &'a str, start: &str, end: &str) -> Option<&'a str> {
@@ -356,6 +414,31 @@ mod tests {
         let d = diagnose_tx(&tx, |_| Some(idl.clone()));
         assert_eq!(d.headline, "PoolPaused");
         assert!(d.explanation.contains("The pool is paused"));
+    }
+
+    #[test]
+    fn resolves_an_anchor_framework_error_without_an_idl() {
+        // Error 3012 (AccountNotInitialized) is a framework code — nameable with
+        // no IDL and no Anchor log line.
+        let tx = json!({
+            "meta": {
+                "err": { "InstructionError": [1, { "Custom": 3012 }] },
+                "logMessages": ["Program Foo invoke [1]", "Program Foo failed: custom program error: 0xbc4"]
+            }
+        });
+        let d = diagnose_tx(&tx, |_| None);
+        assert_eq!(d.headline, "AccountNotInitialized");
+        assert!(d.explanation.to_lowercase().contains("initialized"));
+    }
+
+    #[test]
+    fn does_not_misname_a_program_specific_custom_error() {
+        // 6006 is program-specific (>= 6000) — must NOT be mapped to a framework name.
+        let tx = json!({
+            "meta": { "err": { "InstructionError": [0, { "Custom": 6006 }] }, "logMessages": [] }
+        });
+        let d = diagnose_tx(&tx, |_| None);
+        assert_eq!(d.headline, "custom error 6006");
     }
 
     #[test]
