@@ -320,6 +320,61 @@ impl Scope {
         Ok(replay)
     }
 
+    /// Replay a transaction against archival account state at a **slot you
+    /// choose** — the "what if this ran at slot N?" primitive. Every account and
+    /// program ELF is loaded as of `slot`, and the clock is set to `slot`.
+    ///
+    /// Unlike [`Scope::replay_at_slot`] (which reconstructs the transaction's own
+    /// slot for free from metadata), an *arbitrary* slot needs real historical
+    /// account state, so this **requires** an archival endpoint set via
+    /// [`Scope::with_archive`] that honors the historical `slot` parameter (e.g.
+    /// Alchemy's Account Archive). A non-archival endpoint is detected and
+    /// refused rather than silently returning current state.
+    pub fn replay_at(&self, input: &str, slot: u64) -> Result<Replay> {
+        let archive = self.archive.as_ref().ok_or_else(|| {
+            Error::InvalidSpec(
+                "replaying at an arbitrary slot needs historical account state — set an archival \
+                 endpoint with Scope::with_archive(url) (e.g. Alchemy PAYG)"
+                    .into(),
+            )
+        })?;
+        if !crate::replay::archive_honors_slot(archive, slot) {
+            return Err(Error::InvalidSpec(format!(
+                "the archive endpoint ignored historical slot {slot} and returned current state — \
+                 replay_at needs an endpoint with account archival; a public node or Helius will not work"
+            )));
+        }
+
+        let signature = self.resolve_signature(input)?;
+        let tx = self.transaction_json(&signature)?;
+        let account_keys = utils::resolve_account_keys(&tx);
+        // The transaction's own metadata pre-state is only valid at its own slot;
+        // at an arbitrary slot the archive is authoritative, so pass none.
+        let pre = PreState::default();
+        let block_time = archive.get_block_time(slot).ok();
+        let mut ctx = crate::replay::build_context_at_slot(
+            archive,
+            &signature,
+            &account_keys,
+            slot,
+            block_time,
+            &pre,
+        )?;
+        self.preload_idls(&mut ctx);
+
+        let mut replay = Replay {
+            recorded: Some(OnchainRecord::from_tx_json(&tx)),
+            ctx,
+            time_travel: TimeTravel::default(),
+            fidelity: Fidelity::Exact { slot },
+        };
+        replay.warp_to_slot(slot);
+        if let Some(ts) = block_time {
+            replay.warp_to_timestamp(ts);
+        }
+        Ok(replay)
+    }
+
     /// Reconstruct the world for an **unsigned / not-yet-sent** transaction
     /// (base64 wire bytes) — the pre-flight "what will this do if I send it
     /// now?" primitive. Current on-chain state IS its pre-state, so no drift.

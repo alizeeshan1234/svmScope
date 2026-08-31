@@ -1921,9 +1921,12 @@ function renderReplayPanel() {
 
   const body = analysis.replay
     ? renderReplay(analysis.replay)
-    : `<button class="btn ghost sm" id="runReplay">▶ Run local replay</button>
-       <span class="cu-note" style="margin-left:10px">Re-execute this transaction locally against current state
-         (it succeeded on-chain; local replay can differ if state has since moved).</span>`;
+    : `<div class="slot-cta">
+         <button class="btn ghost sm" id="runReplay">▶ Run local replay</button>
+         <button class="btn ghost sm" id="reconSlot">⟲ Replay at slot</button>
+       </div>
+       <span class="cu-note" style="display:block;margin-top:8px"><b>Run local replay</b> re-executes against <i>current</i> state (it succeeded on-chain; local replay can differ if state has moved). <b>Replay at slot</b> rewinds balances &amp; the clock to when this landed — free, with a fidelity certificate.</span>
+       <div id="certPanel"></div>`;
   $('replay').innerHTML = body;
   $('runReplay')?.addEventListener('click', async () => {
     const b = $('runReplay'); b.disabled = true; b.textContent = '▶ Replaying…';
@@ -1969,7 +1972,7 @@ function renderReplay(r) {
   const logs = r.logs && r.logs.length ? `<div class="logs">${renderLogs(r.logs)}</div>` : '';
   return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}
     <div class="slot-cta">
-      <button class="btn ghost sm" id="reconSlot">⟲ Reconstruct at transaction's slot</button>
+      <button class="btn ghost sm" id="reconSlot">⟲ Replay at slot</button>
       <span class="cu-note">Rewind SOL &amp; token balances and the clock to when this landed — free, with a fidelity certificate.</span>
     </div>
     <div id="certPanel"></div>`;
@@ -1981,7 +1984,7 @@ function renderReplay(r) {
 async function reconstructAtSlot() {
   const btn = $('reconSlot');
   const panel = $('certPanel');
-  if (btn) { btn.disabled = true; btn.textContent = '⟲ Reconstructing…'; }
+  if (btn) { btn.disabled = true; btn.textContent = '⟲ Replaying at slot…'; }
   if (panel) panel.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>reconstructing at the transaction\'s slot…</div>';
   try {
     const res = await api('/replay_at_slot/' + encodeURIComponent(currentSig) + clusterQ());
@@ -1995,7 +1998,7 @@ async function reconstructAtSlot() {
   } catch (e) {
     if (panel) panel.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '⟲ Reconstruct at transaction\'s slot'; }
+    if (btn) { btn.disabled = false; btn.textContent = '⟲ Replay at slot'; }
   }
 }
 
