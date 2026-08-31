@@ -2,9 +2,11 @@
 FROM rust:1-slim AS build
 WORKDIR /app
 
-# Native deps for solana-client (TLS, protobuf) and the build.
+# Native deps for solana-client (TLS, protobuf) and the build. litesvm 0.15
+# (via agave-precompiles → openssl/vendored) builds OpenSSL from source, which
+# needs full perl (FindBin) and make — perl-base in the slim image isn't enough.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev protobuf-compiler ca-certificates \
+    pkg-config libssl-dev protobuf-compiler ca-certificates perl make \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy only what the server crate needs to compile. `include_str!` in
