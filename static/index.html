@@ -1932,7 +1932,8 @@ function renderReplayPanel() {
          <button class="btn ghost sm" id="reconSlot">⟲ Replay at slot</button>
        </div>
        <span class="cu-note" style="display:block;margin-top:8px"><b>Run local replay</b> re-executes against <i>current</i> state (it succeeded on-chain; local replay can differ if state has moved). <b>Replay at slot</b> rewinds balances &amp; the clock to when this landed — free, with a fidelity certificate.</span>
-       <div id="certPanel"></div>`;
+       <div id="certPanel"></div>
+       ${cfBox()}`;
   $('replay').innerHTML = body;
   $('runReplay')?.addEventListener('click', async () => {
     const b = $('runReplay'); b.disabled = true; b.textContent = '▶ Replaying…';
@@ -1966,6 +1967,24 @@ function driftHint(r) {
   for (const [re, why] of table) if (re.test(blob)) return why;
   return '';
 }
+// The counterfactual control — an account picker + "Find flip point". Shown in
+// the replay panel from the start (not gated behind a specific replay button).
+function cfBox() {
+  const opts = (analysis.balance_change || [])
+    .map((b, i) => `<option value="${esc(b.address)}">${i === 0 ? '⛽ ' : ''}${esc(short(b.address))}</option>`)
+    .join('');
+  if (!opts) return '';
+  return `<div class="cf-panel">
+    <div class="cf-title">◎ Counterfactual — the smallest change that flips this</div>
+    <div class="cf-row">
+      <span class="cu-note">at what balance of</span>
+      <select id="cfAccount" class="cf-select">${opts}</select>
+      <span class="cu-note">does the outcome flip?</span>
+      <button class="btn ghost sm" id="cfRun">Find flip point</button>
+    </div>
+    <div id="cfResult"></div>
+  </div>`;
+}
 function renderReplay(r) {
   const badge = r.success ? `<span class="badge ok"><span class="b-dot"></span>replay success</span>`
                           : `<span class="badge fail"><span class="b-dot"></span>replay failed</span>`;
@@ -1977,28 +1996,13 @@ function renderReplay(r) {
   const errText = r.error ? (r.error_name ? `${r.error_name} — ${r.error}` : r.error) : '';
   const err = errText ? `<div class="err-box">${esc(errText)}</div>` : '';
   const logs = r.logs && r.logs.length ? `<div class="logs">${renderLogs(r.logs)}</div>` : '';
-  const cfAccounts = (analysis.balance_change || [])
-    .map((b, i) => `<option value="${esc(b.address)}">${i === 0 ? '⛽ ' : ''}${esc(short(b.address))}</option>`)
-    .join('');
-  const cf = cfAccounts
-    ? `<div class="cf-panel">
-         <div class="cf-title">◎ Counterfactual — the smallest change that flips this</div>
-         <div class="cf-row">
-           <span class="cu-note">at what balance of</span>
-           <select id="cfAccount" class="cf-select">${cfAccounts}</select>
-           <span class="cu-note">does the outcome flip?</span>
-           <button class="btn ghost sm" id="cfRun">Find flip point</button>
-         </div>
-         <div id="cfResult"></div>
-       </div>`
-    : '';
   return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}
     <div class="slot-cta">
       <button class="btn ghost sm" id="reconSlot">⟲ Replay at slot</button>
       <span class="cu-note">Rewind SOL &amp; token balances and the clock to when this landed — free, with a fidelity certificate.</span>
     </div>
     <div id="certPanel"></div>
-    ${cf}`;
+    ${cfBox()}`;
 }
 
 // Counterfactual search — binary-search an account's balance for the outcome
