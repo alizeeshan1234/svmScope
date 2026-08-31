@@ -35,6 +35,7 @@ use crate::fixture::Fixture;
 use crate::replay::{
     FeatureToggle, Mutation, PreState, ReplayContext, ReplayResult, ScenarioOutcome, TimeTravel,
 };
+use crate::search::{search_threshold, Threshold};
 use crate::{cpi_tree, decode, diffs, idl, ixname, utils, CapturedTransaction};
 
 /// An RPC-backed client with caches. Everything svmscope fetches — transaction
@@ -1019,6 +1020,62 @@ impl Replay {
             explain,
             result,
         })
+    }
+
+    // --- counterfactual search -----------------------------------------------
+
+    /// Binary-search a numeric knob for the value at which the outcome flips —
+    /// "at what oracle price does this stop succeeding?", "what is the minimum
+    /// balance that avoids the revert?". `mutate(v)` builds the mutation(s) that
+    /// set the knob to candidate `v`; the search runs over the inclusive range
+    /// `[lo, hi]` and returns the boundary (or `None` if the outcome is the same
+    /// at both bounds). Every candidate is a fresh, independent replay, so the
+    /// search never mutates shared state. Assumes a single crossing.
+    ///
+    /// ```no_run
+    /// # use svmscope::{Mutation, Scope};
+    /// # let replay = Scope::new("").replay("")?;
+    /// // Lowest fee-payer balance at which the transaction still lands:
+    /// let payer = "…".to_string();
+    /// let boundary = replay.find_threshold(0, 5_000_000_000, |v| {
+    ///     vec![Mutation::lamports(payer.clone(), v)]
+    /// })?;
+    /// # Ok::<(), svmscope::Error>(())
+    /// ```
+    pub fn find_threshold(
+        &self,
+        lo: u64,
+        hi: u64,
+        mutate: impl Fn(u64) -> Vec<Mutation>,
+    ) -> Result<Option<Threshold>> {
+        search_threshold(lo, hi, |v| Ok(self.simulate(&mutate(v))?.result.success))
+    }
+
+    /// Shrink a set of mutations to a minimal subset that still flips the
+    /// outcome — "which of these changes actually caused the difference?".
+    ///
+    /// "Flips" means the subset's success differs from the un-mutated baseline.
+    /// Runs a greedy delta-debugging pass: drop each mutation whose removal keeps
+    /// the outcome flipped. Returns the minimal subset (input order preserved),
+    /// or an empty vec if the full set doesn't change the baseline outcome at all.
+    pub fn minimize_mutations(&self, mutations: &[Mutation]) -> Result<Vec<Mutation>> {
+        let baseline = self.run()?.result.success;
+        let target = self.simulate(mutations)?.result.success;
+        if target == baseline {
+            return Ok(Vec::new());
+        }
+        let mut keep = mutations.to_vec();
+        let mut i = 0;
+        while i < keep.len() {
+            let mut trial = keep.clone();
+            trial.remove(i);
+            if self.simulate(&trial)?.result.success == target {
+                keep = trial; // mutation i wasn't needed to keep the flip
+            } else {
+                i += 1; // it's load-bearing; keep it and move on
+            }
+        }
+        Ok(keep)
     }
 
     /// Run a suite of scenarios, each against a fresh copy of the state.

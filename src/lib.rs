@@ -133,6 +133,7 @@ mod program;
 mod replay;
 pub mod report;
 mod scope;
+mod search;
 pub mod spec;
 mod submit;
 pub(crate) mod utils;
@@ -158,6 +159,7 @@ pub use scope::{
     AccountProvenance, Fidelity, FidelityCertificate, OnchainRecord, Provenance, Replay, Replayed,
     Scope,
 };
+pub use search::Threshold;
 pub use submit::CapturedTransaction;
 
 /// Compile-checks every Rust example in the README as part of `cargo test`.
