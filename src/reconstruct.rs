@@ -14,6 +14,7 @@ use crate::error::{Error, Result};
 use crate::replay::Mutation;
 use crate::scope::{AccountState, Scope};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_request::RpcRequest;
 
@@ -229,6 +230,145 @@ pub fn reconstruct_account(
     })
 }
 
+// --- exact recursive reconstruction ----------------------------------------
+
+/// A reconstructed account plus whether it was reconstructed *exactly*.
+#[derive(Debug, Clone)]
+pub struct Recon {
+    /// The reconstructed state, or `None` if the account did not exist at the slot.
+    pub state: Option<AccountState>,
+    /// `true` only if every input in the dependency cone was itself reconstructed
+    /// exactly within budget — no co-account fell back to current state.
+    pub exact: bool,
+}
+
+/// Well-known infrastructure accounts (programs, sysvars) that are static or
+/// runtime-provided: never the coupled economic state we reconstruct, and
+/// recursing into them only wastes budget. `scope.replay` loads them correctly
+/// as-is (current program ELF / runtime sysvars).
+fn is_infra(address: &str) -> bool {
+    address.starts_with("Sysvar")
+        || matches!(
+            address,
+            "11111111111111111111111111111111"                 // System
+                | "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" // SPL Token
+                | "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" // Token-2022
+                | "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" // Associated Token
+                | "ComputeBudget111111111111111111111111111111"
+                | "NativeLoader1111111111111111111111111111111"
+                | "BPFLoader2111111111111111111111111111111111"
+                | "BPFLoaderUpgradeab1e11111111111111111111111"
+        )
+}
+
+/// The single most-recent successful write to `address` strictly before `slot`.
+fn last_write(src: &dyn LedgerSource, address: &str, slot: u64, max_pages: usize) -> Result<Option<WriteRef>> {
+    Ok(write_history(src, address, slot, 1, max_pages)?.into_iter().next())
+}
+
+/// Recursive, memoized dependency-cone reconstruction — the exact engine. To get
+/// an account's state at a slot it finds the last write, recursively reconstructs
+/// **that write's inputs at that write's slot**, replays the write against those
+/// exact inputs, and reads the account back out. Because every recursion targets
+/// a strictly-earlier slot the dependency graph is a DAG, so it terminates;
+/// memoization shares sub-results; a replay budget bounds the cone.
+pub struct Reconstructor<'a> {
+    scope: &'a Scope,
+    ledger: &'a dyn LedgerSource,
+    memo: HashMap<(String, u64), Recon>,
+    budget: usize,
+    max_pages: usize,
+    replays: usize,
+}
+
+impl<'a> Reconstructor<'a> {
+    /// A reconstructor over `scope` (for replay) and `ledger` (for history),
+    /// allowed at most `budget` transaction replays before falling back to
+    /// current state for the remaining cone (keeping it tractable, and honest).
+    pub fn new(scope: &'a Scope, ledger: &'a dyn LedgerSource, budget: usize) -> Self {
+        Reconstructor {
+            scope,
+            ledger,
+            memo: HashMap::new(),
+            budget,
+            max_pages: 20,
+            replays: 0,
+        }
+    }
+
+    /// How many transaction replays the reconstruction actually performed.
+    pub fn replays(&self) -> usize {
+        self.replays
+    }
+
+    /// Reconstruct `address`'s exact state going into `before_slot`.
+    pub fn reconstruct(&mut self, address: &str, before_slot: u64) -> Result<Recon> {
+        let key = (address.to_string(), before_slot);
+        if let Some(r) = self.memo.get(&key) {
+            return Ok(r.clone());
+        }
+
+        let recon = self.compute(address, before_slot)?;
+        self.memo.insert(key, recon.clone());
+        Ok(recon)
+    }
+
+    fn compute(&mut self, address: &str, before_slot: u64) -> Result<Recon> {
+        // The last write before the slot; none means the account didn't exist yet.
+        let Some(last) = last_write(self.ledger, address, before_slot, self.max_pages)? else {
+            return Ok(Recon {
+                state: None,
+                exact: true,
+            });
+        };
+
+        // Out of budget: fall back to current state, honestly marked inexact.
+        if self.replays >= self.budget {
+            let state = self.scope.account_data(address)?;
+            return Ok(Recon {
+                state,
+                exact: false,
+            });
+        }
+
+        // Reconstruct every input of the last write at that write's slot, then
+        // replay the write against those exact inputs.
+        let tx = self.ledger.transaction(&last.signature)?;
+        let keys = crate::utils::resolve_account_keys(&tx);
+        let mut muts: Vec<Mutation> = Vec::new();
+        let mut cone_exact = true;
+
+        for b in &keys {
+            if is_infra(b) {
+                continue; // static program / runtime sysvar — loaded correctly as-is
+            }
+            let rec_b = self.reconstruct(b, last.slot)?;
+            cone_exact &= rec_b.exact;
+            if let Some(s) = rec_b.state {
+                muts.push(Mutation::data(b.clone(), s.data));
+                muts.push(Mutation::lamports(b.clone(), s.lamports));
+            }
+        }
+
+        self.replays += 1;
+        let replay = match self.scope.replay(&last.signature) {
+            Ok(r) => r,
+            Err(_) => {
+                let state = self.scope.account_data(address)?;
+                return Ok(Recon {
+                    state,
+                    exact: false,
+                });
+            }
+        };
+        let state = replay.account_after(&muts, address)?;
+        Ok(Recon {
+            state,
+            exact: cone_exact,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +426,30 @@ mod tests {
         let sigs: Vec<&str> = hist.iter().map(|w| w.signature.as_str()).collect();
         // oldest-first, only successful writes strictly before slot 100.
         assert_eq!(sigs, vec!["s060", "s070", "s090"]);
+    }
+
+    #[test]
+    fn infra_accounts_are_recognised_and_skipped() {
+        assert!(is_infra("11111111111111111111111111111111")); // System
+        assert!(is_infra("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")); // SPL Token
+        assert!(is_infra("SysvarC1ock11111111111111111111111111111111")); // a sysvar
+        assert!(is_infra("ComputeBudget111111111111111111111111111111"));
+        // A normal PDA / data account is NOT infra — it gets reconstructed.
+        assert!(!is_infra("Cd2zEXTrYoV4UcDxZJumwZsz4A1bSZfRuZpEu5RJDDVk"));
+    }
+
+    #[test]
+    fn last_write_returns_the_most_recent_before_the_slot() {
+        let ledger = MockLedger {
+            sigs: vec![
+                w("s150", 150, false),
+                w("s099", 99, false), // most recent before 100
+                w("s050", 50, false),
+            ],
+        };
+        let lw = last_write(&ledger, "Acc", 100, 10).unwrap().unwrap();
+        assert_eq!(lw.signature, "s099");
+        assert!(last_write(&ledger, "Acc", 40, 10).unwrap().is_none());
     }
 
     #[test]
