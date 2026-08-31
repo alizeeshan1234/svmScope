@@ -251,7 +251,7 @@ fn describe_error(err: &Value) -> String {
             return name.to_string();
         }
         if let Some(c) = ie.get(1).and_then(|v| v.get("Custom")).and_then(|v| v.as_i64()) {
-            return format!("custom error {c}");
+            return format!("custom error {c} (0x{c:x})");
         }
     }
     // First key of an object error (e.g. "InsufficientFundsForFee").
@@ -274,14 +274,18 @@ fn build_explanation(
         (None, Some(p)) => format!("Program {} reverted", short(p)),
         (None, None) => "The transaction reverted".to_string(),
     };
+    // Logs print custom errors in hex ("failed: custom program error: 0x1771"),
+    // so show both bases or the card looks like it disagrees with the log.
     let with = match (name, code, message) {
-        (Some(n), Some(c), Some(m)) if !m.is_empty() => format!(" with **{n}** (error {c}): {m}"),
-        (Some(n), Some(c), _) => format!(" with **{n}** (error {c})"),
+        (Some(n), Some(c), Some(m)) if !m.is_empty() => {
+            format!(" with **{n}** (error {c} = 0x{c:x}): {m}")
+        }
+        (Some(n), Some(c), _) => format!(" with **{n}** (error {c} = 0x{c:x})"),
         (Some(n), None, Some(m)) if !m.is_empty() => format!(" with **{n}**: {m}"),
         (Some(n), None, _) => format!(" with **{n}**"),
         // Unresolved custom code — no public IDL to name it.
         (None, Some(c), _) => {
-            format!(" with the program's own **custom error {c}** (no public IDL was available to name it)")
+            format!(" with the program's own **custom error {c}** (0x{c:x}; no public IDL was available to name it)")
         }
         (None, None, _) => " and failed".to_string(),
     };
@@ -354,7 +358,7 @@ fn fix_hint(
     // No recognized pattern: give a useful generic pointer for a custom error.
     match (code, resolved) {
         (Some(c), false) => Some(format!(
-            "The program rejected the inputs with its own error {c}, but it publishes no on-chain IDL, so svmscope can't name it. Check the program's source or docs for what error {c} means, and the values this instruction expects."
+            "The program rejected the inputs with its own error {c} (0x{c:x}), but it publishes no on-chain IDL, so svmscope can't name it. Check the program's source or docs for what error {c} means, and the values this instruction expects."
         )),
         (Some(_), true) => Some(
             "The program rejected the inputs with this error. Review what that instruction requires and adjust the accounts or arguments accordingly.".into(),
@@ -438,7 +442,7 @@ mod tests {
             "meta": { "err": { "InstructionError": [0, { "Custom": 6006 }] }, "logMessages": [] }
         });
         let d = diagnose_tx(&tx, |_| None);
-        assert_eq!(d.headline, "custom error 6006");
+        assert_eq!(d.headline, "custom error 6006 (0x1776)");
     }
 
     #[test]
