@@ -557,6 +557,20 @@ impl Scope {
     /// `Ok(None)` means the account genuinely does not exist; `Err` means the
     /// RPC call itself failed. Keeping these distinct stops a network outage from
     /// masquerading as "account not found".
+    /// The account's current raw state on-chain — data bytes, lamports, owner —
+    /// or `None` if it doesn't exist. The free anchor and comparison point for
+    /// historical reconstruction (see the [`reconstruct`](crate::reconstruct)
+    /// module).
+    pub fn account_data(&self, address: &str) -> Result<Option<AccountState>> {
+        Ok(self
+            .account_raw(address)?
+            .map(|(owner, lamports, _executable, data)| AccountState {
+                data,
+                lamports,
+                owner,
+            }))
+    }
+
     fn account_raw(&self, address: &str) -> Result<Option<RawAccount>> {
         use base64::Engine;
         let resp: serde_json::Value = self
@@ -807,6 +821,17 @@ impl Fidelity {
             Fidelity::Exact { slot } => format!("exact@{slot}"),
         }
     }
+}
+
+/// A reconstructed account's raw state — its data bytes, lamports, and owner.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountState {
+    /// The account's raw data bytes.
+    pub data: Vec<u8>,
+    /// The account's lamport balance.
+    pub lamports: u64,
+    /// The account's owner program, base58.
+    pub owner: String,
 }
 
 /// Where an account's loaded bytes came from — the honest per-account source.
@@ -1126,6 +1151,26 @@ impl Replay {
             explain,
             result,
         })
+    }
+
+    /// Replay with `mutations` and read one account's raw post-execution state.
+    /// The building block of historical reconstruction (see the [`reconstruct`]
+    /// module): chain it by injecting an account's reconstructed bytes, replaying
+    /// its next write, and reading it out again. `None` if the account does not
+    /// exist after the replay.
+    ///
+    /// [`reconstruct`]: crate::reconstruct
+    pub fn account_after(
+        &self,
+        mutations: &[Mutation],
+        address: &str,
+    ) -> Result<Option<AccountState>> {
+        let (_result, acc) = self.ctx.run_and_read_account(mutations, address)?;
+        Ok(acc.map(|a| AccountState {
+            data: a.data,
+            lamports: a.lamports,
+            owner: a.owner.to_string(),
+        }))
     }
 
     // --- counterfactual search -----------------------------------------------

@@ -158,8 +158,8 @@ pub use replay::{
     AssertOutcome, FeatureToggle, Mutation, ReplayResult, ScenarioOutcome, TimeTravel,
 };
 pub use scope::{
-    AccountProvenance, Fidelity, FidelityCertificate, OnchainRecord, PatchComparison, Provenance,
-    Replay, Replayed, Scope,
+    AccountProvenance, AccountState, Fidelity, FidelityCertificate, OnchainRecord, PatchComparison,
+    Provenance, Replay, Replayed, Scope,
 };
 pub use invariant::Invariant;
 pub use search::Threshold;

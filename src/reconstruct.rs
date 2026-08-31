@@ -11,6 +11,8 @@
 //! today, and pointed at Old Faithful for full history later.
 
 use crate::error::{Error, Result};
+use crate::replay::Mutation;
+use crate::scope::{AccountState, Scope};
 use serde_json::{json, Value};
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_request::RpcRequest;
@@ -146,6 +148,85 @@ pub fn write_history(
     // The source returns newest-first; the replay wants oldest-first.
     out.reverse();
     Ok(out)
+}
+
+/// The result of reconstructing an account's state at a slot.
+#[derive(Debug, Clone)]
+pub struct Reconstructed {
+    /// The account reconstructed.
+    pub address: String,
+    /// The slot the state is reconstructed as-of (state going *into* this slot).
+    pub before_slot: u64,
+    /// The reconstructed state, or `None` if the account did not exist at the slot.
+    pub state: Option<AccountState>,
+    /// How many writes were successfully replayed into the reconstruction.
+    pub writes_replayed: usize,
+    /// How many writes in range were skipped (couldn't be loaded/replayed) — a
+    /// direct measure of how approximate the result is.
+    pub writes_skipped: usize,
+}
+
+/// Reconstruct `address`'s state going into `before_slot` by replaying its write
+/// history forward with LiteSVM — the free alternative to buying the state from
+/// an archive.
+///
+/// Each write is replayed with the account's running reconstructed state injected
+/// (via a data + lamports mutation), then the account is read out again to carry
+/// forward. Co-accounts are loaded at current state (best-effort), so this is
+/// **exact** where an update depends on the account itself plus the instruction
+/// data, and **approximate** where it depends on deeply-coupled co-account state
+/// — `writes_skipped` reports how much couldn't be replayed.
+///
+/// For an exact result the history must reach back to the account's creation;
+/// raise `max_writes` / `max_pages` for accounts with long histories.
+pub fn reconstruct_account(
+    scope: &Scope,
+    ledger: &dyn LedgerSource,
+    address: &str,
+    before_slot: u64,
+    max_writes: usize,
+    max_pages: usize,
+) -> Result<Reconstructed> {
+    let history = write_history(ledger, address, before_slot, max_writes, max_pages)?;
+
+    let mut state: Option<AccountState> = None;
+    let mut replayed = 0usize;
+    let mut skipped = 0usize;
+
+    for w in &history {
+        let replay = match scope.replay(&w.signature) {
+            Ok(r) => r,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
+        // Inject the account's running reconstructed state before replaying this
+        // write; the very first write starts from whatever the account was
+        // (empty at creation).
+        let muts: Vec<Mutation> = match &state {
+            Some(s) => vec![
+                Mutation::data(address.to_string(), s.data.clone()),
+                Mutation::lamports(address.to_string(), s.lamports),
+            ],
+            None => Vec::new(),
+        };
+        match replay.account_after(&muts, address) {
+            Ok(after) => {
+                state = after; // Some = new state; None = closed by this write
+                replayed += 1;
+            }
+            Err(_) => skipped += 1,
+        }
+    }
+
+    Ok(Reconstructed {
+        address: address.to_string(),
+        before_slot,
+        state,
+        writes_replayed: replayed,
+        writes_skipped: skipped,
+    })
 }
 
 #[cfg(test)]

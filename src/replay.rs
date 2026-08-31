@@ -606,6 +606,21 @@ impl ReplayContext {
         Ok((result, diffs))
     }
 
+    /// Replay with `mutations`, then read one account's raw post-execution state
+    /// — the primitive historical reconstruction chains: inject an account's
+    /// reconstructed bytes, replay the next write, read the account out again.
+    pub(crate) fn run_and_read_account(
+        &self,
+        mutations: &[Mutation],
+        address: &str,
+    ) -> Result<(ReplayResult, Option<Account>)> {
+        let (result, svm) = self.run_full(mutations)?;
+        let acc = Address::from_str(address)
+            .ok()
+            .and_then(|a| svm.get_account(&a));
+        Ok((result, acc))
+    }
+
     /// The pre-transaction state of an account (for delta assertions).
     fn pre_account(&self, address: &str) -> Option<&Account> {
         let addr = Address::from_str(address).ok()?;
