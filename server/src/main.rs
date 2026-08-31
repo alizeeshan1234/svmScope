@@ -14,7 +14,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use svmscope::spec::{MutationInput, SuiteRequest};
@@ -612,6 +612,59 @@ async fn replay_handler(
     }
 }
 
+/// The reconstructed replay-at-slot response: the outcome plus an honest
+/// fidelity certificate the UI can show instead of guessing at state drift.
+#[derive(Serialize)]
+struct ReplayAtSlotResponse {
+    result: ReplayResult,
+    /// The fidelity label, e.g. `reconstructed@442384762`.
+    fidelity: String,
+    /// One-line certificate summary.
+    certificate: String,
+    /// The (anchored) clock the replay ran at.
+    clock: String,
+    /// Addresses still on current-state data that may differ from the true slot.
+    drifted: Vec<String>,
+    /// Whether a recorded on-chain outcome exists to verify against.
+    verifiable: bool,
+}
+
+/// GET /replay_at_slot/:signature — replay against the transaction's slot at the
+/// best fidelity the free data allows, with a per-account drift certificate.
+async fn replay_at_slot_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<ClusterQuery>,
+) -> Result<Json<ReplayAtSlotResponse>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let out = tokio::task::spawn_blocking(
+        move || -> Result<ReplayAtSlotResponse, svmscope::Error> {
+            let replay = Scope::new(url).replay_at_slot(&signature)?;
+            let cert = replay.certificate();
+            let result = replay.run()?.result;
+            Ok(ReplayAtSlotResponse {
+                result,
+                fidelity: cert.fidelity.label(),
+                certificate: cert.summary(),
+                clock: cert.clock.clone(),
+                drifted: cert.drifted.clone(),
+                verifiable: cert.verifiable,
+            })
+        },
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
+
+    match out {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err(lib_err(e)),
+    }
+}
+
 /// GET /freeze/:signature — capture a self-contained fixture for offline replay.
 async fn freeze_handler(
     Path(signature): Path<String>,
@@ -830,6 +883,7 @@ async fn main() {
         .route("/account/{address}", get(account_handler))
         .route("/signatures/{address}", get(signatures_handler))
         .route("/replay/{signature}", get(replay_handler))
+        .route("/replay_at_slot/{signature}", get(replay_at_slot_handler))
         .route("/freeze/{signature}", get(freeze_handler))
         .route("/stats", get(stats_handler))
         // Order matters: rate limit first (cheapest rejection), then serve from

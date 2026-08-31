@@ -699,6 +699,13 @@ body::after {
   color: var(--text-2); font-size: 12px; line-height: 1.55;
 }
 .drift-inline b { color: var(--text-1); }
+.slot-cta { margin-top: var(--s-3); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cert-card {
+  margin-top: var(--s-3); padding: 11px var(--s-3);
+  border: 1px solid var(--border); border-left: 2px solid var(--green);
+  border-radius: var(--r-md); background: var(--bg-2);
+}
+.cert-card .drift-list { margin-top: 6px; font-size: 12px; line-height: 1.7; color: var(--text-2); word-break: break-all; }
 
 /* ---------- badges / replay ---------- */
 .badge {
@@ -1923,6 +1930,7 @@ function renderReplayPanel() {
     try { await ensureBaseline(); renderReplayPanel(); }
     catch (e) { $('replay').innerHTML = `<div class="err-box">${esc(e.message)}</div>`; }
   });
+  $('reconSlot')?.addEventListener('click', reconstructAtSlot);
 }
 // Fetch the baseline replay once and cache it on `analysis.replay`.
 async function ensureBaseline() {
@@ -1959,7 +1967,57 @@ function renderReplay(r) {
   const errText = r.error ? (r.error_name ? `${r.error_name} — ${r.error}` : r.error) : '';
   const err = errText ? `<div class="err-box">${esc(errText)}</div>` : '';
   const logs = r.logs && r.logs.length ? `<div class="logs">${renderLogs(r.logs)}</div>` : '';
-  return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}`;
+  return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}
+    <div class="slot-cta">
+      <button class="btn ghost sm" id="reconSlot">⟲ Reconstruct at transaction's slot</button>
+      <span class="cu-note">Rewind SOL &amp; token balances and the clock to when this landed — free, with a fidelity certificate.</span>
+    </div>
+    <div id="certPanel"></div>`;
+}
+
+// Reconstructed replay-at-slot + fidelity certificate — the honest, precise
+// version of the heuristic drift hint above. Opt-in, so the default replay
+// (clock at now) is never changed underneath the user.
+async function reconstructAtSlot() {
+  const btn = $('reconSlot');
+  const panel = $('certPanel');
+  if (btn) { btn.disabled = true; btn.textContent = '⟲ Reconstructing…'; }
+  if (panel) panel.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>reconstructing at the transaction\'s slot…</div>';
+  try {
+    const res = await api('/replay_at_slot/' + encodeURIComponent(currentSig) + clusterQ());
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    if (panel) panel.innerHTML = renderCertificate(data);
+    $('driftToggle')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      const d = $('driftList'); if (d) d.classList.toggle('hidden');
+    });
+  } catch (e) {
+    if (panel) panel.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⟲ Reconstruct at transaction\'s slot'; }
+  }
+}
+
+function renderCertificate(d) {
+  const r = d.result;
+  const badge = r.success
+    ? `<span class="badge ok"><span class="b-dot"></span>reconstructed replay success</span>`
+    : `<span class="badge fail"><span class="b-dot"></span>reconstructed replay failed</span>`;
+  const errText = r.error ? (r.error_name ? `${r.error_name} — ${r.error}` : r.error) : '';
+  const err = errText ? `<div class="err-box">${esc(errText)}</div>` : '';
+  const n = (d.drifted || []).length;
+  const drift = n
+    ? `<div class="drift-inline"><b>${n}</b> account${n === 1 ? '' : 's'} still on <b>current-state data</b> — may differ from the true slot
+         (<a href="#" id="driftToggle">show</a>). Data-drift needs a historical archive to close; balances &amp; clock are already faithful.
+         <div id="driftList" class="drift-list hidden">${d.drifted.map(esc).join('<br>')}</div></div>`
+    : `<div class="drift-inline">No account-data drift — this replay is fully faithful to the slot.</div>`;
+  const verify = d.verifiable ? 'verifiable against mainnet' : 'no recorded outcome to verify against';
+  return `<div class="cert-card">
+    <div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> CU · <span class="mono">${esc(d.fidelity)}</span></span></div>
+    <div class="cu-note" style="margin:6px 0 2px">clock <span class="mono">${esc(d.clock)}</span> · ${verify}</div>
+    ${err}${drift}
+  </div>`;
 }
 
 // ---------------- one-click what-if scenarios ----------------
