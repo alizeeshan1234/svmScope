@@ -27,19 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n{} breaking point(s) found — this transaction breaks when:", bps.len());
     for bp in &bps {
-        let dir = if bp.breaks_below {
-            format!("drops below {}", bp.flips_at)
-        } else {
-            format!("reaches {} or above", bp.flips_at)
-        };
-        println!(
-            "  · {}.{} {}   (currently {}, {} replays)",
-            short(&bp.account),
-            bp.field,
-            dir,
-            bp.current,
-            bp.evaluations
-        );
+        println!("  · {} · {} {}", short(&bp.account), bp.field, bp.condition);
     }
     Ok(())
 }

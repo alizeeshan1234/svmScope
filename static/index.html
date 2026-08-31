@@ -2073,9 +2073,8 @@ function renderBreakingPoints(bps) {
     return `<div class="drift-inline">No breaking points found in the tested range — this transaction is robust to the balances and fields checked.</div>`;
   }
   const rows = bps.map(bp => {
-    const when = bp.breaks_below
-      ? `drops below <b>${fmt(bp.flips_at)}</b>`
-      : `reaches <b>${fmt(bp.flips_at)}</b> or above`;
+    // Bold + comma-format any number inside the condition phrase.
+    const when = esc(bp.condition).replace(/\d{4,}/g, m => '<b>' + fmt(parseInt(m)) + '</b>');
     const label = bp.field === 'SOL balance'
       ? `${esc(short(bp.account))} · SOL balance`
       : `${esc(short(bp.account))} · <span class="mono">${esc(bp.field)}</span>`;
