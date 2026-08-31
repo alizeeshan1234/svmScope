@@ -259,6 +259,13 @@ fn fix_hint(
             return Some((*fix).to_string());
         }
     }
+    // A swap that reverted with an unnamed custom error is, in practice, almost
+    // always a slippage / minimum-output failure — say so even without the IDL.
+    if code.is_some() && !resolved && (blob.contains("swap") || blob.contains("route")) {
+        return Some(
+            "This transaction is a token swap that reverted. On a DEX or aggregator, an unnamed custom error here is almost always a slippage / minimum-output failure — the price moved past your limit between quote and execution. Fix: increase your slippage tolerance, or re-quote right before sending.".into(),
+        );
+    }
     // No recognized pattern: give a useful generic pointer for a custom error.
     match (code, resolved) {
         (Some(c), false) => Some(format!(
