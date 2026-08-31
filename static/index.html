@@ -1928,10 +1928,10 @@ function renderReplayPanel() {
   const body = analysis.replay
     ? renderReplay(analysis.replay)
     : `<div class="slot-cta">
-         <button class="btn ghost sm" id="runReplay">▶ Run local replay</button>
-         <button class="btn ghost sm" id="reconSlot">⟲ Replay at slot</button>
+         <button class="btn ghost sm" id="runReplay">▶ Replay now</button>
+         <button class="btn ghost sm" id="reconSlot">⟲ Replay as it happened</button>
        </div>
-       <span class="cu-note" style="display:block;margin-top:8px"><b>Run local replay</b> re-executes against <i>current</i> state (it succeeded on-chain; local replay can differ if state has moved). <b>Replay at slot</b> rewinds balances &amp; the clock to when this landed — free, with a fidelity certificate.</span>
+       <span class="cu-note" style="display:block;margin-top:8px"><b>Replay now</b> re-runs this transaction against <i>today's</i> on-chain state. <b>Replay as it happened</b> rewinds the balances and clock back to the exact moment it originally landed — free, and it tells you how accurate the result is.</span>
        <div id="certPanel"></div>
        ${cfBox()}`;
   $('replay').innerHTML = body;
@@ -1975,12 +1975,12 @@ function cfBox() {
     .join('');
   if (!opts) return '';
   return `<div class="cf-panel">
-    <div class="cf-title">◎ Counterfactual — the smallest change that flips this</div>
+    <div class="cf-title">◎ What-if: find the breaking point</div>
     <div class="cf-row">
-      <span class="cu-note">at what balance of</span>
+      <span class="cu-note">how low can</span>
       <select id="cfAccount" class="cf-select">${opts}</select>
-      <span class="cu-note">does the outcome flip?</span>
-      <button class="btn ghost sm" id="cfRun">Find flip point</button>
+      <span class="cu-note">'s SOL balance go before this transaction fails?</span>
+      <button class="btn ghost sm" id="cfRun">Find it</button>
     </div>
     <div id="cfResult"></div>
   </div>`;
@@ -1998,8 +1998,8 @@ function renderReplay(r) {
   const logs = r.logs && r.logs.length ? `<div class="logs">${renderLogs(r.logs)}</div>` : '';
   return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}
     <div class="slot-cta">
-      <button class="btn ghost sm" id="reconSlot">⟲ Replay at slot</button>
-      <span class="cu-note">Rewind SOL &amp; token balances and the clock to when this landed — free, with a fidelity certificate.</span>
+      <button class="btn ghost sm" id="reconSlot">⟲ Replay as it happened</button>
+      <span class="cu-note">Rewind the balances and clock back to the moment this transaction landed — free, with an accuracy report.</span>
     </div>
     <div id="certPanel"></div>
     ${cfBox()}`;
@@ -2022,21 +2022,21 @@ async function runCounterfactual() {
   } catch (e) {
     if (out) out.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Find flip point'; }
+    if (btn) { btn.disabled = false; btn.textContent = 'Find it'; }
   }
 }
 
 function renderCounterfactual(d) {
   if (d.flips_at == null) {
-    return `<div class="drift-inline">No flip in range — the outcome stays <b>${d.low_success ? 'success' : 'revert'}</b> across ${fmt(d.lo)}–${fmt(d.hi)} lamports, so this account's balance isn't the deciding factor.</div>`;
+    return `<div class="drift-inline">This account's balance doesn't decide the outcome — the transaction stays <b>${d.low_success ? 'a success' : 'a failure'}</b> anywhere from ${fmt(d.lo)} to ${fmt(d.hi)} lamports.</div>`;
   }
-  const lands = d.high_success; // at the high bound
+  const lands = d.high_success; // outcome at the high (fuller-balance) end
   const line = lands
-    ? `reverts below <b>${fmt(d.flips_at)}</b> lamports · lands at ≥ <b>${fmt(d.flips_at)}</b>`
-    : `lands below <b>${fmt(d.flips_at)}</b> lamports · reverts at ≥ <b>${fmt(d.flips_at)}</b>`;
+    ? `Below <b>${fmt(d.flips_at)}</b> lamports it <b>fails</b>; at <b>${fmt(d.flips_at)}</b> or above it <b>succeeds</b>.`
+    : `Below <b>${fmt(d.flips_at)}</b> lamports it <b>succeeds</b>; at <b>${fmt(d.flips_at)}</b> or above it <b>fails</b>.`;
   return `<div class="cf-card">
-    <div><b class="mono">${esc(short(d.account))}</b> — flip point at <b>${fmt(d.flips_at)}</b> lamports</div>
-    <div class="cu-note" style="margin-top:4px">${line} &nbsp;·&nbsp; found in ${d.evaluations} replays</div>
+    <div><b class="mono">${esc(short(d.account))}</b> needs at least <b>${fmt(d.flips_at)}</b> lamports for this transaction to work.</div>
+    <div class="cu-note" style="margin-top:4px">${line} &nbsp;·&nbsp; (tried ${d.evaluations} times to pin down the exact number.)</div>
   </div>`;
 }
 
@@ -2046,7 +2046,7 @@ function renderCounterfactual(d) {
 async function reconstructAtSlot() {
   const btn = $('reconSlot');
   const panel = $('certPanel');
-  if (btn) { btn.disabled = true; btn.textContent = '⟲ Replaying at slot…'; }
+  if (btn) { btn.disabled = true; btn.textContent = '⟲ Replaying…'; }
   if (panel) panel.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>reconstructing at the transaction\'s slot…</div>';
   try {
     const res = await api('/replay_at_slot/' + encodeURIComponent(currentSig) + clusterQ());
@@ -2060,27 +2060,27 @@ async function reconstructAtSlot() {
   } catch (e) {
     if (panel) panel.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '⟲ Replay at slot'; }
+    if (btn) { btn.disabled = false; btn.textContent = '⟲ Replay as it happened'; }
   }
 }
 
 function renderCertificate(d) {
   const r = d.result;
   const badge = r.success
-    ? `<span class="badge ok"><span class="b-dot"></span>reconstructed replay success</span>`
-    : `<span class="badge fail"><span class="b-dot"></span>reconstructed replay failed</span>`;
+    ? `<span class="badge ok"><span class="b-dot"></span>replayed as it happened</span>`
+    : `<span class="badge fail"><span class="b-dot"></span>replay failed</span>`;
   const errText = r.error ? (r.error_name ? `${r.error_name} — ${r.error}` : r.error) : '';
   const err = errText ? `<div class="err-box">${esc(errText)}</div>` : '';
   const n = (d.drifted || []).length;
   const drift = n
-    ? `<div class="drift-inline"><b>${n}</b> account${n === 1 ? '' : 's'} still on <b>current-state data</b> — may differ from the true slot
-         (<a href="#" id="driftToggle">show</a>). Data-drift needs a historical archive to close; balances &amp; clock are already faithful.
+    ? `<div class="drift-inline"><b>${n}</b> account${n === 1 ? '' : 's'} still use <b>today's data</b>, so those parts may differ from back then
+         (<a href="#" id="driftToggle">show which</a>). Getting them exactly right needs a paid history archive — but the SOL &amp; token balances and the clock are already correct.
          <div id="driftList" class="drift-list hidden">${d.drifted.map(esc).join('<br>')}</div></div>`
-    : `<div class="drift-inline">No account-data drift — this replay is fully faithful to the slot.</div>`;
-  const verify = d.verifiable ? 'verifiable against mainnet' : 'no recorded outcome to verify against';
+    : `<div class="drift-inline">Every account was rebuilt correctly — this replay is fully faithful to that moment.</div>`;
+  const verify = d.verifiable ? ' · matches the real on-chain result' : '';
   return `<div class="cert-card">
-    <div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> CU · <span class="mono">${esc(d.fidelity)}</span></span></div>
-    <div class="cu-note" style="margin:6px 0 2px">clock <span class="mono">${esc(d.clock)}</span> · ${verify}</div>
+    <div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>
+    <div class="cu-note" style="margin:6px 0 2px">Replayed as of the moment it landed — <span class="mono">${esc(d.clock)}</span>${verify}</div>
     ${err}${drift}
   </div>`;
 }
