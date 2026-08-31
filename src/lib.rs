@@ -130,6 +130,7 @@ mod idl_encode;
 mod idl_model;
 pub(crate) mod ixname;
 mod program;
+mod invariant;
 mod replay;
 pub mod report;
 mod scope;
@@ -159,6 +160,7 @@ pub use scope::{
     AccountProvenance, Fidelity, FidelityCertificate, OnchainRecord, Provenance, Replay, Replayed,
     Scope,
 };
+pub use invariant::Invariant;
 pub use search::Threshold;
 pub use submit::CapturedTransaction;
 
