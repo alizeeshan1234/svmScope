@@ -131,6 +131,7 @@ mod idl_model;
 pub(crate) mod ixname;
 mod program;
 mod invariant;
+pub mod reconstruct;
 mod replay;
 pub mod report;
 mod scope;
