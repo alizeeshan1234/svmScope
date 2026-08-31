@@ -134,6 +134,7 @@ mod invariant;
 pub mod reconstruct;
 mod replay;
 pub mod report;
+pub mod scan;
 mod scope;
 mod search;
 pub mod spec;
@@ -162,6 +163,7 @@ pub use scope::{
     Provenance, Replay, Replayed, Scope,
 };
 pub use invariant::Invariant;
+pub use scan::{scan_breaking_points, BreakingPoint, ScanOptions};
 pub use search::Threshold;
 pub use submit::CapturedTransaction;
 
