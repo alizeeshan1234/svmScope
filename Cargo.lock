@@ -6322,7 +6322,6 @@ name = "svmscope-server"
 version = "0.3.0"
 dependencies = [
  "axum",
- "reqwest",
  "serde",
  "serde_json",
  "svmscope",

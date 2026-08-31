@@ -1996,8 +1996,8 @@ function cfBox() {
     <div id="cfResult"></div>
     <div class="cf-scan-row">
       <button class="btn ghost sm" id="cfScanAll">⚡ Scan for all breaking points</button>
-      <button class="btn ghost sm" id="cfNarrate">🧠 AI security read-out</button>
-      <span class="cu-note">Scan finds every threshold that breaks this transaction; the AI read-out explains them in plain English.</span>
+      <button class="btn ghost sm" id="cfNarrate">📋 Explain in plain English</button>
+      <span class="cu-note">Scan lists every threshold that breaks this transaction; the read-out explains them as a security briefing — instant, free, no account needed.</span>
     </div>
     <div id="cfScanResult"></div>
     <div id="cfNarrateResult"></div>
@@ -2076,33 +2076,86 @@ async function runScan() {
   }
 }
 
-// AI security read-out — narrates the transaction + its breaking points.
+// Plain-English read-out — a deterministic narrator over the scan's findings.
+// Pure client-side: no model, no API, no cost, and it can't hallucinate because
+// it only restates what the scan proved.
 async function runNarrate() {
   const btn = $('cfNarrate');
   const out = $('cfNarrateResult');
-  if (btn) { btn.disabled = true; btn.textContent = '🧠 Analyzing…'; }
-  if (out) out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>the auditor is reviewing this transaction…</div>';
+  if (btn) { btn.disabled = true; btn.textContent = '📋 Reading…'; }
+  if (out) out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>reviewing this transaction…</div>';
   try {
     const qs = new URLSearchParams(clusterParams()).toString();
-    const res = await api('/narrate/' + encodeURIComponent(currentSig) + (qs ? '?' + qs : ''));
+    const res = await api('/scan/' + encodeURIComponent(currentSig) + (qs ? '?' + qs : ''));
     if (!res.ok) throw new Error(await res.text());
-    const d = await res.json();
-    if (out) out.innerHTML = renderNarration(d.narration);
+    const bps = await res.json();
+    if (out) out.innerHTML = renderNarration(narrateScan(bps));
   } catch (e) {
     if (out) out.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '🧠 AI security read-out'; }
+    if (btn) { btn.disabled = false; btn.textContent = '📋 Explain in plain English'; }
   }
 }
 
+// Turn the structured breaking points into a grounded plain-English briefing.
+function narrateScan(bps) {
+  if (!bps.length) {
+    return "svmscope found no way to break this transaction within the ranges tested — it's robust to the account and field changes checked.";
+  }
+  const names = list => {
+    const u = [...new Set(list.map(b => short(b.account)))];
+    if (u.length === 1) return `**${u[0]}**`;
+    if (u.length === 2) return `**${u[0]}** and **${u[1]}**`;
+    return u.slice(0, -1).map(a => `**${a}**`).join(', ') + `, and **${u[u.length - 1]}**`;
+  };
+
+  const existence = bps.filter(b => b.field === 'existence');
+  const owner = bps.filter(b => b.field === 'owner program');
+  const frozen = bps.filter(b => b.condition === 'is frozen');
+  const authority = bps.filter(b => b.field === 'authority');
+  const mint = bps.filter(b => b.field === 'mint');
+  const sol = bps.filter(b => b.field === 'SOL balance');
+  const known = new Set(['existence', 'owner program', 'authority', 'mint', 'SOL balance', 'state']);
+  const fields = bps.filter(b => !known.has(b.field));
+
+  const nAcc = new Set(bps.map(b => b.account)).size;
+  const paras = [];
+  paras.push(`svmscope automatically found **${bps.length}** way${bps.length === 1 ? '' : 's'} this transaction can break, across **${nAcc}** account${nAcc === 1 ? '' : 's'}.`);
+
+  // Structural dependencies — the routine ones.
+  const structural = [];
+  if (existence.length) structural.push(`close ${names(existence)} (each must stay open)`);
+  if (owner.length) structural.push(`reassign the owner program of an involved account`);
+  if (structural.length) {
+    paras.push(`**Structural dependencies** — normal, but worth knowing: it reverts if you ${structural.join(', or if you ')}. These are the accounts the transaction simply needs present and intact.`);
+  }
+
+  // The notable security-relevant ones.
+  const notable = [];
+  if (frozen.length) notable.push(`${names(frozen)} must **not be frozen** — a frozen token account can't move funds, so freezing it blocks the transfer`);
+  if (authority.length) notable.push(`the **authority** of ${names(authority)} must not change — it signs the transfer, so its ownership is security-critical`);
+  if (mint.length) notable.push(`the **mint** on ${names(mint)} must match — the transfer is checked against it on both sides`);
+  fields.forEach(b => notable.push(`${short(b.account)}'s **${b.field}** ${b.condition}`));
+  if (notable.length) {
+    paras.push(`**Notable conditions:** ${notable.join('; ')}.`);
+  }
+
+  // Economic requirement.
+  if (sol.length) {
+    const s = sol[0];
+    paras.push(`**Economically**, ${short(s.account)} needs at least **${fmt(s.flips_at || Number((s.condition.match(/\d[\d,]*/) || [])[0]?.replace(/,/g, '')) || 0)}** lamports (essentially the fee) for the transaction to land.`);
+  }
+
+  return paras.join('\n\n');
+}
+
 function renderNarration(text) {
-  // Render the prose as paragraphs, bolding **spans**.
   const html = esc(text || '')
     .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
     .split(/\n\n+/)
     .map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`)
     .join('');
-  return `<div class="ai-card"><div class="ai-head">🧠 AI security read-out</div>${html}</div>`;
+  return `<div class="ai-card"><div class="ai-head">📋 Plain-English read-out</div>${html}</div>`;
 }
 
 function renderBreakingPoints(bps) {

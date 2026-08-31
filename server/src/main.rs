@@ -782,107 +782,6 @@ async fn scan_handler(
     }
 }
 
-#[derive(Serialize)]
-struct NarrateResponse {
-    narration: String,
-}
-
-const AUDITOR_SYSTEM: &str = "You are a senior Solana security auditor reviewing a transaction. \
-You are given the programs and instructions it invokes, whether it succeeded on-chain, and an \
-automatically-discovered list of the ways it can be broken — each entry is a single account-state \
-change that flips the transaction from success to failure. Write a concise, plain-English security \
-read-out for a developer:\n\
-- Open with one sentence on what the transaction does.\n\
-- Then explain the break surface: group related risks (e.g. accounts that must exist, accounts that \
-must not be frozen, authorities that must hold), and for each say what it means in practice.\n\
-- Distinguish normal, expected dependencies (an account must exist, the fee must be paid) from \
-genuinely notable risks (a specific authority, oracle, or config field).\n\
-- Be precise, concrete, and non-alarmist. No preamble and no raw-data dump — write it as a short \
-expert briefing of a few short paragraphs.";
-
-/// GET /narrate/:signature — an AI security read-out of the transaction and its
-/// breaking points. Requires ANTHROPIC_API_KEY on the server.
-async fn narrate_handler(
-    Path(signature): Path<String>,
-    Query(q): Query<ClusterQuery>,
-) -> Result<Json<NarrateResponse>, (StatusCode, String)> {
-    let key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "AI narration is unavailable — set ANTHROPIC_API_KEY on the server.".to_string(),
-        )
-    })?;
-    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let sig = signature.clone();
-
-    // Blocking: analyze the transaction and scan its breaking points.
-    let context = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, svmscope::Error> {
-        let scope = Scope::new(url);
-        let analysis = scope.analyze(&sig)?;
-        let accounts: Vec<String> = analysis.accounts.iter().map(|a| a.address.clone()).collect();
-        let bps =
-            svmscope::scan_breaking_points(&scope, &sig, &accounts, svmscope::ScanOptions::default())?;
-        let instructions: Vec<serde_json::Value> = analysis
-            .cpi_tree
-            .iter()
-            .filter(|e| e.stack_height == 1)
-            .map(|e| json!({ "program": e.program, "instruction": e.name }))
-            .collect();
-        Ok(json!({
-            "top_level_instructions": instructions,
-            "succeeded_on_chain": analysis.overview.success,
-            "account_count": analysis.overview.account_count,
-            "breaking_points": bps,
-        }))
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?
-    .map_err(lib_err)?;
-
-    let user = format!(
-        "Transaction and its automatically-discovered breaking points:\n\n{}",
-        serde_json::to_string_pretty(&context).unwrap_or_default()
-    );
-    let body = json!({
-        "model": "claude-opus-5",
-        "max_tokens": 4000,
-        "output_config": { "effort": "low" },
-        "system": AUDITOR_SYSTEM,
-        "messages": [{ "role": "user", "content": user }],
-    });
-
-    let resp = reqwest::Client::new()
-        .post("https://api.anthropic.com/v1/messages")
-        .header("content-type", "application/json")
-        .header("x-api-key", key)
-        .header("anthropic-version", "2023-06-01")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("anthropic request failed: {e}")))?;
-
-    let status = resp.status();
-    let v: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("anthropic response parse failed: {e}")))?;
-    if !status.is_success() {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("anthropic error ({status}): {}", v["error"]["message"]),
-        ));
-    }
-
-    let narration = v["content"]
-        .as_array()
-        .and_then(|blocks| blocks.iter().find(|b| b["type"] == "text"))
-        .and_then(|b| b["text"].as_str())
-        .unwrap_or("(no narration returned)")
-        .to_string();
-
-    Ok(Json(NarrateResponse { narration }))
-}
-
 /// GET /freeze/:signature — capture a self-contained fixture for offline replay.
 async fn freeze_handler(
     Path(signature): Path<String>,
@@ -1104,7 +1003,6 @@ async fn main() {
         .route("/replay_at_slot/{signature}", get(replay_at_slot_handler))
         .route("/counterfactual/{signature}", get(counterfactual_handler))
         .route("/scan/{signature}", get(scan_handler))
-        .route("/narrate/{signature}", get(narrate_handler))
         .route("/freeze/{signature}", get(freeze_handler))
         .route("/stats", get(stats_handler))
         // Order matters: rate limit first (cheapest rejection), then serve from
