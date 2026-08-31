@@ -58,6 +58,115 @@ fn fetch_account_data(client: &RpcClient, address: &str) -> Option<Vec<u8>> {
     Some(b64_decode(data_b64))
 }
 
+fn fetch_account_at_slot(
+    archive: &RpcClient,
+    address: &str,
+    slot: u64,
+) -> Option<serde_json::Value> {
+    let resp: serde_json::Value = archive
+        .send(
+            RpcRequest::GetAccountInfo,
+            json!([address, { "encoding": "base64", "slot": slot }]),
+        )
+        .ok()?;
+    let v = &resp["value"];
+    if v.is_null() {
+        None
+    } else {
+        Some(v.clone())
+    }
+}
+
+/// Verify the endpoint actually honors historical `slot` queries before we
+/// trust anything it returns. A non-archival RPC (Helius, a public node)
+/// silently *ignores* the `slot` param and answers at the current tip — which
+/// would make a "replay at slot" quietly wrong. We probe an always-present
+/// account (the SPL Token program) and confirm the response was evaluated at a
+/// slot no later than the one we asked for.
+pub(crate) fn archive_honors_slot(archive: &RpcClient, slot: u64) -> bool {
+    let resp: serde_json::Value = match archive.send(
+        RpcRequest::GetAccountInfo,
+        json!([SPL_TOKEN_PROGRAM, { "encoding": "base64", "slot": slot }]),
+    ) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    // An archive evaluates the query at (≤) the requested slot; a non-archive
+    // ignores `slot` and answers at the current tip, far ahead of an old tx.
+    match resp["context"]["slot"].as_u64() {
+        Some(ctx_slot) => ctx_slot <= slot,
+        None => false,
+    }
+}
+
+fn fetch_account_data_at_slot(archive: &RpcClient, address: &str, slot: u64) -> Option<Vec<u8>> {
+    Some(b64_decode(
+        fetch_account_at_slot(archive, address, slot)?["data"][0].as_str()?,
+    ))
+}
+
+fn fetch_loaded_at_slot(
+    archive: &RpcClient,
+    account_keys: &[String],
+    slot: u64,
+) -> Result<LoadedAccounts> {
+    let mut out: Vec<(Address, Loaded)> = Vec::new();
+    let mut existing: HashMap<String, ()> = HashMap::new();
+
+    for key in account_keys {
+        let Some(acc) = fetch_account_at_slot(archive, key, slot) else {
+            continue;
+        };
+        existing.insert(key.clone(), ());
+        let Ok(address) = Address::from_str(key) else {
+            continue;
+        };
+        let owner = acc["owner"].as_str().unwrap_or_default();
+        let executable = acc["executable"].as_bool().unwrap_or(false);
+
+        if executable {
+            let elf: Option<Vec<u8>> = if owner == NATIVE_LOADER {
+                None
+            } else if owner == BPF_LOADER_2 {
+                Some(b64_decode(acc["data"][0].as_str().unwrap_or_default()))
+            } else if owner == BPF_LOADER_UPGRADEABLE {
+                let prog = b64_decode(acc["data"][0].as_str().unwrap_or_default());
+                if prog.len() >= 36 {
+                    let pd_bytes: [u8; 32] = prog[4..36].try_into().unwrap();
+                    let pd_addr = Address::from(pd_bytes);
+                    // programdata AT THE SAME SLOT → the ELF that was live then
+                    fetch_account_data_at_slot(archive, &pd_addr.to_string(), slot)
+                        .filter(|d| d.len() > 45)
+                        .map(|d| d[45..].to_vec())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(elf) = elf {
+                out.push((address, Loaded::Program(elf)));
+            }
+            continue;
+        }
+
+        let Ok(owner_addr) = Address::from_str(owner) else {
+            continue;
+        };
+        out.push((
+            address,
+            Loaded::Data(Account {
+                lamports: acc["lamports"].as_u64().unwrap_or(0),
+                data: b64_decode(acc["data"][0].as_str().unwrap_or_default()),
+                owner: owner_addr,
+                executable: false,
+                rent_epoch: 0,
+            }),
+        ));
+    }
+    Ok((out, existing))
+}
+
 /// A ready-to-load account: either raw data, or a program's ELF bytecode.
 enum Loaded {
     Data(Account),
@@ -675,10 +784,18 @@ pub(crate) fn build_context(
             }
         }
 
-        // Rewind still-existing token accounts to their pre-transaction balance.
+        // Rewind still-existing accounts to their pre-transaction balances,
+        // reconstructed from the transaction's own metadata (free on any RPC):
+        // SOL/lamport balances from `preBalances`, SPL token amounts from
+        // `preTokenBalances`. This is metadata reconstruction — faithful for
+        // balances, though account *data* is still current-state.
         for (addr, l) in loaded.iter_mut() {
             if let Loaded::Data(acc) = l {
-                if let Some(&amt) = pre_state.token_amounts.get(&addr.to_string()) {
+                let key = addr.to_string();
+                if let Some(&lamports) = pre_state.lamports.get(&key) {
+                    acc.lamports = lamports;
+                }
+                if let Some(&amt) = pre_state.token_amounts.get(&key) {
                     if acc.data.len() >= 72 {
                         acc.data[64..72].copy_from_slice(&amt.to_le_bytes());
                     }
@@ -693,6 +810,57 @@ pub(crate) fn build_context(
         loaded,
         slot,
         block_time,
+        time_travel: TimeTravel::default(),
+        idls: HashMap::new(),
+        feature_toggles: Vec::new(),
+    })
+}
+
+pub(crate) fn build_context_at_slot(
+    archive: &RpcClient,
+    signature: &str,
+    account_keys: &[String],
+    tx_slot: u64,
+    tx_block_time: Option<i64>,
+    pre_state: &PreState,
+) -> Result<ReplayContext> {
+    let tx = fetch_transaction(archive, signature)?;
+    let mut all_keys = account_keys.to_vec();
+
+    if let Some(lookups) = tx.message.address_table_lookups() {
+        for l in lookups {
+            all_keys.push(l.account_key.to_string());
+        }
+    };
+    let (mut loaded, existing) = fetch_loaded_at_slot(archive, &all_keys, tx_slot)?;
+
+    if !pre_state.is_empty() {
+        for key in account_keys {
+            if existing.contains_key(key) {
+                continue;
+            }
+            if let (Some(acc), Ok(addr)) = (pre_state.reconstruct(key), Address::from_str(key)) {
+                loaded.push((addr, Loaded::Data(acc)));
+            }
+        }
+
+        for (_addr, l) in loaded.iter_mut() {
+            if let Loaded::Data(acc) = l {
+                if let Some(&amt) = pre_state.token_amounts.get(&_addr.to_string()) {
+                    if acc.data.len() >= 72 {
+                        acc.data[64..72].copy_from_slice(&amt.to_le_bytes());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ReplayContext {
+        signature: signature.to_string(),
+        tx,
+        loaded,
+        slot: Some(tx_slot),
+        block_time: tx_block_time,
         time_travel: TimeTravel::default(),
         idls: HashMap::new(),
         feature_toggles: Vec::new(),
@@ -2006,5 +2174,23 @@ mod tests {
     fn never_resurrects_an_account_the_tx_creates() {
         let pre = PreState::default();
         assert!(pre.reconstruct("SomeAddr").is_none());
+    }
+
+    #[test]
+    fn captures_pre_transaction_lamports_per_account() {
+        // `preBalances` is parallel to the resolved account list; `from_meta`
+        // must key each pre-tx balance by its address so the reconstruction loop
+        // in `build_context` can rewind a still-existing account's lamports.
+        let tx = serde_json::json!({
+            "meta": { "preBalances": [5_000_000_000u64, 2_039_280u64] }
+        });
+        let keys = vec![
+            "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T".to_string(),
+            "So11111111111111111111111111111111111111112".to_string(),
+        ];
+        let pre = PreState::from_meta(&tx, &keys);
+        assert_eq!(pre.lamports.get(&keys[0]).copied(), Some(5_000_000_000));
+        assert_eq!(pre.lamports.get(&keys[1]).copied(), Some(2_039_280));
+        assert!(!pre.is_empty());
     }
 }

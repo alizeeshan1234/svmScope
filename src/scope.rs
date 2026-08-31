@@ -43,6 +43,9 @@ use crate::{cpi_tree, decode, diffs, idl, ixname, utils, CapturedTransaction};
 /// repeated simulations cost zero.
 pub struct Scope {
     client: RpcClient,
+
+    archive: Option<RpcClient>,
+
     /// getTransaction (json encoding) responses by signature.
     tx_cache: Mutex<HashMap<String, serde_json::Value>>,
     /// On-chain IDL by program id; `None` = checked, program publishes none.
@@ -76,9 +79,17 @@ impl Scope {
     pub fn from_client(client: RpcClient) -> Scope {
         Scope {
             client,
+            archive: None,
             tx_cache: Mutex::new(HashMap::new()),
             idl_cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Attach an archival RPC endpoint (e.g. Alchemy's Account Archive) so
+    /// `replay_at_slot` can fetch account state as of a transaction's slot.
+    pub fn with_archive(mut self, archive_url: impl Into<String>) -> Scope {
+        self.archive = Some(RpcClient::new(archive_url.into()));
+        self
     }
 
     /// The underlying RPC client — the escape hatch for anything svmscope
@@ -231,7 +242,81 @@ impl Scope {
             recorded: Some(OnchainRecord::from_tx_json(&tx)),
             ctx,
             time_travel: TimeTravel::default(),
+            fidelity: Fidelity::Current,
         })
+    }
+
+    /// Replay a transaction as of its own slot, at the best fidelity the
+    /// available data allows — see [`Replay::fidelity`] for what you actually got.
+    /// Mutations compose on top: the returned [`Replay`]'s [`Replay::simulate`] /
+    /// [`Replay::verify`] apply what-if changes to that same state, so you can
+    /// mutate at a specific slot too.
+    ///
+    /// Two tiers, chosen automatically:
+    /// - **Exact** — when an archival endpoint is set via [`Scope::with_archive`]
+    ///   *and* it honors the historical `slot` parameter (e.g. Alchemy's Account
+    ///   Archive). Accounts and program ELFs are loaded at the true slot.
+    /// - **Reconstructed** — the free path, no archive required. Accounts load at
+    ///   current state, then SOL and SPL-token balances are rewound to their
+    ///   pre-transaction values from the transaction's own metadata, and the clock
+    ///   is set to the transaction's slot. Faithful for balances and time; account
+    ///   *data* (pool reserves, oracle prices) is still current — [`Fidelity`]
+    ///   reports this honestly rather than pretending the replay is exact.
+    pub fn replay_at_slot(&self, input: &str) -> Result<Replay> {
+        let signature = self.resolve_signature(input)?;
+        let tx = self.transaction_json(&signature)?;
+        let slot = tx["slot"]
+            .as_u64()
+            .ok_or_else(|| Error::MalformedRpcResponse("transaction has no slot".into()))?;
+        let account_keys = utils::resolve_account_keys(&tx);
+        let pre = PreState::from_meta(&tx, &account_keys);
+
+        // Exact tier: only when an archive is set AND actually honors the slot.
+        let archive = self
+            .archive
+            .as_ref()
+            .filter(|a| crate::replay::archive_honors_slot(a, slot));
+
+        let (mut ctx, fidelity) = match archive {
+            Some(archive) => {
+                let ctx = crate::replay::build_context_at_slot(
+                    archive,
+                    &signature,
+                    &account_keys,
+                    slot,
+                    tx["blockTime"].as_i64(),
+                    &pre,
+                )?;
+                (ctx, Fidelity::Exact { slot })
+            }
+            None => {
+                // Free reconstruction: current accounts + metadata balance rewind.
+                let ctx = crate::replay::build_context(
+                    &self.client,
+                    &signature,
+                    &account_keys,
+                    Some(slot),
+                    &pre,
+                )?;
+                (ctx, Fidelity::Reconstructed { slot })
+            }
+        };
+
+        self.preload_idls(&mut ctx);
+
+        let mut replay = Replay {
+            recorded: Some(OnchainRecord::from_tx_json(&tx)),
+            ctx,
+            time_travel: TimeTravel::default(),
+            fidelity: Fidelity::Current,
+        };
+        replay.set_fidelity(fidelity);
+        // Anchor the clock to the transaction's slot/time for both tiers.
+        replay.warp_to_slot(slot);
+        if let Some(ts) = tx["blockTime"].as_i64() {
+            replay.warp_to_timestamp(ts);
+        }
+        Ok(replay)
     }
 
     /// Reconstruct the world for an **unsigned / not-yet-sent** transaction
@@ -258,6 +343,7 @@ impl Scope {
             recorded: None,
             ctx,
             time_travel: TimeTravel::default(),
+            fidelity: Fidelity::Current,
         })
     }
 
@@ -635,6 +721,38 @@ impl OnchainRecord {
     }
 }
 
+/// How faithful a replay's starting state is to the transaction's real slot —
+/// the honest label on every replay, so a convincing-but-drifted run is never
+/// mistaken for an exact one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Fidelity {
+    /// Current-state replay ([`Scope::replay`]) — no historical anchoring.
+    Current,
+    /// Balances rewound to their pre-transaction values from the transaction's
+    /// own metadata, clock set to the transaction's slot; account *data* is still
+    /// current-state. Free — no archive needed.
+    Reconstructed {
+        /// The transaction's own slot, that the clock is anchored to.
+        slot: u64,
+    },
+    /// Every account and program ELF loaded at the true slot from an archive.
+    Exact {
+        /// The transaction's own slot, that state was loaded at.
+        slot: u64,
+    },
+}
+
+impl Fidelity {
+    /// A short human label: `current`, `reconstructed@<slot>`, `exact@<slot>`.
+    pub fn label(&self) -> String {
+        match self {
+            Fidelity::Current => "current".to_string(),
+            Fidelity::Reconstructed { slot } => format!("reconstructed@{slot}"),
+            Fidelity::Exact { slot } => format!("exact@{slot}"),
+        }
+    }
+}
+
 /// A transaction's reconstructed world — fetched once via [`Scope::replay`],
 /// then replayed locally any number of times. Every run builds a pristine SVM,
 /// so runs are independent, repeatable, and free.
@@ -644,11 +762,21 @@ pub struct Replay {
     /// fixtures captured before outcomes were recorded).
     recorded: Option<OnchainRecord>,
     time_travel: TimeTravel,
+    fidelity: Fidelity,
 }
 
 impl Replay {
     pub(crate) fn set_recorded(&mut self, recorded: OnchainRecord) {
         self.recorded = Some(recorded);
+    }
+
+    pub(crate) fn set_fidelity(&mut self, fidelity: Fidelity) {
+        self.fidelity = fidelity;
+    }
+
+    /// How faithful this replay's starting state is to the transaction's slot.
+    pub fn fidelity(&self) -> Fidelity {
+        self.fidelity
     }
 
     /// Rebuild a replay from a frozen fixture — fully offline, no RPC. A v2
@@ -658,6 +786,7 @@ impl Replay {
             ctx: ReplayContext::from_fixture(fx)?,
             recorded: fx.recorded.clone(),
             time_travel: TimeTravel::default(),
+            fidelity: Fidelity::Current,
         })
     }
 
@@ -969,6 +1098,16 @@ mod wait_tests {
         });
 
         assert!(status_is_confirmed(&status));
+    }
+
+    #[test]
+    fn fidelity_labels_are_honest() {
+        assert_eq!(Fidelity::Current.label(), "current");
+        assert_eq!(
+            Fidelity::Reconstructed { slot: 442384762 }.label(),
+            "reconstructed@442384762"
+        );
+        assert_eq!(Fidelity::Exact { slot: 100 }.label(), "exact@100");
     }
 
     #[test]

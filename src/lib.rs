@@ -154,7 +154,7 @@ pub use program::{MethodBuilder, ProgramClient};
 pub use replay::{
     AssertOutcome, FeatureToggle, Mutation, ReplayResult, ScenarioOutcome, TimeTravel,
 };
-pub use scope::{OnchainRecord, Replay, Replayed, Scope};
+pub use scope::{Fidelity, OnchainRecord, Replay, Replayed, Scope};
 pub use submit::CapturedTransaction;
 
 /// Compile-checks every Rust example in the README as part of `cargo test`.
