@@ -470,10 +470,18 @@ async fn preflight_report_handler(
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(
         move || -> Result<svmscope::SimulationReport, svmscope::Error> {
-            let mut replay = Scope::new(url).preflight(&req.transaction)?;
+            let scope = Scope::new(url);
+            let tx = Scope::parse_unsigned_b64(&req.transaction)?;
+            // Decode the pre-sign overview (size, fees, named instructions,
+            // actions/warnings) before simulating — it explains the tx even
+            // when the simulation itself fails.
+            let overview = scope.preflight_overview(&tx);
+            let mut replay = scope.preflight_tx(tx)?;
             replay.set_time_travel(tt);
             replay.set_features(features);
-            Ok(replay.simulate(&mutations)?.into_report())
+            let mut report = replay.simulate(&mutations)?.into_report();
+            report.preflight = Some(overview);
+            Ok(report)
         },
     )
     .await

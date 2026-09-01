@@ -118,6 +118,7 @@
 //! at <https://svmscope.vercel.app> — identical results in all four.
 
 mod analyze;
+mod preflight;
 mod check;
 mod compute;
 mod cpi_tree;
@@ -155,6 +156,7 @@ pub use decode::{AccountInfo, DecodedAccount, Field};
 pub use diffs::{BalanceChange, TokenChange};
 pub use error::{Error, Result};
 pub use fixture::{Fixture, FixtureEntry, FIXTURE_VERSION};
+pub use preflight::{PreflightIx, PreflightOverview};
 pub use program::{MethodBuilder, ProgramClient};
 pub use replay::{
     AssertOutcome, FeatureToggle, Mutation, ReplayResult, ScenarioOutcome, TimeTravel,

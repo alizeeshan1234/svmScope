@@ -732,6 +732,22 @@ body::after {
 .dx-note { margin-top: 10px; font-size: 11.5px; line-height: 1.55; color: var(--text-2); }
 .dx-note b { color: var(--text-1); }
 
+/* ---------- pre-sign overview ---------- */
+.pf-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.pf-chip { display: flex; align-items: center; gap: 7px; padding: 8px 12px; border-radius: var(--r-sm); background: var(--bg-2); border: 1px solid var(--line); font-size: 12.5px; color: var(--text-1); }
+.pf-chip .k { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--text-2); }
+.pf-sub { color: var(--text-2); font-size: 11.5px; }
+.pf-ok { color: var(--green); font-size: 11.5px; font-weight: 600; }
+.pf-bad { color: var(--red); font-size: 11.5px; font-weight: 600; }
+.pf-lines { display: flex; flex-direction: column; gap: 7px; }
+.pf-line { display: flex; gap: 8px; align-items: baseline; font-size: 13.5px; line-height: 1.5; color: var(--text-1); }
+.pf-line .ic { flex: 0 0 auto; }
+.pf-line.warn { color: #fbbf24; background: rgba(251,191,36,.07); border: 1px solid rgba(251,191,36,.22); border-radius: var(--r-sm); padding: 9px 12px; }
+.pf-ixs { display: flex; flex-direction: column; gap: 10px; }
+.pf-ixn { font-family: var(--mono, monospace); font-size: 11.5px; color: var(--text-2); }
+.pf-arg { font-size: 11.5px; font-family: var(--mono, monospace); background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; padding: 2px 7px; color: var(--text-1); }
+.pf-arg .an { color: var(--text-2); }
+
 /* ---------- badges / replay ---------- */
 .badge {
   display: inline-flex; align-items: center; gap: 6px;
@@ -3293,8 +3309,50 @@ function renderReport(rep, el) {
       }).join('')}</div>
     </div>` : '';
   const logs = r.logs?.length ? `<div class="card" style="margin-top:14px"><h2>Program logs</h2><div class="logs">${renderLogs(r.logs)}</div></div>` : '';
-  el.innerHTML = head + ex + diffs + logs;
+  el.innerHTML = head + renderPreflight(rep.preflight) + ex + diffs + logs;
   wireCopy(el);
+}
+
+// The pre-sign overview: what you're signing (actions + danger flags), the
+// size/fee/fee-payer strip, and IDL-named instruction cards. Only present on
+// preflight reports.
+function renderPreflight(p) {
+  if (!p) return '';
+  const warn = p.warnings.map(w => `<div class="pf-line warn"><span class="ic">⚠️</span>${esc(w)}</div>`).join('');
+  const acts = p.actions.map(a => `<div class="pf-line"><span class="ic">·</span>${esc(a)}</div>`).join('');
+  const signing = (warn || acts) ? `
+    <div class="card" style="margin-top:14px"><h2>What signing this does</h2>
+      <div class="pf-lines">${warn}${acts}</div>
+    </div>` : '';
+
+  const fee = p.base_fee_lamports + p.priority_fee_lamports;
+  const feeDetail = p.priority_fee_lamports > 0
+    ? `${fmtSol(p.base_fee_lamports)} base + ${fmtSol(p.priority_fee_lamports)} priority${p.priority_fee_note ? ' (estimated)' : ''}`
+    : 'base fee';
+  const payerOk = p.fee_payer_can_pay === false
+    ? '<span class="pf-bad">✗ cannot cover the fee</span>'
+    : (p.fee_payer_can_pay === true ? '<span class="pf-ok">✓ can pay</span>' : '');
+  const bal = p.fee_payer_balance != null ? ` · ${fmtSol(p.fee_payer_balance)}` : '';
+  const sizePct = Math.round(100 * p.serialized_size / p.max_size);
+  const strip = `
+    <div class="pf-strip">
+      <div class="pf-chip"><span class="k">size</span>${p.serialized_size} / ${p.max_size} bytes${sizePct >= 90 ? ` <span class="pf-bad">(${sizePct}% of limit)</span>` : ''}</div>
+      <div class="pf-chip"><span class="k">fee</span>${fmtSol(fee)} <span class="pf-sub">${feeDetail}</span></div>
+      <div class="pf-chip"><span class="k">fee payer</span>${copyPill(p.fee_payer)}${bal} ${payerOk}</div>
+      ${p.compute_unit_limit != null ? `<div class="pf-chip"><span class="k">CU limit</span>${fmt(p.compute_unit_limit)}</div>` : ''}
+    </div>`;
+
+  const ixs = p.instructions.length ? `
+    <div class="card" style="margin-top:14px"><h2>Instructions <span class="count">${p.instructions.length}</span></h2>
+      <div class="pf-ixs">${p.instructions.map(ix => {
+        const args = ix.args.map(a => `<span class="pf-arg"><span class="an">${esc(a.name)}</span> ${esc(a.value)}</span>`).join('');
+        const accs = ix.accounts.map(a =>
+          `<div class="drow"><span class="fname">${a.name ? esc(a.name) : 'account'}</span><span class="fv">${copyPill(a.address)}</span></div>`).join('');
+        return `<div class="dcard"><div class="dhead"><span class="pf-ixn">#${ix.index + 1}</span> <b>${esc(ix.name || 'Unknown instruction')}</b>${progPill(ix.program)}${args}</div>${accs}</div>`;
+      }).join('')}</div>
+    </div>` : '';
+
+  return signing + strip + ixs;
 }
 
 document.querySelectorAll('.chip.gtt').forEach(c =>

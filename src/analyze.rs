@@ -163,6 +163,10 @@ pub struct SimulationReport {
     pub explain: Option<Explanation>,
     /// Every account the transaction changed, before → after.
     pub diffs: Vec<AccountDiff>,
+    /// The pre-sign overview (size, fees, named instructions, actions and
+    /// warnings) — populated only on the preflight path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preflight: Option<crate::preflight::PreflightOverview>,
 }
 
 /// A program failure translated into plain language.

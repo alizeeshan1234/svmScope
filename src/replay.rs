@@ -953,7 +953,7 @@ fn b64_encode(bytes: &[u8]) -> String {
 /// Resolve an (unsigned) transaction's Address Lookup Table references to concrete
 /// addresses — writable first, then readonly, the order the runtime resolves them.
 /// An ALT account stores its address list at offset 56, 32 bytes each.
-fn resolve_alt_addresses(
+pub(crate) fn resolve_alt_addresses(
     client: &RpcClient,
     tx: &VersionedTransaction,
 ) -> (Vec<String>, Vec<String>) {

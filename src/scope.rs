@@ -436,6 +436,16 @@ impl Scope {
         parse_unsigned(tx_b64)
     }
 
+    /// The pre-sign overview of an unsigned transaction: serialized size, fee
+    /// breakdown (base + ComputeBudget priority fee), fee payer with live
+    /// balance, IDL-named instructions, and plain-English actions with danger
+    /// flags (delegations, authority changes, closes). Pairs with
+    /// [`Scope::preflight`] — decode what signing would do, then simulate it.
+    pub fn preflight_overview(&self, tx: &VersionedTransaction) -> crate::PreflightOverview {
+        let mut idls = self.idl_cache.lock().unwrap();
+        crate::preflight::build_overview(&self.client, &mut idls, tx)
+    }
+
     /// Freeze a transaction's world into a portable, self-contained [`Fixture`]:
     /// capture once, then replay deterministically forever with no RPC.
     pub fn capture(&self, input: &str) -> Result<Fixture> {
@@ -1369,6 +1379,7 @@ impl Replayed {
             clock: self.clock,
             explain: self.explain,
             diffs: self.diffs,
+            preflight: None,
         }
     }
 }

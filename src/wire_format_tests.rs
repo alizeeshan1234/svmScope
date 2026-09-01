@@ -286,6 +286,7 @@ fn simulation_report_wire_shape() {
         clock: Some("slot 5 · epoch 0".into()),
         explain: Some(explanation()),
         diffs: vec![account_diff()],
+        preflight: None,
     };
     let v = serde_json::to_value(report).unwrap();
     assert_eq!(v["replay"]["success"], false);
@@ -299,6 +300,7 @@ fn simulation_report_wire_shape() {
         clock: None,
         explain: None,
         diffs: vec![],
+        preflight: None,
     };
     let v = serde_json::to_value(minimal).unwrap();
     assert!(v.get("clock").is_none() && v.get("explain").is_none());

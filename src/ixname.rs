@@ -157,10 +157,10 @@ fn native_args(program: &str, data: &[u8]) -> Vec<IxArg> {
     };
     match program {
         TOKEN | TOKEN_2022 => match data.first() {
-            Some(3) | Some(7) | Some(8) => u64_at(1)
+            Some(3) | Some(4) | Some(7) | Some(8) => u64_at(1)
                 .map(|a| vec![arg("amount", "u64", a)])
                 .unwrap_or_default(),
-            Some(12) | Some(14) | Some(15) => {
+            Some(12) | Some(13) | Some(14) | Some(15) => {
                 let mut out = vec![];
                 if let Some(a) = u64_at(1) {
                     out.push(arg("amount", "u64", a));
