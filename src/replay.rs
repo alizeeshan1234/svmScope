@@ -879,11 +879,20 @@ pub(crate) fn build_context(
     })
 }
 
+/// `state_slot` is the archival boundary accounts are fetched at; `clock_slot`
+/// anchors the replay clock. They differ when replaying a transaction *at its
+/// own slot S*: the archive answers "latest version at or before S", which for
+/// accounts the transaction itself wrote is **post**-transaction state — so the
+/// caller passes `state_slot = S - 1` (end of the previous slot) and patches
+/// same-slot predecessors' balance effects from the transaction's own recorded
+/// pre-balances via `pre_state`. Same-slot predecessor *data* writes remain the
+/// one disclosed gap of a slot-granular archive.
 pub(crate) fn build_context_at_slot(
     archive: &RpcClient,
     signature: &str,
     account_keys: &[String],
-    tx_slot: u64,
+    state_slot: u64,
+    clock_slot: u64,
     tx_block_time: Option<i64>,
     pre_state: &PreState,
 ) -> Result<ReplayContext> {
@@ -895,7 +904,7 @@ pub(crate) fn build_context_at_slot(
             all_keys.push(l.account_key.to_string());
         }
     };
-    let (mut loaded, existing) = fetch_loaded_at_slot(archive, &all_keys, tx_slot)?;
+    let (mut loaded, existing) = fetch_loaded_at_slot(archive, &all_keys, state_slot)?;
 
     if !pre_state.is_empty() {
         for key in account_keys {
@@ -907,9 +916,16 @@ pub(crate) fn build_context_at_slot(
             }
         }
 
-        for (_addr, l) in loaded.iter_mut() {
+        // The transaction's own recorded pre-balances are ground truth at its
+        // boundary — they override the archive wherever they disagree (a
+        // same-slot predecessor transaction wrote the account after S-1).
+        for (addr, l) in loaded.iter_mut() {
             if let Loaded::Data(acc) = l {
-                if let Some(&amt) = pre_state.token_amounts.get(&_addr.to_string()) {
+                let key = addr.to_string();
+                if let Some(&lamports) = pre_state.lamports.get(&key) {
+                    acc.lamports = lamports;
+                }
+                if let Some(&amt) = pre_state.token_amounts.get(&key) {
                     if acc.data.len() >= 72 {
                         acc.data[64..72].copy_from_slice(&amt.to_le_bytes());
                     }
@@ -922,7 +938,7 @@ pub(crate) fn build_context_at_slot(
         signature: signature.to_string(),
         tx,
         loaded,
-        slot: Some(tx_slot),
+        slot: Some(clock_slot),
         block_time: tx_block_time,
         time_travel: TimeTravel::default(),
         idls: HashMap::new(),

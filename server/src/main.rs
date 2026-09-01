@@ -638,7 +638,16 @@ async fn replay_at_slot_handler(
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     let out = tokio::task::spawn_blocking(
         move || -> Result<ReplayAtSlotResponse, svmscope::Error> {
-            let replay = Scope::new(url).replay_at_slot(&signature)?;
+            // SVMSCOPE_ARCHIVE_URL (an archival endpoint honoring the `slot`
+            // param, e.g. Alchemy's Account Archive) upgrades this replay from
+            // Reconstructed to Exact. Unset = free reconstruction, as before.
+            let mut scope = Scope::new(url);
+            if let Ok(archive) = std::env::var("SVMSCOPE_ARCHIVE_URL") {
+                if !archive.trim().is_empty() {
+                    scope = scope.with_archive(archive);
+                }
+            }
+            let replay = scope.replay_at_slot(&signature)?;
             let cert = replay.certificate();
             let result = replay.run()?.result;
             Ok(ReplayAtSlotResponse {

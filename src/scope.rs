@@ -268,7 +268,12 @@ impl Scope {
     /// Two tiers, chosen automatically:
     /// - **Exact** — when an archival endpoint is set via [`Scope::with_archive`]
     ///   *and* it honors the historical `slot` parameter (e.g. Alchemy's Account
-    ///   Archive). Accounts and program ELFs are loaded at the true slot.
+    ///   Archive). Accounts and program ELFs are loaded at the end of the slot
+    ///   *before* the transaction's (its true pre-block boundary — fetching at
+    ///   the transaction's own slot would return its post-state), then the
+    ///   transaction's recorded pre-balances correct any same-slot predecessor's
+    ///   balance effects. Same-slot predecessor *data* writes are the one
+    ///   remaining gap of a slot-granular archive.
     /// - **Reconstructed** — the free path, no archive required. Accounts load at
     ///   current state, then SOL and SPL-token balances are rewound to their
     ///   pre-transaction values from the transaction's own metadata, and the clock
@@ -292,10 +297,15 @@ impl Scope {
 
         let (mut ctx, fidelity) = match archive {
             Some(archive) => {
+                // Fetch at S-1: the archive answers "≤ slot", and at S that
+                // includes this transaction's own writes (post-state). The
+                // recorded pre-balances in `pre` then correct any same-slot
+                // predecessor's balance effects on top.
                 let ctx = crate::replay::build_context_at_slot(
                     archive,
                     &signature,
                     &account_keys,
+                    slot.saturating_sub(1),
                     slot,
                     tx["blockTime"].as_i64(),
                     &pre,
@@ -364,10 +374,13 @@ impl Scope {
         // at an arbitrary slot the archive is authoritative, so pass none.
         let pre = PreState::default();
         let block_time = archive.get_block_time(slot).ok();
+        // An arbitrary slot means "the world as of end of slot N" — state and
+        // clock share the same boundary, no pre-balance patching.
         let mut ctx = crate::replay::build_context_at_slot(
             archive,
             &signature,
             &account_keys,
+            slot,
             slot,
             block_time,
             &pre,
