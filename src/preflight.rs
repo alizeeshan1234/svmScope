@@ -29,6 +29,26 @@ const MAX_COMPUTE_UNITS: u64 = 1_400_000;
 /// no SetComputeUnitLimit is present.
 const DEFAULT_CU_PER_IX: u64 = 200_000;
 
+/// An account's role in the transaction — the signer/writable classification
+/// Solana Explorer's inspector shows, derived from the message header + key
+/// ordering (static writable-signers, readonly-signers, writable-unsigned,
+/// readonly-unsigned, then ALT writable, then ALT readonly).
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountRole {
+    /// The account address, base58.
+    pub address: String,
+    /// Must sign the transaction.
+    pub signer: bool,
+    /// The transaction may modify it.
+    pub writable: bool,
+    /// Invoked as a program by some instruction.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub program: bool,
+    /// The fee payer (first writable signer).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub fee_payer: bool,
+}
+
 /// One decoded top-level instruction of a pre-flight transaction.
 #[derive(Debug, Clone, Serialize)]
 pub struct PreflightIx {
@@ -74,6 +94,12 @@ pub struct PreflightOverview {
     pub fee_payer_can_pay: Option<bool>,
     /// Top-level instructions, decoded and named.
     pub instructions: Vec<PreflightIx>,
+    /// Every account with its signer/writable role (Explorer's account table).
+    pub accounts: Vec<AccountRole>,
+    /// Per-program compute units, from the simulation. Populated after the
+    /// simulation runs (empty until then).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub compute: Vec<crate::compute::CuUsage>,
     /// Plain-English "what signing this does" lines.
     pub actions: Vec<String>,
     /// Danger flags: authority changes, delegations, closes, reassignments.
@@ -108,6 +134,13 @@ fn account_addr(accounts: &[IxAccount], i: usize) -> String {
         .get(i)
         .map(|a| short(&a.address))
         .unwrap_or_else(|| "?".into())
+}
+
+/// Per-program compute breakdown for a preflight simulation — fills
+/// [`PreflightOverview::compute`] once the simulation has produced logs and a
+/// total. Same attribution as the analyze view's Compute Units panel.
+pub fn compute_breakdown(logs: &[String], total_cu: u64) -> Vec<crate::compute::CuUsage> {
+    crate::compute::cu_from_logs(logs, total_cu)
 }
 
 /// The full base58 address at an instruction-account position (for identity
@@ -246,11 +279,13 @@ pub(crate) fn build_overview(
     // Transfer's meaning depends on a SyncNative that appears *later*.
     let mut instructions = Vec::new();
     let mut wrap_targets: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut program_idx: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut cu_limit: Option<u64> = None;
     let mut cu_price_micro: Option<u64> = None;
     let mut non_cb_ix = 0u64;
 
     for (index, ix) in tx.message.instructions().iter().enumerate() {
+        program_idx.insert(ix.program_id_index as usize);
         let program = keys
             .get(ix.program_id_index as usize)
             .cloned()
@@ -341,6 +376,45 @@ pub(crate) fn build_overview(
     let fee_payer_can_pay =
         fee_payer_balance.map(|b| b >= base_fee_lamports + priority_fee_lamports);
 
+    // Account roles from the message header. `keys` is already in canonical
+    // runtime order: static keys, then ALT-writable, then ALT-readonly.
+    let header = tx.message.header();
+    let n_static = tx.message.static_account_keys().len();
+    let s = header.num_required_signatures as usize;
+    let ro_signed = header.num_readonly_signed_accounts as usize;
+    let ro_unsigned = header.num_readonly_unsigned_accounts as usize;
+    let n_alt_writable = keys.len().saturating_sub(n_static)
+        - tx.message
+            .address_table_lookups()
+            .map(|ls| ls.iter().map(|l| l.readonly_indexes.len()).sum())
+            .unwrap_or(0)
+            .min(keys.len().saturating_sub(n_static));
+    let accounts: Vec<AccountRole> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, address)| {
+            let (signer, writable) = if i < n_static {
+                let signer = i < s;
+                let writable = if i < s {
+                    i < s - ro_signed // writable signers come before readonly signers
+                } else {
+                    i < n_static - ro_unsigned // writable unsigned before readonly unsigned
+                };
+                (signer, writable)
+            } else {
+                // ALT: writable block first, then readonly.
+                (false, i < n_static + n_alt_writable)
+            };
+            AccountRole {
+                address: address.clone(),
+                signer,
+                writable,
+                program: program_idx.contains(&i),
+                fee_payer: i == 0,
+            }
+        })
+        .collect();
+
     PreflightOverview {
         serialized_size,
         max_size: MAX_TX_SIZE,
@@ -352,6 +426,8 @@ pub(crate) fn build_overview(
         fee_payer_balance,
         fee_payer_can_pay,
         instructions,
+        accounts,
+        compute: Vec::new(),
         actions,
         warnings,
     }

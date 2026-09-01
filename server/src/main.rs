@@ -475,11 +475,17 @@ async fn preflight_report_handler(
             // Decode the pre-sign overview (size, fees, named instructions,
             // actions/warnings) before simulating — it explains the tx even
             // when the simulation itself fails.
-            let overview = scope.preflight_overview(&tx);
+            let mut overview = scope.preflight_overview(&tx);
             let mut replay = scope.preflight_tx(tx)?;
             replay.set_time_travel(tt);
             replay.set_features(features);
             let mut report = replay.simulate(&mutations)?.into_report();
+            // The per-program compute breakdown needs the simulation's logs, so
+            // fill it in now that the replay has run.
+            overview.compute = svmscope::compute_breakdown(
+                &report.replay.logs,
+                report.replay.compute_units,
+            );
             report.preflight = Some(overview);
             Ok(report)
         },

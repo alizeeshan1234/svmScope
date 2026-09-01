@@ -10,7 +10,7 @@
 //! e.g. a program deploy becomes `System 300 · loader <the rest>` instead of an
 //! empty "no compute recorded".
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 /// Compute units one program consumed within a transaction.
@@ -35,6 +35,16 @@ fn fixed_cu(program: &str) -> Option<u64> {
         .iter()
         .find(|(id, _)| *id == program)
         .map(|(_, c)| *c)
+}
+
+/// The per-program CU breakdown for a *simulation* result — same attribution as
+/// [`cu_per_program`], fed the simulation's own log lines and total instead of a
+/// landed transaction's metadata.
+pub(crate) fn cu_from_logs(logs: &[String], total_cu: u64) -> Vec<CuUsage> {
+    let tx = json!({
+        "meta": { "logMessages": logs, "computeUnitsConsumed": total_cu }
+    });
+    cu_per_program(&tx)
 }
 
 /// Compute units per program, aggregated (a program invoked N times is summed

@@ -156,7 +156,7 @@ pub use decode::{AccountInfo, DecodedAccount, Field};
 pub use diffs::{BalanceChange, TokenChange};
 pub use error::{Error, Result};
 pub use fixture::{Fixture, FixtureEntry, FIXTURE_VERSION};
-pub use preflight::{PreflightIx, PreflightOverview};
+pub use preflight::{compute_breakdown, AccountRole, PreflightIx, PreflightOverview};
 pub use program::{MethodBuilder, ProgramClient};
 pub use replay::{
     AssertOutcome, FeatureToggle, Mutation, ReplayResult, ScenarioOutcome, TimeTravel,

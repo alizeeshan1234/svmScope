@@ -747,6 +747,13 @@ body::after {
 .pf-ixn { font-family: var(--mono, monospace); font-size: 11.5px; color: var(--text-2); }
 .pf-arg { font-size: 11.5px; font-family: var(--mono, monospace); background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px; padding: 2px 7px; color: var(--text-1); }
 .pf-arg .an { color: var(--text-2); }
+.pf-accts { display: flex; flex-direction: column; }
+.pf-tag { display: inline-block; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; padding: 2px 7px; border-radius: 5px; margin-left: 5px; }
+.pf-tag.payer { color: #c084fc; background: rgba(192,132,252,.12); }
+.pf-tag.signer { color: var(--green); background: var(--green-soft); }
+.pf-tag.write { color: #fbbf24; background: rgba(251,191,36,.1); }
+.pf-tag.ro { color: var(--text-2); background: var(--bg-2); }
+.pf-tag.prog { color: #60a5fa; background: rgba(96,165,250,.12); }
 
 /* ---------- badges / replay ---------- */
 .badge {
@@ -3352,7 +3359,33 @@ function renderPreflight(p) {
       }).join('')}</div>
     </div>` : '';
 
-  return signing + strip + ixs;
+  // Per-program compute, from the simulation — the same breakdown the analyze
+  // view shows, and what Explorer's inspector reports per program.
+  const compute = (p.compute && p.compute.length) ? (() => {
+    const max = Math.max(...p.compute.map(r => r.cu), 1);
+    return `<div class="card" style="margin-top:14px"><h2>Compute units <span class="count">${p.compute.length}</span></h2>
+      <div class="rows">${p.compute.map(r => `
+        <div class="row"><div class="grow">${progChip(r.program)}<div class="cu-bar" style="width:${Math.max(3, r.cu / max * 100)}%"></div></div>
+          <div class="cu-val">${fmt(r.cu)} <small>CU</small></div></div>`).join('')}</div>
+    </div>`;
+  })() : '';
+
+  // Every account with its role — Explorer's account table, plus who signs and
+  // who can be modified.
+  const accounts = (p.accounts && p.accounts.length) ? `
+    <div class="card" style="margin-top:14px"><h2>Accounts <span class="count">${p.accounts.length}</span></h2>
+      <div class="pf-accts">${p.accounts.map((a, i) => {
+        const tags = [
+          a.fee_payer ? '<span class="pf-tag payer">fee payer</span>' : '',
+          a.signer ? '<span class="pf-tag signer">signer</span>' : '',
+          a.writable ? '<span class="pf-tag write">writable</span>' : '<span class="pf-tag ro">readonly</span>',
+          a.program ? '<span class="pf-tag prog">program</span>' : '',
+        ].join('');
+        return `<div class="drow"><span class="fname"><span class="pf-ixn">#${i}</span> ${copyPill(a.address)}</span><span class="fv">${tags}</span></div>`;
+      }).join('')}</div>
+    </div>` : '';
+
+  return signing + strip + ixs + compute + accounts;
 }
 
 document.querySelectorAll('.chip.gtt').forEach(c =>
