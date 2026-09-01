@@ -403,14 +403,13 @@ impl Scope {
     /// Reconstruct the world for an **unsigned / not-yet-sent** transaction
     /// (base64 wire bytes) — the pre-flight "what will this do if I send it
     /// now?" primitive. Current on-chain state IS its pre-state, so no drift.
+    ///
+    /// Accepts either a full serialized `VersionedTransaction` or a bare
+    /// serialized message — the "Base64 message" wallets in developer mode show
+    /// on the approval screen (and what Solana Explorer's inspector takes). A
+    /// bare message is wrapped with placeholder signatures before simulation.
     pub fn preflight(&self, tx_b64: &str) -> Result<Replay> {
-        use base64::Engine;
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(tx_b64.trim())
-            .map_err(|e| Error::TxDecode(format!("bad base64: {e}")))?;
-        let tx: solana_transaction::versioned::VersionedTransaction =
-            bincode::deserialize(&bytes).map_err(|e| Error::TxDecode(e.to_string()))?;
-        self.preflight_tx(tx)
+        self.preflight_tx(parse_unsigned(tx_b64)?)
     }
 
     /// [`Scope::preflight`] for an already-deserialized transaction.
@@ -426,6 +425,15 @@ impl Scope {
             time_travel: TimeTravel::default(),
             fidelity: Fidelity::Current,
         })
+    }
+
+    /// See [`Scope::preflight`]: parse base64 into a transaction, accepting a
+    /// bare message too. Exposed for testing.
+    #[doc(hidden)]
+    pub fn parse_unsigned_b64(
+        tx_b64: &str,
+    ) -> Result<solana_transaction::versioned::VersionedTransaction> {
+        parse_unsigned(tx_b64)
     }
 
     /// Freeze a transaction's world into a portable, self-contained [`Fixture`]:
@@ -1365,6 +1373,51 @@ impl Replayed {
     }
 }
 
+/// Decode base64 into an unsigned transaction for preflight. Accepts either a
+/// full serialized `VersionedTransaction`, or a bare serialized message — the
+/// "Base64 message" wallets in developer mode show on the approval screen (and
+/// what Solana Explorer's inspector takes). A bare message is wrapped with
+/// placeholder signatures, which is fine for simulation: sigverify is off.
+fn parse_unsigned(tx_b64: &str) -> Result<solana_transaction::versioned::VersionedTransaction> {
+    use base64::Engine;
+    use bincode::Options;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(tx_b64.trim())
+        .map_err(|e| Error::TxDecode(format!("bad base64: {e}")))?;
+    // Strict parse: Solana's wire format is bincode fixint, and rejecting
+    // trailing bytes matters here — the two shapes are prefix-ambiguous (a bare
+    // message's first byte can read as a signature count), so a lax parse can
+    // "succeed" wrongly. Full consumption plus the signatures==header invariant
+    // disambiguates in practice.
+    let strict = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .reject_trailing_bytes();
+    let as_tx =
+        strict.deserialize::<solana_transaction::versioned::VersionedTransaction>(&bytes);
+    if let Ok(tx) = &as_tx {
+        if tx.signatures.len() == tx.message.header().num_required_signatures as usize {
+            return Ok(as_tx.unwrap());
+        }
+    }
+    if let Ok(message) = strict.deserialize::<solana_message::VersionedMessage>(&bytes) {
+        // The "Base64 message" a wallet in developer mode shows pre-signing.
+        let n = message.header().num_required_signatures as usize;
+        return Ok(solana_transaction::versioned::VersionedTransaction {
+            signatures: vec![Default::default(); n],
+            message,
+        });
+    }
+    // A transaction whose signature count disagrees with its header is unusual
+    // but parseable — accept it rather than refuse (sigverify is off anyway).
+    match as_tx {
+        Ok(tx) => Ok(tx),
+        Err(tx_err) => Err(Error::TxDecode(format!(
+            "not a serialized transaction ({tx_err}) and not a bare message either — paste \
+             either Buffer.from(tx.serialize()).toString('base64') or a wallet's base64 message"
+        ))),
+    }
+}
+
 /// Turn a program error into a human explanation using the loaded IDLs.
 /// (Same logic the v0.1 library ran with live RPC — now resolved offline
 /// against the IDLs preloaded into the replay context.)
@@ -1614,5 +1667,61 @@ mod wait_tests {
         });
 
         assert!(status_is_confirmed(&status));
+    }
+}
+
+#[cfg(test)]
+mod preflight_input_tests {
+    use super::*;
+    use base64::Engine;
+    use solana_message::{Message, VersionedMessage};
+    use solana_signer::Signer;
+    use solana_transaction::versioned::VersionedTransaction;
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn transfer_message() -> VersionedMessage {
+        let from = solana_keypair::Keypair::new();
+        let to = solana_keypair::Keypair::new();
+        let ix = solana_system_interface::instruction::transfer(
+            &from.pubkey(),
+            &to.pubkey(),
+            1_000_000,
+        );
+        VersionedMessage::Legacy(Message::new(&[ix], Some(&from.pubkey())))
+    }
+
+    #[test]
+    fn accepts_a_full_serialized_transaction() {
+        let message = transfer_message();
+        let tx = VersionedTransaction {
+            signatures: vec![Default::default(); 1],
+            message,
+        };
+        let parsed = parse_unsigned(&b64(&bincode::serialize(&tx).unwrap())).unwrap();
+        assert_eq!(parsed.message, tx.message);
+    }
+
+    #[test]
+    fn accepts_a_bare_wallet_message_and_wraps_it() {
+        // What a wallet's developer-mode "Base64 message" is: the serialized
+        // message alone, no signatures.
+        let message = transfer_message();
+        let parsed = parse_unsigned(&b64(&bincode::serialize(&message).unwrap())).unwrap();
+        assert_eq!(parsed.message, message);
+        assert_eq!(
+            parsed.signatures.len(),
+            message.header().num_required_signatures as usize
+        );
+    }
+
+    #[test]
+    fn rejects_garbage_with_a_helpful_error() {
+        let err = parse_unsigned(&b64(b"not a transaction at all")).unwrap_err();
+        assert!(err.to_string().contains("base64 message"), "got: {err}");
+        // Not base64 at all.
+        assert!(parse_unsigned("%%%not-base64%%%").is_err());
     }
 }

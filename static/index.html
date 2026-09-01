@@ -1442,9 +1442,9 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 
         <!-- paste mode -->
         <div id="tabPaste" class="tabpane hidden">
-          <label class="flabel">Serialized transaction (base64)</label>
+          <label class="flabel">Serialized transaction or message (base64)</label>
           <textarea id="txB64" class="ta" spellcheck="false"
-            placeholder="paste the base64 of an unsigned VersionedTransaction — e.g. Buffer.from(tx.serialize()).toString('base64')"></textarea>
+            placeholder="paste an unsigned VersionedTransaction (Buffer.from(tx.serialize()).toString('base64')) — or the Base64 message your wallet shows in developer mode"></textarea>
         </div>
 
         <!-- build mode -->
@@ -2665,11 +2665,27 @@ function runInput() {
   try { len = bs58decode(input).length; } catch { /* not base58 */ }
   if (len === 32) return showAddress(input);   // account / program address
   if (len === 64) return analyze();            // transaction signature
+  // Base64 — a serialized unsigned transaction, or the "Base64 message" wallets
+  // in developer mode show on the approval screen. Route it into Simulate,
+  // exactly like pasting it in the advanced tab.
+  let b64len = 0;
+  try {
+    if (/^[A-Za-z0-9+/]+={0,2}$/.test(input) && input.length % 4 === 0) b64len = atob(input).length;
+  } catch { /* not base64 */ }
+  if (b64len > 60) {
+    showSim(true);
+    document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x.dataset.tab === 'paste'));
+    $('tabPaste').classList.remove('hidden');
+    $('tabBuild').classList.add('hidden');
+    $('txB64').value = input;
+    runPreflight();
+    return;
+  }
   // Anything else never reaches the RPC — a friendly nudge instead of a raw
   // "-32602 WrongSize" bubbling up from the backend.
   $('hero').classList.add('hidden'); $('out').classList.add('hidden'); $('txlist').classList.add('hidden');
   const st = $('status'); st.className = 'status err'; st.classList.remove('hidden');
-  st.textContent = "That doesn't look like a Solana signature or address — paste a full transaction signature (~88 chars) or an account / program address (~44 chars).";
+  st.textContent = "That doesn't look like a Solana signature or address — paste a transaction signature (~88 chars), an account / program address (~44 chars), or a base64 transaction / wallet message to simulate it.";
 }
 
 // Show an explorer-style address page: the account/program overview + its recent
