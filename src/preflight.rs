@@ -110,14 +110,30 @@ fn account_addr(accounts: &[IxAccount], i: usize) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
+/// The full base58 address at an instruction-account position (for identity
+/// checks); [`account_addr`] gives the shortened display form.
+fn full_addr(accounts: &[IxAccount], i: usize) -> &str {
+    accounts.get(i).map(|a| a.address.as_str()).unwrap_or("")
+}
+
 /// Translate one decoded instruction into action lines and warnings. Only
 /// well-understood native shapes produce output — an unknown instruction adds
 /// nothing rather than guessing.
+///
+/// `fee_payer` and `wrap_targets` (accounts that get a SyncNative, i.e. wrapped
+/// SOL) let the descriptions distinguish routine self-operations — wrapping
+/// your own SOL, closing your own temp account with the rent returned to you —
+/// from the genuinely alarming shapes (rent swept to *another* address, a
+/// delegation, an authority change). Flagging routine swap plumbing as a
+/// warning would be a false alarm, which on a safety feature is worse than
+/// silence.
 fn describe(
     program: &str,
     name: Option<&str>,
     args: &[IxArg],
     accounts: &[IxAccount],
+    fee_payer: &str,
+    wrap_targets: &std::collections::HashSet<String>,
     actions: &mut Vec<String>,
     warnings: &mut Vec<String>,
 ) {
@@ -128,11 +144,17 @@ fn describe(
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(lamports_to_sol)
                 .unwrap_or_else(|| "SOL".into());
-            actions.push(format!(
-                "sends {amt} from {} to {}",
-                account_addr(accounts, 0),
-                account_addr(accounts, 1)
-            ));
+            // A transfer into an account that's about to be SyncNative'd is the
+            // wrapped-SOL wrap step — your own SOL, not a payment out.
+            if wrap_targets.contains(full_addr(accounts, 1)) {
+                actions.push(format!("wraps {amt} (your own SOL, for the swap)"));
+            } else {
+                actions.push(format!(
+                    "sends {amt} from {} to {}",
+                    account_addr(accounts, 0),
+                    account_addr(accounts, 1)
+                ));
+            }
         }
         (SYSTEM, "Create Account") | (SYSTEM, "CreateAccount") => {
             actions.push(format!("creates account {}", account_addr(accounts, 1)));
@@ -166,11 +188,23 @@ fn describe(
             "changes the authority of {} — control of the account moves",
             account_addr(accounts, 0)
         )),
-        (TOKEN | TOKEN_2022, "Close Account" | "CloseAccount") => warnings.push(format!(
-            "closes token account {} and sends its rent to {}",
-            account_addr(accounts, 0),
-            account_addr(accounts, 1)
-        )),
+        (TOKEN | TOKEN_2022, "Close Account" | "CloseAccount") => {
+            // Closing your own token account with the rent returned to you is
+            // routine (every wrapped-SOL swap ends this way). Only a close that
+            // sends the rent to a *different* address is worth flagging.
+            if full_addr(accounts, 1) == fee_payer {
+                actions.push(format!(
+                    "closes token account {} (rent returned to you)",
+                    account_addr(accounts, 0)
+                ));
+            } else {
+                warnings.push(format!(
+                    "closes token account {} and sends its rent to {} — a different address",
+                    account_addr(accounts, 0),
+                    account_addr(accounts, 1)
+                ));
+            }
+        }
         (TOKEN | TOKEN_2022, "Revoke") => actions.push(format!(
             "revokes the delegate on {}",
             account_addr(accounts, 0)
@@ -208,10 +242,10 @@ pub(crate) fn build_overview(
     let fee_payer = keys.first().cloned().unwrap_or_default();
 
     // Decode every top-level instruction, and pick up the ComputeBudget
-    // requests along the way.
+    // requests along the way. Descriptions come in a second pass, since a
+    // Transfer's meaning depends on a SyncNative that appears *later*.
     let mut instructions = Vec::new();
-    let mut actions = Vec::new();
-    let mut warnings = Vec::new();
+    let mut wrap_targets: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut cu_limit: Option<u64> = None;
     let mut cu_price_micro: Option<u64> = None;
     let mut non_cb_ix = 0u64;
@@ -248,14 +282,16 @@ pub(crate) fn build_overview(
             non_cb_ix += 1;
         }
 
-        describe(
-            &program,
-            name.as_deref(),
-            &args,
-            &accounts,
-            &mut actions,
-            &mut warnings,
-        );
+        // SyncNative marks its account as a wrapped-SOL account being funded —
+        // so a Transfer into it reads as a wrap, not a payment.
+        if matches!(program.as_str(), TOKEN | TOKEN_2022)
+            && name.as_deref() == Some("Sync Native")
+        {
+            if let Some(a) = accounts.first() {
+                wrap_targets.insert(a.address.clone());
+            }
+        }
+
         instructions.push(PreflightIx {
             index,
             program,
@@ -263,6 +299,23 @@ pub(crate) fn build_overview(
             args,
             accounts,
         });
+    }
+
+    // Second pass: plain-English actions and danger flags, now that wrap targets
+    // are known.
+    let mut actions = Vec::new();
+    let mut warnings = Vec::new();
+    for ix in &instructions {
+        describe(
+            &ix.program,
+            ix.name.as_deref(),
+            &ix.args,
+            &ix.accounts,
+            &fee_payer,
+            &wrap_targets,
+            &mut actions,
+            &mut warnings,
+        );
     }
 
     // Priority fee = price (µ-lamports / CU) × CU limit. When no limit was
