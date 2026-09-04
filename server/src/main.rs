@@ -206,6 +206,26 @@ struct SimRequest {
     rpc: Option<String>,
 }
 
+/// POST body for /trace — the step debugger. Exactly one of `signature`
+/// (a landed transaction) or `transaction` (base64, unsigned) is required.
+#[derive(Deserialize)]
+struct TraceRequest {
+    #[serde(default)]
+    signature: Option<String>,
+    #[serde(default)]
+    transaction: Option<String>,
+    #[serde(default)]
+    mutations: Vec<MutationInput>,
+    #[serde(default)]
+    time_travel: TimeTravel,
+    #[serde(default)]
+    features: Vec<svmscope::spec::FeatureInput>,
+    #[serde(default)]
+    cluster: Option<String>,
+    #[serde(default)]
+    rpc: Option<String>,
+}
+
 /// Serve the static frontend page.
 async fn index() -> Html<&'static str> {
     Html(include_str!("../../static/index.html"))
@@ -535,6 +555,74 @@ async fn replay_report_handler(
     result.map(Json).map_err(lib_err)
 }
 
+/// POST /trace — unroll a transaction into steps: every instruction and CPI with
+/// what it changed, and the failing step pinpointed. Mutations apply first.
+async fn trace_handler(
+    Json(req): Json<TraceRequest>,
+) -> Result<Json<svmscope::Trace>, (StatusCode, String)> {
+    cap(req.mutations.len(), MAX_MUTATIONS_PER_REQUEST, "mutations")?;
+    if req.signature.is_none() == req.transaction.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "provide exactly one of `signature` or `transaction`".into(),
+        ));
+    }
+
+    let mutations: Vec<Mutation> = req
+        .mutations
+        .into_iter()
+        .map(MutationInput::into_mutation)
+        .collect::<Result<_, _>>()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let features = svmscope::spec::feature_toggles(req.features)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let tt = req.time_travel.clone();
+
+    let result =
+        tokio::task::spawn_blocking(move || -> Result<svmscope::Trace, svmscope::Error> {
+            let scope = Scope::new(url);
+            let mut replay = match (req.signature, req.transaction) {
+                (Some(sig), _) => scope.replay(&sig)?,
+                (None, Some(b64)) => scope.preflight(&b64)?,
+                (None, None) => unreachable!("validated above"),
+            };
+            replay.set_time_travel(tt);
+            replay.set_features(features);
+            replay.trace(&mutations)
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
+
+    result.map(Json).map_err(lib_err)
+}
+
+/// GET /trace/{signature} — the plain trace, cacheable, for share links.
+async fn trace_get_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<ClusterQuery>,
+) -> Result<Json<svmscope::Trace>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let result =
+        tokio::task::spawn_blocking(move || -> Result<svmscope::Trace, svmscope::Error> {
+            Scope::new(url).replay(&signature)?.trace(&[])
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
+    result.map(Json).map_err(lib_err)
+}
+
 /// POST body for IDL-assisted decoding / instruction listing.
 #[derive(Deserialize)]
 struct IdlRequest {
@@ -861,6 +949,8 @@ async fn api_index() -> Json<serde_json::Value> {
             "POST /simulate":             "{ signature, mutations[], time_travel?, features? } — replay with what-if account mutations, an optional clock warp, and optional runtime feature-gate toggles.",
             "POST /simulate_suite":       "{ signature, scenarios[], time_travel?, features? } — run a suite of scenarios with outcome + state assertions, under optional feature-gate toggles.",
             "POST /preflight":            "{ transaction, mutations[] } — simulate an UNSIGNED transaction against current state before sending.",
+            "POST /trace":                "{ signature | transaction, mutations[], time_travel?, features? } — step debugger: every instruction and CPI with decoded args, per-step account diffs, and the failing step.",
+            "GET  /trace/{signature}":    "The same trace with no mutations, cacheable.",
             "GET  /freeze/{signature}":   "Capture a self-contained fixture for deterministic, offline replay."
         }
     }))
@@ -927,6 +1017,8 @@ fn endpoint_label(path: &str) -> Option<&'static str> {
         Some("preflight")
     } else if path.starts_with("/freeze") {
         Some("freeze")
+    } else if path.starts_with("/trace") {
+        Some("trace")
     } else if path.starts_with("/account") {
         Some("account")
     } else if path.starts_with("/signatures") {
@@ -942,6 +1034,7 @@ async fn cache_layer(req: Request, next: Next) -> Response {
     let path = req.uri().path();
     let cacheable = req.method() == axum::http::Method::GET
         && (path.starts_with("/analyze")
+            || path.starts_with("/trace")
             || path.starts_with("/account")
             || path.starts_with("/signatures")
             || path.starts_with("/replay"));
@@ -1037,6 +1130,9 @@ async fn main() {
         .route("/preflight", post(preflight_handler))
         .route("/preflight_report", post(preflight_report_handler))
         .route("/replay_report", post(replay_report_handler))
+        .route("/trace", post(trace_handler))
+        .route("/trace/{signature}", get(trace_get_handler))
+        .route("/debug/{signature}", get(index))
         .route("/instructions/{program}", get(instructions_handler))
         .route("/idl_instructions", post(idl_instructions_handler))
         .route("/decode_account", post(decode_account_handler))
