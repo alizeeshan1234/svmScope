@@ -1707,6 +1707,24 @@ fn explain_error(
         });
     }
 
+    // Native programs define their errors in code, not an IDL. Name the common ones.
+    if let (Some(p), Some(code)) = (
+        program.as_deref(),
+        raw.split("Custom(")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .and_then(|s| s.parse::<u64>().ok()),
+    ) {
+        if let Some((title, detail)) = native_error(p, code) {
+            return Some(Explanation {
+                title: title.into(),
+                detail: detail.into(),
+                program,
+                raw: raw.clone(),
+            });
+        }
+    }
+
     // Otherwise resolve the custom code against the program's IDL.
     if let Some(code) = raw
         .split("Custom(")
@@ -1738,6 +1756,35 @@ fn explain_error(
         )
     } else if raw.contains("InvalidAddressLookupTableIndex") {
         ("Lookup table index invalid", "The transaction referenced an address lookup table entry that isn't active at this slot.")
+    } else if let Some(code) = raw
+        .split("Custom(")
+        .nth(1)
+        .and_then(|s| s.split(')').next())
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        let who = program
+            .as_deref()
+            .map(|p| format!("Program {p}"))
+            .unwrap_or_else(|| "The program".to_string());
+        let has_idl = program
+            .as_ref()
+            .map(|p| idls.contains_key(p))
+            .unwrap_or(false);
+        let detail = if has_idl {
+            format!(
+                "{who} returned custom error {code} (0x{code:x}), which its IDL does not define. Check the program's source for the code."
+            )
+        } else {
+            format!(
+                "{who} returned custom error {code} (0x{code:x}). It publishes no IDL, so the error has no name here; the meaning is in the program's source."
+            )
+        };
+        return Some(Explanation {
+            title: format!("Custom error {code}"),
+            detail,
+            program,
+            raw: raw.clone(),
+        });
     } else {
         (
             "Transaction failed",
@@ -1749,6 +1796,120 @@ fn explain_error(
         detail: detail.into(),
         program,
         raw: raw.clone(),
+    })
+}
+
+/// Error names for the native programs that have no IDL (System, SPL Token,
+/// Token-2022, Associated Token). Codes follow `SystemError` / `TokenError`.
+fn native_error(program: &str, code: u64) -> Option<(&'static str, &'static str)> {
+    const SYSTEM: &str = "11111111111111111111111111111111";
+    const TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+    const TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+    const ATA: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+    Some(match (program, code) {
+        (SYSTEM, 0) => (
+            "Account already in use",
+            "The account to create already exists.",
+        ),
+        (SYSTEM, 1) => (
+            "Insufficient funds",
+            "The transfer would leave the source account with a negative balance.",
+        ),
+        (SYSTEM, 2) => (
+            "Invalid program id",
+            "The account cannot be assigned to that program.",
+        ),
+        (SYSTEM, 3) => (
+            "Invalid account data length",
+            "The requested allocation size is not allowed.",
+        ),
+        (SYSTEM, 4) => (
+            "Max seed length exceeded",
+            "A seed for a derived address is too long.",
+        ),
+        (SYSTEM, 5) => (
+            "Address with seed mismatch",
+            "The address does not derive from the given base and seed.",
+        ),
+        (SYSTEM, 6) => (
+            "Nonce has no recent blockhashes",
+            "The durable nonce could not be advanced.",
+        ),
+        (SYSTEM, 7) => (
+            "Nonce blockhash not expired",
+            "The stored nonce is still valid, so it cannot be advanced yet.",
+        ),
+        (SYSTEM, 8) => (
+            "Unexpected nonce value",
+            "The transaction's blockhash does not match the nonce account.",
+        ),
+        (TOKEN | TOKEN_2022, 0) => (
+            "Not rent exempt",
+            "The account lacks the lamports to be rent-exempt.",
+        ),
+        (TOKEN | TOKEN_2022, 1) => (
+            "Insufficient funds",
+            "The token account holds fewer tokens than the instruction moves.",
+        ),
+        (TOKEN | TOKEN_2022, 2) => ("Invalid mint", "The mint account is not valid."),
+        (TOKEN | TOKEN_2022, 3) => (
+            "Mint mismatch",
+            "The token account belongs to a different mint.",
+        ),
+        (TOKEN | TOKEN_2022, 4) => (
+            "Owner mismatch",
+            "The signer is not the token account's owner or delegate.",
+        ),
+        (TOKEN | TOKEN_2022, 5) => ("Fixed supply", "The mint has no mint authority."),
+        (TOKEN | TOKEN_2022, 6) => ("Already in use", "The account is already initialized."),
+        (TOKEN | TOKEN_2022, 7) => (
+            "Invalid number of provided signers",
+            "A multisig received the wrong number of signers.",
+        ),
+        (TOKEN | TOKEN_2022, 8) => (
+            "Invalid number of required signers",
+            "The multisig threshold is out of range.",
+        ),
+        (TOKEN | TOKEN_2022, 9) => (
+            "Uninitialized state",
+            "The account has not been initialized.",
+        ),
+        (TOKEN | TOKEN_2022, 10) => (
+            "Native not supported",
+            "This instruction does not apply to a native (wrapped SOL) account.",
+        ),
+        (TOKEN | TOKEN_2022, 11) => (
+            "Non-native has balance",
+            "A non-native account cannot be closed while it holds tokens.",
+        ),
+        (TOKEN | TOKEN_2022, 12) => (
+            "Invalid instruction",
+            "The instruction data did not decode.",
+        ),
+        (TOKEN | TOKEN_2022, 13) => (
+            "Invalid state",
+            "The account is in a state that does not allow this operation.",
+        ),
+        (TOKEN | TOKEN_2022, 14) => ("Overflow", "An arithmetic operation overflowed."),
+        (TOKEN | TOKEN_2022, 15) => (
+            "Authority type not supported",
+            "The mint or account has no such authority.",
+        ),
+        (TOKEN | TOKEN_2022, 16) => ("Mint cannot freeze", "The mint has no freeze authority."),
+        (TOKEN | TOKEN_2022, 17) => ("Account frozen", "The token account is frozen."),
+        (TOKEN | TOKEN_2022, 18) => (
+            "Mint decimals mismatch",
+            "The decimals passed do not match the mint.",
+        ),
+        (TOKEN | TOKEN_2022, 19) => (
+            "Non-native not supported",
+            "This instruction only applies to native (wrapped SOL) accounts.",
+        ),
+        (ATA, 0) => (
+            "Invalid owner",
+            "The associated token account's owner does not match.",
+        ),
+        _ => return None,
     })
 }
 

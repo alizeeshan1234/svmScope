@@ -1282,6 +1282,29 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 .dbg-keys { font-size: 11px; color: var(--text-3); margin-top: var(--s-2); }
 .dbg-keys kbd { font-family: var(--font-mono); border: 1px solid var(--border-strong); border-radius: 4px; padding: 0 5px; color: var(--text-2); }
 
+
+/* debugger: edit & re-run */
+.dbg-stage { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; margin-bottom: var(--s-4);
+  background: var(--bg-1); border: 1px solid var(--brand-border); border-radius: var(--r-md); padding: var(--s-3) var(--s-4); }
+.dbg-stage .lbl { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .09em; color: var(--brand-strong); margin-right: var(--s-2); }
+.dbg-stage .mut { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-1); background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--r-full); padding: 2px 10px; display: inline-flex; align-items: center; gap: 6px; }
+.dbg-stage .mut .x { cursor: pointer; color: var(--text-3); } .dbg-stage .mut .x:hover { color: var(--red); }
+.dbg-stage .mut.warn { border-color: rgba(251,191,36,.45); }
+.drow .old.editable, .dhead .lam.editable { cursor: pointer; text-decoration: underline dotted; text-decoration-color: var(--brand-strong); text-underline-offset: 3px; }
+.drow .old.editable:hover, .dhead .lam.editable:hover { color: var(--brand-strong); }
+.dbg-edit { display: inline-flex; gap: 6px; align-items: center; }
+.dbg-edit input { font-family: var(--font-mono); font-size: 12px; width: 180px; background: var(--bg-inset); color: var(--text-1);
+  border: 1px solid var(--brand-border); border-radius: 6px; padding: 3px 8px; }
+.ix-row .ix-edit { font-size: 10.5px; color: var(--text-3); cursor: pointer; margin-left: var(--s-2); white-space: nowrap; }
+.ix-row .ix-edit:hover { color: var(--brand-strong); }
+.dbg-cmp { margin-bottom: var(--s-4); }
+.dbg-cmp .crow { display: grid; grid-template-columns: 60px 1fr 1fr; gap: var(--s-3); padding: 6px 0; border-top: 1px solid var(--border); font-size: 12px; }
+.dbg-cmp .crow:first-of-type { border-top: 0; }
+.dbg-cmp .cpath { font-family: var(--font-mono); color: var(--brand-strong); font-weight: 600; }
+.dbg-cmp .cb { color: var(--text-3); } .dbg-cmp .ca { color: var(--text-1); }
+.dbg-cmp .ok { color: var(--green); } .dbg-cmp .bad { color: var(--red); }
+
 .hidden { display: none !important; }
 
 /* aliases for inline styles in templates */
@@ -1620,6 +1643,13 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
       <button class="btn ghost sm" id="dbgBack">← Back to analysis</button>
     </div>
     <div id="dbgBanner"></div>
+    <div class="dbg-stage hidden" id="dbgStage">
+      <span class="lbl">What if</span><span id="dbgMuts"></span>
+      <span class="spacer"></span>
+      <button class="btn ghost sm" id="dbgReset">Reset</button>
+      <button class="btn sm" id="dbgRun">▶ Re-run with changes</button>
+    </div>
+    <div id="dbgCompare"></div>
     <div class="dbg-grid">
       <div class="card">
         <h2>Steps <span class="count" id="dbgCount">0</span></h2>
@@ -3722,12 +3752,108 @@ document.querySelectorAll('.ex-chip[data-ex]').forEach(c => c.addEventListener('
 // Fetches a Trace (every instruction and CPI with what it changed) and renders
 // it as a tree + a detail pane + the logs, with the failing step pinpointed.
 let trace = null, dbgSel = -1, dbgSigCur = '';
+let traceBase = null;      // the unmodified trace, for "what changed"
+let dbgMuts = [];          // staged what-if mutations (server MutationInput shape)
+
+function renderStage() {
+  const box = $('dbgStage');
+  box.classList.toggle('hidden', dbgMuts.length === 0 && !traceBase);
+  $('dbgMuts').innerHTML = dbgMuts.map((m, i) => {
+    const warn = m._warn ? ' warn' : '';
+    return `<span class="mut${warn}" title="${esc(m._warn || 'applies to the state before instruction 0')}">${esc(m._label)}<span class="x" data-i="${i}">✕</span></span>`;
+  }).join('') + (dbgMuts.length ? '' : '<span style="font-size:12px;color:var(--text-3)">no changes staged</span>');
+  $('dbgMuts').querySelectorAll('.x').forEach(x => x.addEventListener('click', () => { dbgMuts.splice(Number(x.dataset.i), 1); renderStage(); }));
+  $('dbgRun').disabled = dbgMuts.length === 0;
+}
+
+// Does any step before `stepIdx` write this account? Then an "initial state"
+// edit doesn't reproduce "edit at this step" exactly — flag it honestly.
+function writtenEarlier(address, stepIdx) {
+  const t = traceBase || trace;
+  return t.steps.slice(0, stepIdx).some(s => (s.diffs || []).some(d => d.address === address));
+}
+
+function stageMutation(m) {
+  const key = m.kind === 'field' ? `${m.address}:${m.field}` : `${m.address}:lamports`;
+  dbgMuts = dbgMuts.filter(x => (x.kind === 'field' ? `${x.address}:${x.field}` : `${x.address}:lamports`) !== key);
+  dbgMuts.push(m);
+  renderStage();
+}
+
+function inlineEdit(target, current, onCommit) {
+  const wrap = document.createElement('span');
+  wrap.className = 'dbg-edit';
+  wrap.innerHTML = `<input value="${esc(String(current))}" spellcheck="false" /><button class="btn ghost sm">set</button>`;
+  target.replaceWith(wrap);
+  const inp = wrap.querySelector('input'); inp.focus(); inp.select();
+  const commit = () => { const v = inp.value.trim(); if (v !== '') onCommit(v); selectStep(dbgSel); };
+  wrap.querySelector('button').addEventListener('click', commit);
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') selectStep(dbgSel); });
+}
+
+async function runWithChanges() {
+  if (!dbgMuts.length) return;
+  const b = $('dbgRun'); b.disabled = true; b.textContent = '▶ Re-running…';
+  try {
+    const body = { signature: dbgSigCur, mutations: dbgMuts.map(({ _label, _warn, ...m }) => m), time_travel: timeTravel, features: activeFeatures, ...clusterParams() };
+    const res = await api('/trace', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) throw new Error(await res.text());
+    const after = await res.json();
+    if (!traceBase) traceBase = trace;
+    trace = after;
+    renderTrace(trace);
+    renderCompare(traceBase, after);
+  } catch (e) {
+    $('dbgCompare').innerHTML = `<div class="explain"><div class="ic">⚠️</div><div><div class="t">Re-run failed</div><div class="d">${esc(e.message || e)}</div></div></div>`;
+  }
+  b.textContent = '▶ Re-run with changes'; renderStage();
+}
+
+function stepSummary(s) {
+  if (!s) return null;
+  const changes = (s.diffs || []).flatMap(d => {
+    const v = d.fields.map(f => `${short(d.address)}.${f.name}: ${f.before} → ${f.after}`);
+    if (d.lamports_before !== d.lamports_after) v.push(`${short(d.address)}.lamports: ${fmt(d.lamports_before)} → ${fmt(d.lamports_after)}`);
+    return v;
+  });
+  return { success: s.success, error: s.error?.raw || null, cu: s.cu_consumed, changes };
+}
+function renderCompare(base, after) {
+  const rows = [];
+  const paths = [...new Set([...base.steps, ...after.steps].map(s => s.path))];
+  for (const p of paths) {
+    const b = stepSummary(base.steps.find(s => s.path === p)), a = stepSummary(after.steps.find(s => s.path === p));
+    if (JSON.stringify(b) === JSON.stringify(a)) continue;
+    const cell = (x) => !x ? '<span class="cb">did not run</span>' :
+      `<span class="${x.success ? 'ok' : 'bad'}">${x.success ? '✓' : '✗'}</span>` +
+      (x.error ? ` <span class="cb">${esc(x.error)}</span>` : '') +
+      (x.cu != null ? ` <span class="cb">${fmt(x.cu)} CU</span>` : '') +
+      (x.changes.length ? `<div style="font-family:var(--font-mono);font-size:11px;margin-top:3px">${x.changes.map(esc).join('<br>')}</div>` : '');
+    rows.push(`<div class="crow"><span class="cpath">${esc(p)}</span><div>${cell(b)}</div><div>${cell(a)}</div></div>`);
+  }
+  const flip = base.result.success !== after.result.success;
+  $('dbgCompare').innerHTML = `<div class="card dbg-cmp"><h2>What your changes did ${flip
+      ? `<span class="count" style="color:${after.result.success ? 'var(--green)' : 'var(--red)'}">outcome flipped: now ${after.result.success ? 'succeeds' : 'fails'}</span>`
+      : `<span class="count">outcome unchanged</span>`}</h2>
+    ${rows.length ? `<div class="crow" style="border:0;color:var(--text-3);font-size:10.5px;text-transform:uppercase;letter-spacing:.08em"><span>step</span><span>original</span><span>with changes</span></div>${rows.join('')}`
+      : '<div class="dbg-empty">every step ran exactly the same</div>'}
+  </div>`;
+}
+
+$('dbgRun').addEventListener('click', runWithChanges);
+$('dbgReset').addEventListener('click', () => {
+  dbgMuts = [];
+  if (traceBase) { trace = traceBase; traceBase = null; renderTrace(trace); }
+  $('dbgCompare').innerHTML = '';
+  renderStage();
+});
 
 function hideAllViews() {
   ['hero', 'status', 'txlist', 'out', 'sim', 'debug'].forEach(id => $(id).classList.add('hidden'));
 }
 
 async function showDebug(sig, push) {
+  if (sig !== dbgSigCur) { dbgMuts = []; traceBase = null; $('dbgCompare').innerHTML = ''; }
   dbgSigCur = sig;
   hideAllViews();
   const st = $('status'); st.className = 'status'; st.classList.remove('hidden');
@@ -3745,6 +3871,7 @@ async function showDebug(sig, push) {
   st.classList.add('hidden');
   $('debug').classList.remove('hidden');
   renderTrace(trace);
+  renderStage();
 }
 
 function renderTrace(tr) {
@@ -3756,11 +3883,14 @@ function renderTrace(tr) {
 
   // Banner: drift warning, then the failure in plain language.
   let banner = '';
-  const drift = tr.onchain_success != null && tr.onchain_success !== ok;
+  const drift = tr.onchain_success != null && tr.onchain_success !== ok && !traceBase;
   if (drift) {
     banner += `<div class="dbg-note">On-chain this transaction <b>${tr.onchain_success ? 'succeeded' : 'failed'}</b>. ` +
       `This replay ran against <b>${esc(tr.fidelity)}</b> state, so the difference is state drift since the ` +
       `transaction's slot, not necessarily a program bug.${tr.clock ? ' Clock: ' + esc(tr.clock) + '.' : ''}</div>`;
+  }
+  if (traceBase) {
+    banner += `<div class="dbg-note">This run includes your changes. Compare against the original below.</div>`;
   }
   if (!ok && tr.explain) {
     banner += `<div class="explain"><div class="ic">⚠️</div><div>
@@ -3827,14 +3957,50 @@ function selectStep(i) {
     <div class="diffs">${s.diffs.map(d => {
       const dl = d.lamports_after - d.lamports_before;
       const lam = dl !== 0 ? `<span class="lam ${dl > 0 ? 'amt pos' : 'amt neg'}">${dl > 0 ? '+' : '−'}${fmtSol(Math.abs(dl))}</span>` : '';
-      const rows = d.fields.map(f => `<div class="drow"><span class="fname">${esc(f.name)} <span class="f-off">${esc(f.type)}</span></span>
-        <span class="fv"><span class="old">${esc(f.before)}</span><span class="arr">→</span><span class="new">${esc(f.after)}</span></span></div>`).join('');
+      const rows = d.fields.map(f => {
+        const numeric = /^-?\d+$/.test(f.before) && /^(u|i)(8|16|32|64)$|^bool$/.test(f.type);
+        const old = numeric
+          ? `<span class="old editable" data-addr="${esc(d.address)}" data-field="${esc(f.name)}" data-val="${esc(f.before)}" title="click to change the value before this step">${esc(f.before)}</span>`
+          : `<span class="old">${esc(f.before)}</span>`;
+        return `<div class="drow"><span class="fname">${esc(f.name)} <span class="f-off">${esc(f.type)}</span></span>
+        <span class="fv">${old}<span class="arr">→</span><span class="new">${esc(f.after)}</span></span></div>`;
+      }).join('');
       const raw = d.raw_data_changed && !d.fields.length ? '<div class="drow"><span class="fname">data</span><span class="fv"><span class="new">changed (layout not decoded)</span></span></div>' : '';
-      return `<div class="dcard"><div class="dhead">${copyPill(d.address)}${progPill(d.owner)}${lam}</div>${rows}${raw}</div>`;
+      const lamEdit = `<span class="lam editable" data-addr="${esc(d.address)}" data-lamports="${d.lamports_before}" title="click to change the balance before this step">${lam || 'set balance'}</span>`;
+      return `<div class="dcard"><div class="dhead">${copyPill(d.address)}${progPill(d.owner)}${lamEdit}</div>${rows}${raw}</div>`;
     }).join('')}</div></div>`
     : (s.depth === 1 && s.state_known ? `<div class="card"><div class="dbg-empty">this step changed no account state</div></div>` : '');
   $('dbgDetail').innerHTML = head + diffs;
   wireCopy($('dbgDetail'));
+  // Click a "before" value to change it; the trace re-runs from the start with
+  // that change applied. Numeric fields and balances only.
+  $('dbgDetail').querySelectorAll('.old.editable').forEach(el => el.addEventListener('click', () => {
+    const address = el.dataset.addr, field = el.dataset.field;
+    inlineEdit(el, el.dataset.val, v => {
+      const n = Number(v); if (!Number.isFinite(n)) return;
+      const warn = writtenEarlier(address, dbgSel) ? 'an earlier step also writes this account, so the edit applies to the initial state, not exactly to this step' : '';
+      stageMutation({ kind: 'field', address, field, value: n, _label: `${short(address)}.${field} = ${v}`, _warn: warn });
+    });
+  }));
+  $('dbgDetail').querySelectorAll('.lam.editable').forEach(el => el.addEventListener('click', () => {
+    const address = el.dataset.addr;
+    inlineEdit(el, (Number(el.dataset.lamports) / 1e9).toString(), v => {
+      const sol = Number(v); if (!Number.isFinite(sol) || sol < 0) return;
+      const warn = writtenEarlier(address, dbgSel) ? 'an earlier step also writes this account, so the edit applies to the initial state, not exactly to this step' : '';
+      stageMutation({ kind: 'lamports', address, lamports: Math.round(sol * 1e9), _label: `${short(address)} balance = ${v} SOL`, _warn: warn });
+    });
+  }));
+  // Any account the step touches can have its balance changed too.
+  $('dbgDetail').querySelectorAll('.ixdetail .ix-row .ix-v .addr-pill').forEach(pill => {
+    const address = pill.dataset.copy;
+    const e = document.createElement('span'); e.className = 'ix-edit'; e.textContent = 'set balance';
+    e.title = 'change this account\'s SOL balance before the transaction';
+    e.addEventListener('click', ev => { ev.stopPropagation(); inlineEdit(e, '', v => {
+      const sol = Number(v); if (!Number.isFinite(sol) || sol < 0) return;
+      stageMutation({ kind: 'lamports', address, lamports: Math.round(sol * 1e9), _label: `${short(address)} balance = ${v} SOL`, _warn: '' });
+    }); });
+    pill.parentElement.appendChild(e);
+  });
 
   // Logs: highlight this step's range and scroll to it.
   const [a, b] = s.logs || [0, 0];
