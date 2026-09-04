@@ -40,7 +40,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             println!(
                 "  DATA MATCH: {}{}",
-                if data_match { "✅ exact" } else { "❌ differs" },
+                if data_match {
+                    "✅ exact"
+                } else {
+                    "❌ differs"
+                },
                 if recon.writes_skipped > 0 {
                     "  (writes were skipped — expected to differ)"
                 } else {

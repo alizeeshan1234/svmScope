@@ -22,7 +22,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let off = offline.run()?;
     println!(
         "live vs offline: success {}=={}  cu {}=={}",
-        live.result.success, off.result.success, live.result.compute_units, off.result.compute_units
+        live.result.success,
+        off.result.success,
+        live.result.compute_units,
+        off.result.compute_units
     );
 
     // Emit the permanent regression test.

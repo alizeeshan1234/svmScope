@@ -20,12 +20,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let scope = Scope::new(&rpc);
     let analysis = scope.analyze(&sig)?;
-    let accounts: Vec<String> = analysis.accounts.iter().map(|a| a.address.clone()).collect();
+    let accounts: Vec<String> = analysis
+        .accounts
+        .iter()
+        .map(|a| a.address.clone())
+        .collect();
 
     println!("scanning {} accounts for breaking points…", accounts.len());
     let bps = scan_breaking_points(&scope, &sig, &accounts, ScanOptions::default())?;
 
-    println!("\n{} breaking point(s) found — this transaction breaks when:", bps.len());
+    println!(
+        "\n{} breaking point(s) found — this transaction breaks when:",
+        bps.len()
+    );
     for bp in &bps {
         println!("  · {} · {} {}", short(&bp.account), bp.field, bp.condition);
     }

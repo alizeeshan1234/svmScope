@@ -160,6 +160,7 @@ fn full_addr(accounts: &[IxAccount], i: usize) -> &str {
 /// delegation, an authority change). Flagging routine swap plumbing as a
 /// warning would be a false alarm, which on a safety feature is worse than
 /// silence.
+#[allow(clippy::too_many_arguments)]
 fn describe(
     program: &str,
     name: Option<&str>,
@@ -304,12 +305,10 @@ pub(crate) fn build_overview(
             // Tags: 2 = SetComputeUnitLimit(u32), 3 = SetComputeUnitPrice(u64).
             match ix.data.first() {
                 Some(2) if ix.data.len() >= 5 => {
-                    cu_limit =
-                        Some(u32::from_le_bytes(ix.data[1..5].try_into().unwrap()) as u64);
+                    cu_limit = Some(u32::from_le_bytes(ix.data[1..5].try_into().unwrap()) as u64);
                 }
                 Some(3) if ix.data.len() >= 9 => {
-                    cu_price_micro =
-                        Some(u64::from_le_bytes(ix.data[1..9].try_into().unwrap()));
+                    cu_price_micro = Some(u64::from_le_bytes(ix.data[1..9].try_into().unwrap()));
                 }
                 _ => {}
             }
@@ -319,8 +318,7 @@ pub(crate) fn build_overview(
 
         // SyncNative marks its account as a wrapped-SOL account being funded —
         // so a Transfer into it reads as a wrap, not a payment.
-        if matches!(program.as_str(), TOKEN | TOKEN_2022)
-            && name.as_deref() == Some("Sync Native")
+        if matches!(program.as_str(), TOKEN | TOKEN_2022) && name.as_deref() == Some("Sync Native")
         {
             if let Some(a) = accounts.first() {
                 wrap_targets.insert(a.address.clone());

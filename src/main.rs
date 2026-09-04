@@ -6,7 +6,7 @@
 use std::env;
 use std::error::Error;
 
-use svmscope::{spec, Mutation, Replay, ReplayResult, ScenarioOutcome, Scope};
+use svmscope::{spec, Mutation, Replay, ReplayResult, ScenarioOutcome, Scope, Trace};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
@@ -28,6 +28,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         "https://api.mainnet-beta.solana.com",
     )?;
     let scope = Scope::new(rpc);
+
+    // Debugger: `svmscope debug <signature> [--json]` steps through the
+    // transaction — every instruction and CPI with what it changed, and the
+    // failing step pinpointed.
+    if signature == "debug" {
+        let sig = args
+            .get(2)
+            .ok_or("usage: svmscope debug <signature> [--json]")?;
+        let replay = scope.replay(sig)?;
+        let trace = replay.trace(&[])?;
+        if args.iter().any(|a| a == "--json") {
+            println!("{}", serde_json::to_string_pretty(&trace)?);
+        } else {
+            print_trace(&trace);
+        }
+        return Ok(());
+    }
 
     // Test-runner mode: `svmscope test <scenarios.json>` runs a scenario suite
     // and exits non-zero if any assertion fails — drop it straight into CI.
@@ -298,5 +315,102 @@ fn print_replay(label: &str, r: &ReplayResult) {
     }
     for log in &r.logs {
         println!("  {log}");
+    }
+}
+
+/// Render a trace as an indented tree for the terminal.
+fn print_trace(trace: &Trace) {
+    let short = |s: &str| {
+        if s.len() > 12 {
+            format!("{}…{}", &s[..6], &s[s.len() - 4..])
+        } else {
+            s.to_string()
+        }
+    };
+    println!(
+        "{}  {}  fidelity: {}",
+        if trace.result.success { "OK " } else { "FAIL" },
+        if trace.signature.is_empty() {
+            "(preflight)"
+        } else {
+            &trace.signature
+        },
+        trace.fidelity
+    );
+    if let Some(c) = &trace.clock {
+        println!("clock: {c}");
+    }
+    for (i, s) in trace.steps.iter().enumerate() {
+        let indent = "  ".repeat((s.depth as usize).saturating_sub(1));
+        let mark = if trace.failed_step == Some(i) {
+            "✗"
+        } else if s.prefix_artifact {
+            "~"
+        } else if s.success {
+            "✓"
+        } else {
+            "·"
+        };
+        let name = s.name.clone().unwrap_or_else(|| "?".into());
+        let cu = s.cu_consumed.map(|c| format!("{c} CU")).unwrap_or_default();
+        println!(
+            "{indent}{mark} [{}] {} · {}  {}",
+            s.path,
+            short(&s.program),
+            name,
+            cu
+        );
+        for a in &s.args {
+            println!("{indent}      {} = {}", a.name, a.value);
+        }
+        for d in &s.diffs {
+            let lam = if d.lamports_before != d.lamports_after {
+                format!("  lamports {} → {}", d.lamports_before, d.lamports_after)
+            } else {
+                String::new()
+            };
+            println!("{indent}    Δ {}{}", short(&d.address), lam);
+            for f in &d.fields {
+                println!("{indent}        {} : {} → {}", f.name, f.before, f.after);
+            }
+            if d.fields.is_empty() && d.raw_data_changed {
+                println!("{indent}        (data changed, layout unknown)");
+            }
+        }
+        if let Some(e) = &s.error {
+            match &e.explain {
+                Some(x) => println!("{indent}    ERROR {} — {}", x.title, x.detail),
+                None => println!("{indent}    ERROR {}", e.raw),
+            }
+        }
+    }
+    if let Some(i) = trace.failed_step {
+        let s = &trace.steps[i];
+        println!("\nfailed at step {} of {}", s.path, trace.steps.len());
+        let n = trace.result.logs.len();
+        let (a, b) = s.logs;
+        let lines = &trace.result.logs[a.min(n)..b.min(n)];
+        if !lines.is_empty() {
+            println!("logs of the failing step:");
+            for l in lines.iter().take(20) {
+                println!("  {l}");
+            }
+            if lines.len() > 20 {
+                println!("  … {} more", lines.len() - 20);
+            }
+        }
+    }
+    if trace.drifted() {
+        let onchain = if trace.onchain_success == Some(true) {
+            "succeeded"
+        } else {
+            "failed"
+        };
+        println!(
+            "\nnote: on-chain this transaction {onchain}; the replay ran against `{}` state, so \
+             the difference is state drift since the transaction's slot, not necessarily a \
+             program bug.",
+            trace.fidelity
+        );
     }
 }

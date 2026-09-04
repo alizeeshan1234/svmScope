@@ -14,9 +14,9 @@ use crate::error::{Error, Result};
 use crate::replay::Mutation;
 use crate::scope::{AccountState, Scope};
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_request::RpcRequest;
+use std::collections::HashMap;
 
 /// One transaction that touched an account, and where it landed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,8 +262,15 @@ fn is_infra(address: &str) -> bool {
 }
 
 /// The single most-recent successful write to `address` strictly before `slot`.
-fn last_write(src: &dyn LedgerSource, address: &str, slot: u64, max_pages: usize) -> Result<Option<WriteRef>> {
-    Ok(write_history(src, address, slot, 1, max_pages)?.into_iter().next())
+fn last_write(
+    src: &dyn LedgerSource,
+    address: &str,
+    slot: u64,
+    max_pages: usize,
+) -> Result<Option<WriteRef>> {
+    Ok(write_history(src, address, slot, 1, max_pages)?
+        .into_iter()
+        .next())
 }
 
 /// Recursive, memoized dependency-cone reconstruction — the exact engine. To get

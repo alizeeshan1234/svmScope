@@ -25,7 +25,9 @@ impl Invariant {
     /// classic account-takeover guard. `field` is resolved via the account's
     /// layout or owner IDL.
     pub fn authority_unchanged(account: impl Into<String>, field: impl Into<String>) -> Check {
-        Check::account(account).field_delta(field, Cmp::eq(0)).build()
+        Check::account(account)
+            .field_delta(field, Cmp::eq(0))
+            .build()
     }
 
     /// An account's lamports must not decrease — no unexpected SOL outflow.
@@ -54,12 +56,16 @@ impl Invariant {
 
     /// A counter field must be monotonic non-decreasing — never runs backwards.
     pub fn monotonic(account: impl Into<String>, field: impl Into<String>) -> Check {
-        Check::account(account).field_delta(field, Cmp::ge(0)).build()
+        Check::account(account)
+            .field_delta(field, Cmp::ge(0))
+            .build()
     }
 
     /// A field must be unchanged by the transaction (a frozen config value).
     pub fn field_constant(account: impl Into<String>, field: impl Into<String>) -> Check {
-        Check::account(account).field_delta(field, Cmp::eq(0)).build()
+        Check::account(account)
+            .field_delta(field, Cmp::eq(0))
+            .build()
     }
 
     /// A field must hold an exact expected value after the transaction.

@@ -51,10 +51,15 @@ fn system_ix(data: &[u8]) -> Option<&'static str> {
         1 => "Assign",
         2 => "Transfer",
         3 => "Create Account With Seed",
+        4 => "Advance Nonce Account",
+        5 => "Withdraw Nonce Account",
+        6 => "Initialize Nonce Account",
+        7 => "Authorize Nonce Account",
         8 => "Allocate",
         9 => "Allocate With Seed",
         10 => "Assign With Seed",
         11 => "Transfer With Seed",
+        12 => "Upgrade Nonce Account",
         _ => return None,
     })
 }
@@ -208,6 +213,40 @@ pub(crate) fn enrich(
     account_indexes: &[usize],
     account_keys: &[String],
 ) -> (Option<String>, Vec<IxArg>, Vec<IxAccount>) {
+    let mut lookup = |p: &str| -> Option<Value> {
+        idl_cache
+            .entry(p.to_string())
+            .or_insert_with(|| {
+                Address::from_str(p)
+                    .ok()
+                    .and_then(|a| idl::fetch_idl_json(client, a))
+            })
+            .clone()
+    };
+    enrich_with(&mut lookup, program, data, account_indexes, account_keys)
+}
+
+/// [`enrich`] without RPC: resolves IDLs from an already-loaded map only. Used
+/// by the debugger and by fixture replays, where every relevant IDL was
+/// captured up front.
+pub(crate) fn enrich_offline(
+    idls: &HashMap<String, Value>,
+    program: &str,
+    data: &[u8],
+    account_indexes: &[usize],
+    account_keys: &[String],
+) -> (Option<String>, Vec<IxArg>, Vec<IxAccount>) {
+    let mut lookup = |p: &str| idls.get(p).cloned();
+    enrich_with(&mut lookup, program, data, account_indexes, account_keys)
+}
+
+fn enrich_with(
+    lookup: &mut dyn FnMut(&str) -> Option<Value>,
+    program: &str,
+    data: &[u8],
+    account_indexes: &[usize],
+    account_keys: &[String],
+) -> (Option<String>, Vec<IxArg>, Vec<IxAccount>) {
     let addresses: Vec<String> = account_indexes
         .iter()
         .map(|&i| account_keys.get(i).cloned().unwrap_or_default())
@@ -243,11 +282,7 @@ pub(crate) fn enrich(
         (name, native_args(program, data), names)
     } else {
         // Anchor program: resolve (and cache) its IDL, then match by discriminator.
-        let idl = idl_cache.entry(program.to_string()).or_insert_with(|| {
-            Address::from_str(program)
-                .ok()
-                .and_then(|a| idl::fetch_idl_json(client, a))
-        });
+        let idl = lookup(program);
         match idl.as_ref().and_then(|i| idl::find_ix(i, data)) {
             Some(ix) => {
                 let name = ix.name.as_deref().map(titleize);

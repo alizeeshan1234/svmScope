@@ -38,7 +38,11 @@ pub(crate) fn diagnose_tx(tx: &Value, idl_for: impl Fn(&str) -> Option<Value>) -
     let meta = &tx["meta"];
     let logs: Vec<String> = meta["logMessages"]
         .as_array()
-        .map(|a| a.iter().filter_map(|l| l.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|l| l.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let err = &meta["err"];
 
@@ -59,7 +63,9 @@ pub(crate) fn diagnose_tx(tx: &Value, idl_for: impl Fn(&str) -> Option<Value>) -
         return Diagnosis {
             failed: true,
             headline: "Outcome unavailable".into(),
-            explanation: "The RPC returned no metadata for this transaction, so its outcome can't be read.".into(),
+            explanation:
+                "The RPC returned no metadata for this transaction, so its outcome can't be read."
+                    .into(),
             fix: Some("Try a different RPC endpoint, or a transaction that has finalized.".into()),
             program: None,
             error_code: None,
@@ -81,14 +87,16 @@ pub(crate) fn diagnose_tx(tx: &Value, idl_for: impl Fn(&str) -> Option<Value>) -
         // (framework error codes mean the same thing across every program, so it
         // resolves even when the program isn't identified or has no IDL).
         let from_idl = match (&program, error_code) {
-            (Some(prog), Some(code)) => {
-                idl_for(prog).and_then(|idl| error_for_code(&idl, code as u64)).map(|e| (e.name, e.msg))
-            }
+            (Some(prog), Some(code)) => idl_for(prog)
+                .and_then(|idl| error_for_code(&idl, code as u64))
+                .map(|e| (e.name, e.msg)),
             _ => None,
         };
-        match from_idl
-            .or_else(|| error_code.and_then(framework_error).map(|(n, m)| (n.to_string(), m.to_string())))
-        {
+        match from_idl.or_else(|| {
+            error_code
+                .and_then(framework_error)
+                .map(|(n, m)| (n.to_string(), m.to_string()))
+        }) {
             Some((n, m)) => (Some(n), Some(m)),
             None => (None, None),
         }
@@ -129,7 +137,13 @@ pub(crate) fn diagnose_tx(tx: &Value, idl_for: impl Fn(&str) -> Option<Value>) -
             program.as_deref(),
         )
     };
-    let fix = fix_hint(&headline, message.as_deref(), &logs, error_code, name.is_some());
+    let fix = fix_hint(
+        &headline,
+        message.as_deref(),
+        &logs,
+        error_code,
+        name.is_some(),
+    );
 
     Diagnosis {
         failed: true,
@@ -250,7 +264,11 @@ fn describe_error(err: &Value) -> String {
         if let Some(name) = ie.get(1).and_then(|v| v.as_str()) {
             return name.to_string();
         }
-        if let Some(c) = ie.get(1).and_then(|v| v.get("Custom")).and_then(|v| v.as_i64()) {
+        if let Some(c) = ie
+            .get(1)
+            .and_then(|v| v.get("Custom"))
+            .and_then(|v| v.as_i64())
+        {
             return format!("custom error {c} (0x{c:x})");
         }
     }
@@ -403,7 +421,12 @@ mod tests {
         assert_eq!(d.error_code, Some(6001));
         assert_eq!(d.instruction_index, Some(2));
         assert!(d.explanation.contains("Instruction 2"));
-        assert!(d.fix.as_deref().unwrap().to_lowercase().contains("slippage"));
+        assert!(d
+            .fix
+            .as_deref()
+            .unwrap()
+            .to_lowercase()
+            .contains("slippage"));
     }
 
     #[test]

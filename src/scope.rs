@@ -36,6 +36,7 @@ use crate::replay::{
     FeatureToggle, Mutation, PreState, ReplayContext, ReplayResult, ScenarioOutcome, TimeTravel,
 };
 use crate::search::{search_threshold, Threshold};
+use crate::trace::Trace;
 use crate::{cpi_tree, decode, diffs, idl, ixname, utils, CapturedTransaction};
 
 /// An RPC-backed client with caches. Everything svmscope fetches — transaction
@@ -934,7 +935,10 @@ impl FidelityCertificate {
             "no recorded outcome"
         };
         match self.drifted.len() {
-            0 => format!("{} · {n} accounts, none drifted · {verify}", self.fidelity.label()),
+            0 => format!(
+                "{} · {n} accounts, none drifted · {verify}",
+                self.fidelity.label()
+            ),
             d => format!(
                 "{} · {n} accounts, {d} may have drifted · {verify}",
                 self.fidelity.label()
@@ -990,7 +994,11 @@ impl PatchComparison {
                 self.after.error.as_deref().unwrap_or("ok")
             ),
         };
-        format!("{}: {outcome} · compute {:+}", self.program, self.compute_delta())
+        format!(
+            "{}: {outcome} · compute {:+}",
+            self.program,
+            self.compute_delta()
+        )
     }
 }
 
@@ -1193,6 +1201,234 @@ impl Replay {
             clock: warped.then(|| self.ctx.describe_clock()),
             explain,
             result,
+        })
+    }
+
+    /// Unroll the transaction into a step-by-step [`Trace`] — the debugger's
+    /// view. Every top-level instruction is replayed as a prefix (`0..=k`) and
+    /// diffed against the previous prefix, so each step carries the exact
+    /// accounts it changed; CPIs are attached from the runtime's inner
+    /// instruction list with their logs and compute. `mutations` are applied to
+    /// the initial state first ("what if this field were X, step by step").
+    pub fn trace(&self, mutations: &[Mutation]) -> Result<Trace> {
+        use crate::replay::replay_result_of;
+        use crate::trace::{spans_from_logs, LogSpan, Step, StepError};
+        use solana_account::Account;
+        use std::collections::HashMap;
+
+        let runs = self.ctx.trace_raw(mutations)?;
+        let idls = self.ctx.idl_map();
+        let keys = self.ctx.message_account_keys();
+        let tx = self.ctx.transaction();
+        let top_ixs = tx.message.instructions();
+        let n = top_ixs.len();
+
+        // The whole transaction is the last prefix. Its logs are the canonical
+        // ones every step's log range indexes into: instruction k's lines sit at
+        // the same positions in prefix k and in the full run (execution is
+        // deterministic and later instructions can't rewrite earlier logs).
+        let full = runs.last().map(|r| replay_result_of(&r.result));
+        let mut result = full.clone().unwrap_or_default();
+        let explain = (!result.success)
+            .then(|| explain_error(&result, idls))
+            .flatten();
+        if result.error_name.is_none() {
+            result.error_name = explain.as_ref().map(|e| e.title.clone());
+        }
+        let whole_succeeded = result.success;
+
+        // Every invocation the full run logged, pre-order. Depth-1 spans are the
+        // top-level instructions in message order; the spans that follow a
+        // depth-1 span until the next one are its CPIs.
+        let full_spans: Vec<LogSpan> = spans_from_logs(&result.logs, 0);
+        let top_span_idx: Vec<usize> = full_spans
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.depth == 1)
+            .map(|(i, _)| i)
+            .collect();
+        let spans_for = |k: usize| -> &[LogSpan] {
+            match top_span_idx.get(k) {
+                Some(&start) => {
+                    let end = top_span_idx.get(k + 1).copied().unwrap_or(full_spans.len());
+                    &full_spans[start..end]
+                }
+                None => &[],
+            }
+        };
+
+        let mut steps: Vec<Step> = Vec::new();
+        let mut failed_step: Option<usize> = None;
+        let mut prev_post: Option<HashMap<Address, Account>> = None;
+        let mut halted = false; // a real failure happened; later steps never ran
+
+        for (k, run) in runs.iter().enumerate().take(n) {
+            let meta = match &run.result {
+                Ok(m) => m,
+                Err(f) => &f.meta,
+            };
+            let run_failed = run.result.is_err();
+            let artifact = run_failed && whole_succeeded;
+            let pos = run.keep.iter().position(|&i| i == k).unwrap_or(0);
+
+            // Nodes for this step: the top-level instruction, then its CPIs in
+            // emission order (already pre-order), from the prefix run's own
+            // inner-instruction list.
+            let mut nodes: Vec<(
+                u8,
+                &solana_message::compiled_instruction::CompiledInstruction,
+            )> = vec![(1, &top_ixs[k])];
+            if let Some(inner) = meta.inner_instructions.get(pos) {
+                nodes.extend(inner.iter().map(|ii| (ii.stack_height, &ii.instruction)));
+            }
+
+            let spans = spans_for(k);
+            let aligned = spans.len() == nodes.len()
+                && spans.iter().zip(nodes.iter()).all(|(s, (d, ix))| {
+                    s.depth == *d
+                        && keys
+                            .get(ix.program_id_index as usize)
+                            .map(|p| *p == s.program)
+                            .unwrap_or(false)
+                });
+            let top_range = spans.first().map(|s| (s.start, s.end));
+
+            // Diffs for the top-level step: this prefix's post-state vs the
+            // previous prefix's (or the pre-transaction state for k == 0).
+            let post: Option<HashMap<Address, Account>> =
+                run.post.as_ref().map(|p| p.iter().cloned().collect());
+            let mut diffs = Vec::new();
+            if let Some(post) = &post {
+                let mut raw = Vec::new();
+                for key in &keys {
+                    let Ok(addr) = Address::from_str(key) else {
+                        continue;
+                    };
+                    let before = prev_post
+                        .as_ref()
+                        .and_then(|m| m.get(&addr).cloned())
+                        .or_else(|| self.ctx.pre_account_owned(key));
+                    let after = post.get(&addr).cloned().or_else(|| before.clone());
+                    let (Some(b), Some(a)) = (&before, &after) else {
+                        continue;
+                    };
+                    if b.lamports == a.lamports && b.data == a.data && b.owner == a.owner {
+                        continue;
+                    }
+                    raw.push(crate::replay::RawAccountDiff {
+                        address: key.clone(),
+                        owner: a.owner.to_string(),
+                        lamports_before: b.lamports,
+                        lamports_after: a.lamports,
+                        data_before: b.data.clone(),
+                        data_after: a.data.clone(),
+                    });
+                }
+                diffs = decode_diffs(raw, idls);
+            }
+
+            // Emit the nodes.
+            let base_index = steps.len();
+            let mut path_stack: Vec<usize> = Vec::new(); // child counters per depth
+            let mut innermost_failure: Option<usize> = None;
+            for (i, (depth, ix)) in nodes.iter().enumerate() {
+                let program = keys
+                    .get(ix.program_id_index as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                let account_indexes: Vec<usize> = ix.accounts.iter().map(|&a| a as usize).collect();
+                let (name, args, accounts) =
+                    ixname::enrich_offline(idls, &program, &ix.data, &account_indexes, &keys);
+
+                // Path: "k" for the top, then "k.c0", "k.c0.c1", …
+                let d = *depth as usize;
+                path_stack.truncate(d.saturating_sub(1));
+                while path_stack.len() < d.saturating_sub(1) {
+                    path_stack.push(0);
+                }
+                let path = if d <= 1 {
+                    k.to_string()
+                } else {
+                    let mut p = k.to_string();
+                    for c in &path_stack {
+                        p.push('.');
+                        p.push_str(&c.to_string());
+                    }
+                    p
+                };
+                if d >= 2 {
+                    if let Some(last) = path_stack.last_mut() {
+                        *last += 1;
+                    }
+                }
+
+                let (logs, cu, success) = if aligned {
+                    let s = &spans[i];
+                    ((s.start, s.end), s.cu_consumed, s.success)
+                } else if i == 0 {
+                    let r = top_range.unwrap_or((result.logs.len(), result.logs.len()));
+                    (r, spans.first().and_then(|s| s.cu_consumed), !run_failed)
+                } else {
+                    let r = top_range.unwrap_or((result.logs.len(), result.logs.len()));
+                    (r, None, !run_failed)
+                };
+                if aligned && !success {
+                    innermost_failure = Some(base_index + i);
+                }
+                steps.push(Step {
+                    path,
+                    depth: *depth,
+                    index: k,
+                    program,
+                    name,
+                    args,
+                    accounts,
+                    cu_consumed: cu,
+                    logs,
+                    diffs: if i == 0 {
+                        std::mem::take(&mut diffs)
+                    } else {
+                        Vec::new()
+                    },
+                    state_known: i == 0 && post.is_some() && !halted,
+                    success: if halted { false } else { success },
+                    error: None,
+                    prefix_artifact: artifact,
+                });
+            }
+
+            if run_failed && !artifact && !halted {
+                // Attribute the error to the innermost failing invocation, or
+                // the top-level step when logs could not be aligned.
+                let target = innermost_failure.unwrap_or(base_index);
+                let raw = match &run.result {
+                    Err(f) => format!("{:?}", f.err),
+                    Ok(_) => String::new(),
+                };
+                let r = replay_result_of(&run.result);
+                steps[target].error = Some(StepError {
+                    raw,
+                    explain: explain_error(&r, idls),
+                });
+                steps[target].success = false;
+                failed_step = Some(target);
+                halted = true;
+            }
+
+            if !run_failed {
+                prev_post = post;
+            }
+        }
+
+        Ok(Trace {
+            signature: self.ctx.signature().to_string(),
+            steps,
+            result,
+            explain,
+            failed_step,
+            clock: (!self.time_travel.is_noop()).then(|| self.ctx.describe_clock()),
+            fidelity: self.fidelity.label().to_string(),
+            onchain_success: self.recorded.as_ref().map(|r| r.success),
         })
     }
 
@@ -1403,8 +1639,7 @@ fn parse_unsigned(tx_b64: &str) -> Result<solana_transaction::versioned::Version
     let strict = bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .reject_trailing_bytes();
-    let as_tx =
-        strict.deserialize::<solana_transaction::versioned::VersionedTransaction>(&bytes);
+    let as_tx = strict.deserialize::<solana_transaction::versioned::VersionedTransaction>(&bytes);
     if let Ok(tx) = &as_tx {
         if tx.signatures.len() == tx.message.header().num_required_signatures as usize {
             return Ok(as_tx.unwrap());
@@ -1600,7 +1835,11 @@ mod wait_tests {
         assert!(fixed.success_changed());
         assert!(fixed.changed());
         assert_eq!(fixed.compute_delta(), 20);
-        assert!(fixed.summary().contains("revert → success"), "{}", fixed.summary());
+        assert!(
+            fixed.summary().contains("revert → success"),
+            "{}",
+            fixed.summary()
+        );
 
         let unchanged = PatchComparison {
             program: "P".to_string(),
@@ -1696,11 +1935,8 @@ mod preflight_input_tests {
     fn transfer_message() -> VersionedMessage {
         let from = solana_keypair::Keypair::new();
         let to = solana_keypair::Keypair::new();
-        let ix = solana_system_interface::instruction::transfer(
-            &from.pubkey(),
-            &to.pubkey(),
-            1_000_000,
-        );
+        let ix =
+            solana_system_interface::instruction::transfer(&from.pubkey(), &to.pubkey(), 1_000_000);
         VersionedMessage::Legacy(Message::new(&[ix], Some(&from.pubkey())))
     }
 

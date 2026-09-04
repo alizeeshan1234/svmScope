@@ -118,21 +118,21 @@
 //! at <https://svmscope.vercel.app> — identical results in all four.
 
 mod analyze;
-mod preflight;
 mod check;
 mod compute;
 mod cpi_tree;
 mod decode;
+mod diagnose;
 mod diffs;
 mod error;
 mod fixture;
 pub mod idl;
 mod idl_encode;
 mod idl_model;
-pub(crate) mod ixname;
-mod program;
-mod diagnose;
 mod invariant;
+pub(crate) mod ixname;
+mod preflight;
+mod program;
 pub mod reconstruct;
 mod replay;
 pub mod report;
@@ -141,6 +141,7 @@ mod scope;
 mod search;
 pub mod spec;
 mod submit;
+mod trace;
 pub(crate) mod utils;
 #[cfg(test)]
 mod wire_format_tests;
@@ -153,23 +154,24 @@ pub use check::{AccountCheck, Check, Cmp, Scenario};
 pub use compute::CuUsage;
 pub use cpi_tree::{CpiEntry, IxAccount, IxArg};
 pub use decode::{AccountInfo, DecodedAccount, Field};
+pub use diagnose::Diagnosis;
 pub use diffs::{BalanceChange, TokenChange};
 pub use error::{Error, Result};
 pub use fixture::{Fixture, FixtureEntry, FIXTURE_VERSION};
+pub use invariant::Invariant;
 pub use preflight::{compute_breakdown, AccountRole, PreflightIx, PreflightOverview};
 pub use program::{MethodBuilder, ProgramClient};
 pub use replay::{
     AssertOutcome, FeatureToggle, Mutation, ReplayResult, ScenarioOutcome, TimeTravel,
 };
+pub use scan::{scan_breaking_points, BreakingPoint, ScanOptions};
 pub use scope::{
     AccountProvenance, AccountState, Fidelity, FidelityCertificate, OnchainRecord, PatchComparison,
     Provenance, Replay, Replayed, Scope,
 };
-pub use invariant::Invariant;
-pub use diagnose::Diagnosis;
-pub use scan::{scan_breaking_points, BreakingPoint, ScanOptions};
 pub use search::Threshold;
 pub use submit::CapturedTransaction;
+pub use trace::{Step, StepDiff, StepError, StepSummary, Trace, TraceDiff};
 
 /// Compile-checks every Rust example in the README as part of `cargo test`.
 #[cfg(doctest)]

@@ -46,8 +46,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "  at {} it {}   ·   at 0 it {}",
                 hi,
-                if th.high_success { "succeeds" } else { "reverts" },
-                if th.low_success { "succeeds" } else { "reverts" },
+                if th.high_success {
+                    "succeeds"
+                } else {
+                    "reverts"
+                },
+                if th.low_success {
+                    "succeeds"
+                } else {
+                    "reverts"
+                },
             );
         }
         None => println!("→ no flip in range — the fee-payer balance isn't the gating factor"),

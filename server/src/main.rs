@@ -482,10 +482,8 @@ async fn preflight_report_handler(
             let mut report = replay.simulate(&mutations)?.into_report();
             // The per-program compute breakdown needs the simulation's logs, so
             // fill it in now that the replay has run.
-            overview.compute = svmscope::compute_breakdown(
-                &report.replay.logs,
-                report.replay.compute_units,
-            );
+            overview.compute =
+                svmscope::compute_breakdown(&report.replay.logs, report.replay.compute_units);
             report.preflight = Some(overview);
             Ok(report)
         },
@@ -650,8 +648,8 @@ async fn replay_at_slot_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<ReplayAtSlotResponse>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let out = tokio::task::spawn_blocking(
-        move || -> Result<ReplayAtSlotResponse, svmscope::Error> {
+    let out =
+        tokio::task::spawn_blocking(move || -> Result<ReplayAtSlotResponse, svmscope::Error> {
             // SVMSCOPE_ARCHIVE_URL (an archival endpoint honoring the `slot`
             // param, e.g. Alchemy's Account Archive) upgrades this replay from
             // Reconstructed to Exact. Unset = free reconstruction, as before.
@@ -672,15 +670,14 @@ async fn replay_at_slot_handler(
                 drifted: cert.drifted.clone(),
                 verifiable: cert.verifiable,
             })
-        },
-    )
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
 
     match out {
         Ok(v) => Ok(Json(v)),
@@ -727,12 +724,12 @@ async fn counterfactual_handler(
     let hi = q.hi.unwrap_or(100_000_000);
     let account = q.account.clone();
 
-    let out = tokio::task::spawn_blocking(
-        move || -> Result<CounterfactualResponse, svmscope::Error> {
+    let out =
+        tokio::task::spawn_blocking(move || -> Result<CounterfactualResponse, svmscope::Error> {
             let replay = Scope::new(url).replay(&signature)?;
             let acct = account.clone();
-            let threshold =
-                replay.find_threshold(lo, hi, move |v| vec![Mutation::lamports(acct.clone(), v)])?;
+            let threshold = replay
+                .find_threshold(lo, hi, move |v| vec![Mutation::lamports(acct.clone(), v)])?;
             Ok(match threshold {
                 Some(t) => CounterfactualResponse {
                     account,
@@ -753,15 +750,14 @@ async fn counterfactual_handler(
                     evaluations: 2,
                 },
             })
-        },
-    )
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("task error: {e}"),
-        )
-    })?;
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
 
     match out {
         Ok(v) => Ok(Json(v)),
@@ -781,8 +777,11 @@ async fn scan_handler(
         move || -> Result<Vec<svmscope::BreakingPoint>, svmscope::Error> {
             let scope = Scope::new(url);
             let analysis = scope.analyze(&signature)?;
-            let accounts: Vec<String> =
-                analysis.accounts.iter().map(|a| a.address.clone()).collect();
+            let accounts: Vec<String> = analysis
+                .accounts
+                .iter()
+                .map(|a| a.address.clone())
+                .collect();
             svmscope::scan_breaking_points(
                 &scope,
                 &signature,
@@ -814,7 +813,12 @@ async fn diagnose_handler(
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     let out = tokio::task::spawn_blocking(move || Scope::new(url).diagnose(&signature))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
     match out {
         Ok(d) => Ok(Json(d)),
         Err(e) => Err(lib_err(e)),

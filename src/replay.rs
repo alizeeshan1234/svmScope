@@ -278,7 +278,10 @@ fn svm_from_loaded(loaded: &[(Address, Loaded)], features: &[FeatureToggle], slo
     // transaction, so its original blockhash won't be valid in a fresh SVM.
     let mut svm = LiteSVM::new()
         .with_sigverify(false)
-        .with_blockhash_check(false);
+        .with_blockhash_check(false)
+        // The debugger splits logs per step; LiteSVM's default 10 KB cap would
+        // silently drop the tail of a long transaction's logs.
+        .with_log_bytes_limit(None);
     if !features.is_empty() {
         // Start from mainnet's active gates and flip the requested ones. The
         // pubkey types differ across crates (Address vs solana_pubkey::Pubkey),
@@ -1360,8 +1363,8 @@ fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
             )));
         }
         Mutation::Owner { owner, .. } => {
-            account.owner = Address::from_str(owner)
-                .map_err(|_| Error::InvalidAddress(owner.to_string()))?;
+            account.owner =
+                Address::from_str(owner).map_err(|_| Error::InvalidAddress(owner.to_string()))?;
         }
     }
     svm.set_account(addr, account).map_err(|e| {
@@ -1891,6 +1894,139 @@ pub(crate) fn run_suite(
             })
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Debugger primitives: prefix replays with post-state capture.
+// ---------------------------------------------------------------------------
+
+/// One prefix run for the step debugger.
+pub(crate) struct RawStepRun {
+    /// Top-level instruction indexes that were executed, in message order.
+    pub(crate) keep: Vec<usize>,
+    /// The runtime outcome (logs, inner instructions, CU, error).
+    pub(crate) result: litesvm::types::TransactionResult,
+    /// Every account after the run, when it succeeded. `None` on failure: a
+    /// failed prefix commits nothing.
+    pub(crate) post: Option<Vec<(Address, Account)>>,
+}
+
+const COMPUTE_BUDGET_ID: &str = "ComputeBudget111111111111111111111111111111";
+
+impl ReplayContext {
+    /// The transaction's signature (empty for pre-flight transactions).
+    pub(crate) fn signature(&self) -> &str {
+        &self.signature
+    }
+
+    /// The transaction being replayed.
+    pub(crate) fn transaction(&self) -> &VersionedTransaction {
+        &self.tx
+    }
+
+    /// The message's full account list in runtime order: static keys, then
+    /// ALT-writable, then ALT-readonly — resolved offline from the loaded
+    /// lookup-table accounts (address list at offset 56, 32 bytes each).
+    pub(crate) fn message_account_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self
+            .tx
+            .message
+            .static_account_keys()
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        let Some(lookups) = self.tx.message.address_table_lookups() else {
+            return keys;
+        };
+        let (mut writable, mut readonly) = (Vec::new(), Vec::new());
+        for l in lookups {
+            let data = self.loaded.iter().find_map(|(a, ld)| match ld {
+                Loaded::Data(acc) if *a == l.account_key => Some(&acc.data),
+                _ => None,
+            });
+            let Some(data) = data else { continue };
+            let read = |idx: u8| -> Option<String> {
+                let off = 56 + idx as usize * 32;
+                let bytes: [u8; 32] = data.get(off..off + 32)?.try_into().ok()?;
+                Some(Address::from(bytes).to_string())
+            };
+            writable.extend(l.writable_indexes.iter().filter_map(|&i| read(i)));
+            readonly.extend(l.readonly_indexes.iter().filter_map(|&i| read(i)));
+        }
+        keys.extend(writable);
+        keys.extend(readonly);
+        keys
+    }
+
+    /// The pre-transaction state of an account, owned. `None` if it did not
+    /// exist (or is a program).
+    pub(crate) fn pre_account_owned(&self, address: &str) -> Option<Account> {
+        self.pre_account(address).cloned()
+    }
+
+    /// The transaction with only the top-level instructions at `keep`, in
+    /// order. Signatures and header are untouched: sigverify is off, so the
+    /// runtime only checks that the signature count matches the header.
+    fn tx_with_instructions(&self, keep: &[usize]) -> VersionedTransaction {
+        use solana_message::VersionedMessage;
+        let all = self.tx.message.instructions();
+        let subset: Vec<_> = keep.iter().filter_map(|&i| all.get(i).cloned()).collect();
+        let mut tx = self.tx.clone();
+        match &mut tx.message {
+            VersionedMessage::Legacy(m) => m.instructions = subset,
+            VersionedMessage::V0(m) => m.instructions = subset,
+            VersionedMessage::V1(m) => m.instructions = subset,
+        }
+        tx
+    }
+
+    /// Replay every instruction prefix `0..=k` against one fresh SVM (read-only
+    /// simulations, so the state never advances) and capture the post-state of
+    /// each. ComputeBudget instructions are kept in every prefix because the
+    /// runtime derives the transaction's limits from the whole message.
+    pub(crate) fn trace_raw(&self, mutations: &[Mutation]) -> Result<Vec<RawStepRun>> {
+        let mut svm = self.fresh_svm();
+        for m in mutations {
+            apply_mutation(&mut svm, &self.resolve_mutation(m)?)?;
+        }
+        let keys = self.tx.message.static_account_keys();
+        let n = self.tx.message.instructions().len();
+        let is_cb: Vec<bool> = self
+            .tx
+            .message
+            .instructions()
+            .iter()
+            .map(|ix| {
+                keys.get(ix.program_id_index as usize)
+                    .map(|p| p.to_string() == COMPUTE_BUDGET_ID)
+                    .unwrap_or(false)
+            })
+            .collect();
+        let mut runs = Vec::with_capacity(n);
+        for k in 0..n {
+            let keep: Vec<usize> = (0..n).filter(|&i| i <= k || is_cb[i]).collect();
+            let tx = self.tx_with_instructions(&keep);
+            let (result, post) = match svm.simulate_transaction(tx) {
+                Ok(info) => (
+                    Ok(info.meta),
+                    Some(
+                        info.post_accounts
+                            .into_iter()
+                            .map(|(a, acc)| (a, Account::from(acc)))
+                            .collect(),
+                    ),
+                ),
+                Err(failed) => (Err(failed), None),
+            };
+            runs.push(RawStepRun { keep, result, post });
+        }
+        Ok(runs)
+    }
+}
+
+/// The `ReplayResult` view of a raw runtime result (shared with the debugger).
+pub(crate) fn replay_result_of(result: &litesvm::types::TransactionResult) -> ReplayResult {
+    to_replay_result(result.clone())
 }
 
 #[cfg(test)]

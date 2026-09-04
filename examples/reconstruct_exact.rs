@@ -45,7 +45,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "  amount@64: reconstructed {} · actual {} · {}",
                     amt(&rc.data),
                     amt(&ac.data),
-                    if amt(&rc.data) == amt(&ac.data) { "✅ exact" } else { "❌ off" }
+                    if amt(&rc.data) == amt(&ac.data) {
+                        "✅ exact"
+                    } else {
+                        "❌ off"
+                    }
                 );
             }
             if !full {
@@ -54,7 +58,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  differing offsets: {:?}", &diffs[..diffs.len().min(12)]);
             }
         }
-        (a, b) => println!("  existence: reconstructed={} actual={}", a.is_some(), b.is_some()),
+        (a, b) => println!(
+            "  existence: reconstructed={} actual={}",
+            a.is_some(),
+            b.is_some()
+        ),
     }
     Ok(())
 }

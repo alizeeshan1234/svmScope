@@ -97,7 +97,9 @@ pub fn scan_breaking_points(
         // Existence — close the account (0 lamports) / a real SOL floor.
         if info.lamports > 0 {
             let acct = account.clone();
-            if let Some(th) = search_threshold(0, info.lamports.saturating_mul(2), |v| sim(&replay, &[Mutation::lamports(acct.clone(), v)]))? {
+            if let Some(th) = search_threshold(0, info.lamports.saturating_mul(2), |v| {
+                sim(&replay, &[Mutation::lamports(acct.clone(), v)])
+            })? {
                 if th.flips_at <= 1 {
                     out.push(bp(account, "existence", "is closed", info.lamports));
                 } else {
@@ -113,7 +115,11 @@ pub fn scan_breaking_points(
 
         // Owner program — reassign it (any program that checks ownership breaks).
         let other_owner = if info.owner == SYSTEM { TOKEN } else { SYSTEM };
-        if flips(&replay, baseline, &[Mutation::owner(account.clone(), other_owner)])? {
+        if flips(
+            &replay,
+            baseline,
+            &[Mutation::owner(account.clone(), other_owner)],
+        )? {
             out.push(bp(account, "owner program", "changes", 0));
         }
 
@@ -146,7 +152,12 @@ pub fn scan_breaking_points(
 }
 
 /// A numeric field: binary-search its threshold. Returns whether it was probed.
-fn probe_u64(replay: &Replay, account: &str, f: &crate::decode::Field, out: &mut Vec<BreakingPoint>) -> Result<bool> {
+fn probe_u64(
+    replay: &Replay,
+    account: &str,
+    f: &crate::decode::Field,
+    out: &mut Vec<BreakingPoint>,
+) -> Result<bool> {
     let Ok(current) = f.value.parse::<u64>() else {
         return Ok(false);
     };
@@ -154,27 +165,52 @@ fn probe_u64(replay: &Replay, account: &str, f: &crate::decode::Field, out: &mut
         return Ok(false);
     }
     let (acct, off) = (account.to_string(), f.offset);
-    if let Some(th) = search_threshold(0, current.saturating_mul(2), |v| sim(replay, &[Mutation::patch(acct.clone(), off, v.to_le_bytes().to_vec())]))? {
-        out.push(bp(account, f.name.clone(), threshold_phrase(th.flips_at, !th.low_success), current));
+    if let Some(th) = search_threshold(0, current.saturating_mul(2), |v| {
+        sim(
+            replay,
+            &[Mutation::patch(acct.clone(), off, v.to_le_bytes().to_vec())],
+        )
+    })? {
+        out.push(bp(
+            account,
+            f.name.clone(),
+            threshold_phrase(th.flips_at, !th.low_success),
+            current,
+        ));
     }
     Ok(true)
 }
 
 /// A small enum/flag byte: try a few distinct values for one that breaks it.
-fn probe_u8(replay: &Replay, baseline: bool, account: &str, f: &crate::decode::Field, out: &mut Vec<BreakingPoint>) -> Result<bool> {
+fn probe_u8(
+    replay: &Replay,
+    baseline: bool,
+    account: &str,
+    f: &crate::decode::Field,
+    out: &mut Vec<BreakingPoint>,
+) -> Result<bool> {
     let current = f.value.parse::<u8>().ok();
     // Try the recognizable "frozen" (2) first so a token state reports as frozen.
     for cand in [2u8, 0, 255] {
         if Some(cand) == current {
             continue;
         }
-        if flips(replay, baseline, &[Mutation::patch(account.to_string(), f.offset, vec![cand])])? {
+        if flips(
+            replay,
+            baseline,
+            &[Mutation::patch(account.to_string(), f.offset, vec![cand])],
+        )? {
             let cond = if f.name == "state" && cand == 2 {
                 "is frozen".to_string()
             } else {
                 format!("changes (e.g. set to {cand})")
             };
-            out.push(bp(account, f.name.clone(), cond, current.unwrap_or(0) as u64));
+            out.push(bp(
+                account,
+                f.name.clone(),
+                cond,
+                current.unwrap_or(0) as u64,
+            ));
             break;
         }
     }
@@ -183,16 +219,36 @@ fn probe_u8(replay: &Replay, baseline: bool, account: &str, f: &crate::decode::F
 
 /// A pubkey field (authority, mint, delegate…): substitute it and see if the
 /// program's check breaks.
-fn probe_pubkey(replay: &Replay, baseline: bool, account: &str, f: &crate::decode::Field, _d: &DecodedAccount, out: &mut Vec<BreakingPoint>) -> Result<bool> {
+fn probe_pubkey(
+    replay: &Replay,
+    baseline: bool,
+    account: &str,
+    f: &crate::decode::Field,
+    _d: &DecodedAccount,
+    out: &mut Vec<BreakingPoint>,
+) -> Result<bool> {
     let sentinel = vec![0x11u8; f.size.max(32)];
-    if flips(replay, baseline, &[Mutation::patch(account.to_string(), f.offset, sentinel)])? {
-        let label = if f.name == "owner" { "authority" } else { f.name.as_str() };
+    if flips(
+        replay,
+        baseline,
+        &[Mutation::patch(account.to_string(), f.offset, sentinel)],
+    )? {
+        let label = if f.name == "owner" {
+            "authority"
+        } else {
+            f.name.as_str()
+        };
         out.push(bp(account, label, "changes", 0));
     }
     Ok(true)
 }
 
-fn bp(account: &str, field: impl Into<String>, condition: impl Into<String>, current: u64) -> BreakingPoint {
+fn bp(
+    account: &str,
+    field: impl Into<String>,
+    condition: impl Into<String>,
+    current: u64,
+) -> BreakingPoint {
     BreakingPoint {
         account: account.to_string(),
         field: field.into(),
