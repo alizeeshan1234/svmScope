@@ -1243,6 +1243,45 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 .drow .arr { color: var(--text-3); }
 .drow .new { color: var(--green); font-weight: 600; word-break: break-all; }
 
+
+/* ---------- step debugger ---------- */
+.dbg-head { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; margin-bottom: var(--s-4); }
+.dbg-head .sig { font-family: var(--font-mono); font-size: 12px; color: var(--text-2); word-break: break-all; }
+.dbg-head .verdict { margin: 0; padding: 6px 12px; }
+.dbg-note { font-size: 12.5px; color: var(--text-2); background: var(--amber-soft); border: 1px solid rgba(251,191,36,.3);
+  border-radius: var(--r-md); padding: var(--s-3) var(--s-4); margin-bottom: var(--s-4); line-height: 1.5; }
+.dbg-grid { display: grid; grid-template-columns: minmax(300px, 1fr) minmax(360px, 1.4fr); gap: var(--s-4); align-items: start; }
+@media (max-width: 980px) { .dbg-grid { grid-template-columns: 1fr; } }
+.dbg-tree { display: flex; flex-direction: column; gap: 1px; max-height: 70vh; overflow: auto; }
+.step { display: flex; align-items: center; gap: var(--s-2); padding: 6px var(--s-2); border-radius: var(--r-sm); cursor: pointer; border: 1px solid transparent; }
+.step:hover { background: var(--bg-2); }
+.step.on { background: var(--brand-soft); border-color: var(--brand-border); }
+.step .mark { width: 14px; flex: 0 0 auto; text-align: center; font-size: 11px; }
+.step.ok .mark { color: var(--green); }
+.step.fail .mark { color: var(--red); }
+.step.skip .mark, .step.artifact .mark { color: var(--text-3); }
+.step.fail { background: var(--red-soft); }
+.step.fail.on { border-color: rgba(248,113,113,.5); }
+.step .path { font-family: var(--font-mono); font-size: 11px; color: var(--brand-strong); font-weight: 600; flex: 0 0 auto; min-width: 34px; }
+.step .rail { color: var(--border-strong); font-family: var(--font-mono); font-size: 12px; white-space: pre; flex: 0 0 auto; }
+.step .ixname { font-size: 11.5px; font-weight: 600; color: var(--brand-strong); background: var(--brand-soft);
+  border: 1px solid var(--brand-border); border-radius: 6px; padding: 1px 8px; white-space: nowrap; }
+.step .prog { flex: 0 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.step .prog .addr-pill { display: none; }
+.step .prog .nm .addr-pill { display: inline; }
+.step .cu { margin-left: auto; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3); white-space: nowrap; }
+.step .nchg { font-family: var(--font-mono); font-size: 10px; color: var(--cyan); background: var(--bg-2);
+  border: 1px solid var(--border); border-radius: var(--r-full); padding: 0 6px; }
+.dbg-detail .card + .card { margin-top: var(--s-4); }
+.dbg-detail h2 { display: flex; align-items: center; gap: var(--s-2); }
+.dbg-detail .kv { font-size: 12px; color: var(--text-2); margin-bottom: var(--s-3); line-height: 1.6; }
+.dbg-detail .kv b { color: var(--text-1); font-family: var(--font-mono); font-weight: 500; }
+.dbg-empty { color: var(--text-3); font-size: 12.5px; padding: var(--s-4); }
+.logs .lg-line.on { background: rgba(153,69,255,.14); border-radius: 4px; }
+.logs .lg-line.on-fail { background: rgba(248,113,113,.16); border-radius: 4px; }
+.dbg-keys { font-size: 11px; color: var(--text-3); margin-top: var(--s-2); }
+.dbg-keys kbd { font-family: var(--font-mono); border: 1px solid var(--border-strong); border-radius: 4px; padding: 0 5px; color: var(--text-2); }
+
 .hidden { display: none !important; }
 
 /* aliases for inline styles in templates */
@@ -1572,6 +1611,25 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
         </details>
       </div>
     </div>
+  <section id="debug" class="hidden">
+    <div class="dbg-head">
+      <span class="verdict" id="dbgVerdict"></span>
+      <span class="sig" id="dbgSig"></span>
+      <span class="spacer"></span>
+      <button class="btn ghost sm" id="dbgShare" title="Copy a link to this trace">⎘ Copy link</button>
+      <button class="btn ghost sm" id="dbgBack">← Back to analysis</button>
+    </div>
+    <div id="dbgBanner"></div>
+    <div class="dbg-grid">
+      <div class="card">
+        <h2>Steps <span class="count" id="dbgCount">0</span></h2>
+        <div class="dbg-tree" id="dbgTree"></div>
+        <div class="dbg-keys"><kbd>j</kbd> / <kbd>k</kbd> next / previous step · <kbd>f</kbd> jump to failure</div>
+      </div>
+      <div class="dbg-detail" id="dbgDetail"><div class="dbg-empty">select a step</div></div>
+    </div>
+    <div class="card" style="margin-top:14px"><h2>Program logs</h2><div class="logs" id="dbgLogs"></div></div>
+  </section>
   </main>
 
   <footer class="foot">
@@ -2000,11 +2058,13 @@ function renderReplayPanel() {
     : `<div class="slot-cta">
          <button class="btn ghost sm" id="runReplay">▶ Replay now</button>
          <button class="btn ghost sm" id="reconSlot">⟲ Replay as it happened</button>
+         <button class="btn ghost sm" id="openDebug" title="Step through every instruction and CPI">⋮ Step debugger</button>
        </div>
        <span class="cu-note" style="display:block;margin-top:8px"><b>Replay now</b> re-runs this transaction against <i>today's</i> on-chain state. <b>Replay as it happened</b> rewinds the balances and clock back to the exact moment it originally landed — free, and it tells you how accurate the result is.</span>
        <div id="certPanel"></div>
        ${cfBox()}`;
   $('replay').innerHTML = body;
+  $('openDebug')?.addEventListener('click', () => showDebug(currentSig, true));
   $('runReplay')?.addEventListener('click', async () => {
     const b = $('runReplay'); b.disabled = true; b.textContent = '▶ Replaying…';
     try { await ensureBaseline(); renderReplayPanel(); }
@@ -2714,6 +2774,7 @@ function runInput() {
 // Show an explorer-style address page: the account/program overview + its recent
 // transactions to pick from.
 async function showAddress(address) {
+  $('debug').classList.add('hidden');
   $('go').disabled = true;
   $('out').classList.add('hidden'); $('hero').classList.add('hidden'); $('txlist').classList.add('hidden');
   const st = $('status'); st.className = 'status'; st.classList.remove('hidden');
@@ -2795,6 +2856,7 @@ function renderAddressPage(address, a, sigs) {
 }
 
 async function analyze() {
+  $('debug').classList.add('hidden');
   const sig = $('sig').value.trim(); if (!sig) return;
   currentSig = sig; mutations = [];
   $('go').disabled = true; $('txlist').classList.add('hidden'); $('out').classList.add('hidden'); $('hero').classList.add('hidden');
@@ -2903,6 +2965,7 @@ function bs58encode(bytes) {
 }
 
 function showSim(on) {
+  $('debug').classList.add('hidden');
   $('sim').classList.toggle('hidden', !on);
   // Keep whatever analysis is on screen when leaving Simulate, so switching tabs
   // doesn't throw away the user's work.
@@ -3511,6 +3574,8 @@ $('openSim').addEventListener('click', () => showSim(true));
 $('navSim').addEventListener('click', () => showSim(true));
 $('navAnalyze').addEventListener('click', () => showSim(false));
 $('brand').addEventListener('click', () => {
+  $('debug').classList.add('hidden');
+  if (location.pathname.startsWith('/debug/')) history.pushState({}, '', '/');
   // Logo is always "home" — return to the landing hero regardless of state.
   showSim(false);
   $('status').classList.add('hidden');
@@ -3652,6 +3717,164 @@ document.querySelectorAll('.ex-chip[data-ex]').forEach(c => c.addEventListener('
   exBusy = false;
   runInput();
 }));
+
+// ---------------- step debugger ----------------
+// Fetches a Trace (every instruction and CPI with what it changed) and renders
+// it as a tree + a detail pane + the logs, with the failing step pinpointed.
+let trace = null, dbgSel = -1, dbgSigCur = '';
+
+function hideAllViews() {
+  ['hero', 'status', 'txlist', 'out', 'sim', 'debug'].forEach(id => $(id).classList.add('hidden'));
+}
+
+async function showDebug(sig, push) {
+  dbgSigCur = sig;
+  hideAllViews();
+  const st = $('status'); st.className = 'status'; st.classList.remove('hidden');
+  st.innerHTML = '<span class="spinner"></span>tracing every instruction…';
+  if (push) history.pushState({ debug: sig }, '', '/debug/' + encodeURIComponent(sig));
+  try {
+    const res = await api('/trace/' + encodeURIComponent(sig) + clusterQ());
+    if (!res.ok) throw new Error(await res.text());
+    trace = await res.json();
+  } catch (e) {
+    st.className = 'status err';
+    st.textContent = 'trace failed: ' + (e.message || e);
+    return;
+  }
+  st.classList.add('hidden');
+  $('debug').classList.remove('hidden');
+  renderTrace(trace);
+}
+
+function renderTrace(tr) {
+  const ok = tr.result.success;
+  $('dbgVerdict').className = 'verdict ' + (ok ? 'ok' : 'bad');
+  $('dbgVerdict').textContent = ok ? '✓ succeeded' : '✗ failed';
+  $('dbgSig').innerHTML = tr.signature ? copyPill(tr.signature, short(tr.signature, 10)) : '(preflight)';
+  $('dbgCount').textContent = tr.steps.length;
+
+  // Banner: drift warning, then the failure in plain language.
+  let banner = '';
+  const drift = tr.onchain_success != null && tr.onchain_success !== ok;
+  if (drift) {
+    banner += `<div class="dbg-note">On-chain this transaction <b>${tr.onchain_success ? 'succeeded' : 'failed'}</b>. ` +
+      `This replay ran against <b>${esc(tr.fidelity)}</b> state, so the difference is state drift since the ` +
+      `transaction's slot, not necessarily a program bug.${tr.clock ? ' Clock: ' + esc(tr.clock) + '.' : ''}</div>`;
+  }
+  if (!ok && tr.explain) {
+    banner += `<div class="explain"><div class="ic">⚠️</div><div>
+      <div class="t">${esc(tr.explain.title)}</div><div class="d">${esc(tr.explain.detail)}</div>
+      <div class="meta">${esc(tr.explain.raw)}${tr.explain.program ? ' · ' + esc(short(tr.explain.program)) : ''}</div>
+    </div></div>`;
+  }
+  $('dbgBanner').innerHTML = banner;
+
+  $('dbgTree').innerHTML = tr.steps.map((s, i) => {
+    const cls = tr.failed_step === i ? 'fail' : s.prefix_artifact ? 'artifact' : (!s.success && tr.failed_step != null && i > tr.failed_step) ? 'skip' : 'ok';
+    const mark = cls === 'fail' ? '✗' : cls === 'artifact' ? '~' : cls === 'skip' ? '·' : '✓';
+    const rail = s.depth > 1 ? '│   '.repeat(s.depth - 2) + '└── ' : '';
+    const nm = s.name ? `<span class="ixname">${esc(s.name)}</span>` : '';
+    const nchg = s.diffs && s.diffs.length ? `<span class="nchg" title="accounts changed">${s.diffs.length} Δ</span>` : '';
+    const cu = s.cu_consumed != null ? `<span class="cu">${fmt(s.cu_consumed)} CU</span>` : '<span class="cu"></span>';
+    return `<div class="step ${cls}" data-i="${i}" title="${esc(s.program)}">` +
+      `<span class="mark">${mark}</span><span class="path">${esc(s.path)}</span><span class="rail">${rail}</span>` +
+      `${progChip(s.program)}${nm}${nchg}${cu}</div>`;
+  }).join('');
+  $('dbgTree').querySelectorAll('.step').forEach(n => n.addEventListener('click', ev => {
+    if (ev.target.closest('.addr-pill')) return;
+    selectStep(Number(n.dataset.i));
+  }));
+  wireCopy($('dbgTree'));
+
+  $('dbgLogs').innerHTML = tr.result.logs.length
+    ? renderLogs(tr.result.logs).replace(/<div class="lg-line"/g, (m) => m) // keep markup
+    : '<div class="dbg-empty">no logs</div>';
+  // Tag each line with its index so a step can highlight its range.
+  $('dbgLogs').querySelectorAll('.lg-line').forEach((el, i) => el.dataset.i = i);
+
+  selectStep(tr.failed_step != null ? tr.failed_step : 0);
+}
+
+function selectStep(i) {
+  if (!trace || i < 0 || i >= trace.steps.length) return;
+  dbgSel = i;
+  const s = trace.steps[i];
+  $('dbgTree').querySelectorAll('.step').forEach(n => n.classList.toggle('on', Number(n.dataset.i) === i));
+  const row = $('dbgTree').querySelector(`.step[data-i="${i}"]`);
+  if (row) {
+    const box = $('dbgTree');
+    if (row.offsetTop < box.scrollTop || row.offsetTop + row.offsetHeight > box.scrollTop + box.clientHeight) {
+      box.scrollTop = row.offsetTop - box.clientHeight / 2;
+    }
+  }
+
+  // Detail pane.
+  const isFail = trace.failed_step === i;
+  const head = `<div class="card"><h2>${progChip(s.program)}${s.name ? `<span class="ixname">${esc(s.name)}</span>` : ''}</h2>
+    <div class="kv">step <b>${esc(s.path)}</b> · depth <b>${s.depth}</b>` +
+    (s.cu_consumed != null ? ` · <b>${fmt(s.cu_consumed)}</b> compute units` : '') +
+    (s.prefix_artifact ? ` · <span style="color:var(--amber)">failed as a prefix but the whole transaction passed (mid-transaction state a later step fixes)</span>` : '') +
+    (!s.state_known && s.depth > 1 ? ` · <span style="color:var(--text-3)">state for CPIs is not captured yet; see the parent step</span>` : '') +
+    `</div>` +
+    (s.error ? `<div class="explain"><div class="ic">⚠️</div><div>
+        <div class="t">${esc(s.error.explain?.title || 'Failed here')}</div>
+        <div class="d">${esc(s.error.explain?.detail || '')}</div>
+        <div class="meta">${esc(s.error.raw)}</div></div></div>` : '') +
+    renderIxDetail(s, 'dbg-' + i).replace('class="ixdetail"', 'class="ixdetail open"') + `</div>`;
+
+  const diffs = (s.diffs || []).length ? `<div class="card"><h2>Account changes <span class="count">${s.diffs.length}</span></h2>
+    <div class="diffs">${s.diffs.map(d => {
+      const dl = d.lamports_after - d.lamports_before;
+      const lam = dl !== 0 ? `<span class="lam ${dl > 0 ? 'amt pos' : 'amt neg'}">${dl > 0 ? '+' : '−'}${fmtSol(Math.abs(dl))}</span>` : '';
+      const rows = d.fields.map(f => `<div class="drow"><span class="fname">${esc(f.name)} <span class="f-off">${esc(f.type)}</span></span>
+        <span class="fv"><span class="old">${esc(f.before)}</span><span class="arr">→</span><span class="new">${esc(f.after)}</span></span></div>`).join('');
+      const raw = d.raw_data_changed && !d.fields.length ? '<div class="drow"><span class="fname">data</span><span class="fv"><span class="new">changed (layout not decoded)</span></span></div>' : '';
+      return `<div class="dcard"><div class="dhead">${copyPill(d.address)}${progPill(d.owner)}${lam}</div>${rows}${raw}</div>`;
+    }).join('')}</div></div>`
+    : (s.depth === 1 && s.state_known ? `<div class="card"><div class="dbg-empty">this step changed no account state</div></div>` : '');
+  $('dbgDetail').innerHTML = head + diffs;
+  wireCopy($('dbgDetail'));
+
+  // Logs: highlight this step's range and scroll to it.
+  const [a, b] = s.logs || [0, 0];
+  const lines = $('dbgLogs').querySelectorAll('.lg-line');
+  lines.forEach((el, j) => { el.classList.toggle('on', j >= a && j < b && !isFail); el.classList.toggle('on-fail', j >= a && j < b && isFail); });
+  if (b > a && lines[a]) {
+    const box = $('dbgLogs');
+    box.scrollTop = Math.max(0, lines[a].offsetTop - box.offsetTop - box.clientHeight / 3);
+  }
+}
+
+$('dbgBack').addEventListener('click', () => {
+  history.pushState({}, '', '/');
+  $('debug').classList.add('hidden');
+  if (analysis) $('out').classList.remove('hidden'); else $('hero').classList.remove('hidden');
+});
+$('dbgShare').addEventListener('click', async () => {
+  const url = location.origin + '/debug/' + encodeURIComponent(dbgSigCur);
+  try { await navigator.clipboard.writeText(url); $('dbgShare').textContent = '✓ Copied'; }
+  catch { prompt('Copy this link', url); }
+  setTimeout(() => { $('dbgShare').textContent = '⎘ Copy link'; }, 1500);
+});
+document.addEventListener('keydown', e => {
+  if ($('debug').classList.contains('hidden') || e.metaKey || e.ctrlKey) return;
+  const el = document.activeElement;
+  if (el && /INPUT|SELECT|TEXTAREA/.test(el.tagName)) return;
+  if (e.key === 'j') { e.preventDefault(); selectStep(dbgSel + 1); }
+  else if (e.key === 'k') { e.preventDefault(); selectStep(dbgSel - 1); }
+  else if (e.key === 'f' && trace && trace.failed_step != null) { e.preventDefault(); selectStep(trace.failed_step); }
+});
+window.addEventListener('popstate', e => {
+  if (e.state && e.state.debug) showDebug(e.state.debug, false);
+  else if (!$('debug').classList.contains('hidden')) $('dbgBack').click();
+});
+// Deep link: /debug/<signature> opens the debugger directly.
+if (location.pathname.startsWith('/debug/')) {
+  const sig = decodeURIComponent(location.pathname.slice('/debug/'.length)).replace(/\/$/, '');
+  if (sig) { $('sig').value = sig; showDebug(sig, false); }
+}
+
 // "/" focuses whichever search is on screen.
 document.addEventListener('keydown', e => {
   if (e.key !== '/' || e.metaKey || e.ctrlKey) return;

@@ -1,6 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "cleanUrls": true,
+  "rewrites": [{ "source": "/debug/:sig", "destination": "/index.html" }],
   "headers": [
     {
       "source": "/config.js",
