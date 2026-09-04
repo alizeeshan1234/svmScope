@@ -1644,7 +1644,7 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 
 <!-- Optional: sets window.SVMSCOPE_API when the frontend is hosted apart from the
      engine (Vercel). Absent when the Rust server serves this page itself. -->
-<script src="config.js" onerror="void 0"></script>
+<script src="/config.js" onerror="void 0"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
