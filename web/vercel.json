@@ -1,11 +1,21 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "cleanUrls": true,
-  "rewrites": [{ "source": "/debug/:sig", "destination": "/index.html" }],
+  "rewrites": [
+    {
+      "source": "/debug/:sig*",
+      "destination": "/"
+    }
+  ],
   "headers": [
     {
       "source": "/config.js",
-      "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }]
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
     }
   ]
 }
