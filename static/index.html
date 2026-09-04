@@ -1341,6 +1341,41 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 .cu-roll .n { font-family: var(--font-mono); color: var(--text-3); text-align: right; }
 .kv .ret { font-family: var(--font-mono); font-size: 11px; color: var(--text-2); word-break: break-all; }
 
+
+/* debugger: plain-language layer */
+.dbg-landing { max-width: 720px; margin: 40px auto; text-align: center; }
+.dbg-landing h1 { font-size: 26px; letter-spacing: -0.02em; margin: 0 0 8px; }
+.dbg-landing p { color: var(--text-2); font-size: 14px; line-height: 1.6; margin: 0 0 18px; }
+.dbg-landing .row { display: flex; gap: var(--s-2); }
+.dbg-landing input { flex: 1; font-family: var(--font-mono); font-size: 13px; background: var(--bg-inset); color: var(--text-1); border: 1px solid var(--border-strong); border-radius: 8px; padding: 10px 12px; }
+.dbg-landing .ex { margin-top: 14px; font-size: 12px; color: var(--text-3); }
+.dbg-landing .ex a { color: var(--brand-strong); cursor: pointer; margin: 0 6px; }
+.story { background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s-4) var(--s-5); margin-bottom: var(--s-4); }
+.story .h { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .09em; color: var(--text-3); margin-bottom: 6px; }
+.story .lead { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-1); line-height: 1.45; }
+.story .lead.bad { color: var(--red); }
+.story ul { margin: 10px 0 0; padding-left: 18px; color: var(--text-2); font-size: 13px; line-height: 1.7; }
+.story li b { color: var(--text-1); font-weight: 600; }
+.story .why { margin-top: 10px; font-size: 13px; color: var(--text-1); background: var(--red-soft); border: 1px solid rgba(248,113,113,.3); border-radius: 8px; padding: 8px 12px; }
+.mode { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--r-full); overflow: hidden; }
+.mode button { background: transparent; border: 0; color: var(--text-3); font-size: 11px; padding: 4px 10px; cursor: pointer; }
+.mode button.on { background: var(--brand-soft); color: var(--brand-strong); }
+.step .plain { flex-basis: 100%; font-size: 11.5px; color: var(--text-2); padding-left: 60px; margin-top: -2px; }
+.step { flex-wrap: wrap; }
+.simple .step .cu, .simple .step .nchg { display: none; }
+.simple .step .ixname { display: none; }
+.simple .step .prog .addr-pill { display: none; }
+.dbg-plain { font-size: 15px; color: var(--text-1); line-height: 1.5; margin: 6px 0 10px; }
+details.tech > summary { cursor: pointer; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .09em; color: var(--text-3); padding: 8px 0; list-style: none; }
+details.tech > summary::-webkit-details-marker { display: none; }
+details.tech > summary::before { content: '▸ '; } details.tech[open] > summary::before { content: '▾ '; }
+.simple .dbg-keys { display: none; }
+.simple #dbgBanner .explain { display: none; }
+.simple .cu-roll, .simple #dbgUp, .simple #dbgOver { display: none; }
+.simple .dhead .lam.editable, .simple .drow .old.editable { text-decoration: none; cursor: default; pointer-events: none; }
+.step .plain { display: none; } .simple .step .plain { display: block; }
+.step.d2 .plain { padding-left: 84px; } .step.d3 .plain { padding-left: 108px; } .step.d4 .plain { padding-left: 132px; }
+
 .hidden { display: none !important; }
 
 /* aliases for inline styles in templates */
@@ -1365,6 +1400,7 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
       <nav class="nav">
         <button class="navtab on" id="navAnalyze">Analyze</button>
         <button class="navtab" id="navSim">⚡ Simulate</button>
+        <button class="navtab" id="navDebug">🐞 Debugger</button>
       </nav>
       <div class="search">
         <select id="cluster" class="cluster" title="Cluster / RPC">
@@ -1671,13 +1707,22 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
       </div>
     </div>
   <section id="debug" class="hidden">
+    <div class="dbg-landing" id="dbgLanding">
+      <h1>See exactly what a transaction did, step by step</h1>
+      <p>Paste any Solana transaction signature. You get a plain-English account of what happened, which step failed and why, and you can change a value and run it again.</p>
+      <div class="row"><input id="dbgInput" placeholder="transaction signature" spellcheck="false" autocomplete="off" /><button class="btn" id="dbgGo">Debug ⟶</button></div>
+      <div class="ex">Try: <a data-sig="2LviLQLdKkV8cYma2TkxfAUcd4dtD32Ltvm4V62HCJ9NU4pUt1WjhrmqCAnf2NjMTc8mAQoLq2KykJXV1RP7V6po">a Jupiter swap</a> · <a data-sig="3PgGv3WCyJvufeBJZQiSYYsbKGAzSpRfJkPLn8ipSNyekBdY9G12hjPnpLMY8qBumvh9xUZDyHAVeo7Y52QqM3uy">a pump.fun buy</a> · <a data-sig="47ZqgUey7sWfQQr7h6c1q3pAka3yvs98dvms4yPhVCs6Px3syRF7kBES6w1zCLaya292PBuPQ7s9tE9FLHKQhR26">a failed sniper bot</a></div>
+    </div>
+    <div id="dbgMain" class="hidden">
     <div class="dbg-head">
       <span class="verdict" id="dbgVerdict"></span>
       <span class="sig" id="dbgSig"></span>
       <span class="spacer"></span>
+      <span class="mode" id="dbgMode"><button class="on" data-m="simple">Simple</button><button data-m="expert">Expert</button></span>
       <button class="btn ghost sm" id="dbgShare" title="Copy a link to this trace">⎘ Copy link</button>
-      <button class="btn ghost sm" id="dbgBack">← Back to analysis</button>
+      <button class="btn ghost sm" id="dbgBack">← Back</button>
     </div>
+    <div id="dbgStory"></div>
     <div id="dbgBanner"></div>
     <div class="dbg-stage hidden" id="dbgStage">
       <span class="lbl">What if</span><span id="dbgMuts"></span>
@@ -1688,7 +1733,7 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
     <div id="dbgCompare"></div>
     <div class="dbg-grid">
       <div class="card">
-        <h2>Steps <span class="count" id="dbgCount">0</span>
+        <h2><span id="dbgStepsTitle">What it did, step by step</span> <span class="count" id="dbgCount">0</span>
           <span class="dbg-nav">
             <button class="btn ghost" id="dbgUp" title="to the parent step (u)">⇧ up</button>
             <button class="btn ghost" id="dbgOver" title="skip this step's CPIs (o)">⤼ over</button>
@@ -1700,7 +1745,8 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
       </div>
       <div class="dbg-detail" id="dbgDetail"><div class="dbg-empty">select a step</div></div>
     </div>
-    <div class="card" style="margin-top:14px"><h2>Program logs</h2><div class="logs" id="dbgLogs"></div></div>
+    <div class="card tech-card" style="margin-top:14px"><h2>Program logs</h2><div class="logs" id="dbgLogs"></div></div>
+    </div>
   </section>
   </main>
 
@@ -3038,6 +3084,7 @@ function bs58encode(bytes) {
 
 function showSim(on) {
   $('debug').classList.add('hidden');
+  $('navDebug').classList.remove('on');
   $('sim').classList.toggle('hidden', !on);
   // Keep whatever analysis is on screen when leaving Simulate, so switching tabs
   // doesn't throw away the user's work.
@@ -3794,6 +3841,133 @@ document.querySelectorAll('.ex-chip[data-ex]').forEach(c => c.addEventListener('
 // Fetches a Trace (every instruction and CPI with what it changed) and renders
 // it as a tree + a detail pane + the logs, with the failing step pinpointed.
 let trace = null, dbgSel = -1, dbgSigCur = '';
+let dbgMode = (() => { try { return localStorage.getItem('svmscope.dbgMode') || 'simple'; } catch { return 'simple'; } })();
+const SYS_ID = '11111111111111111111111111111111', CB_ID = 'ComputeBudget111111111111111111111111111111';
+const TOKEN_IDS = ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'];
+const ATA_ID = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
+
+function setDbgMode(m) {
+  dbgMode = m;
+  try { localStorage.setItem('svmscope.dbgMode', m); } catch {}
+  $('debug').classList.toggle('simple', m === 'simple');
+  $('dbgMode').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.m === m));
+  $('dbgStepsTitle').textContent = m === 'simple' ? 'Step by step' : 'Steps';
+  document.querySelectorAll('#debug .tech-card').forEach(c => c.classList.toggle('hidden', m === 'simple'));
+  if (trace) selectStep(Math.max(0, dbgSel));
+}
+$('dbgMode').querySelectorAll('button').forEach(b => b.addEventListener('click', () => setDbgMode(b.dataset.m)));
+
+// A one-sentence, no-jargon description of a step.
+function tokenAmt(raw, mint) {
+  const mi = mint ? mintInfo(mint) : null;
+  if (mi && mi.dec != null) return fmtToken(String(raw), mi.dec) + ' ' + mi.sym;
+  return fmt(raw) + (mint ? ' ' + short(mint) : ' tokens');
+}
+function plainStep(s) {
+  const pi = progInfo(s.program);
+  const who = pi.known ? pi.name : 'a program (' + short(s.program) + ')';
+  const nm = s.name || '';
+  const a = Object.fromEntries((s.args || []).map(x => [x.name, x.value]));
+  const acct = i => s.accounts?.[i]?.address || '';
+  const byAddr = Object.fromEntries((s.state || []).map(x => [x.address, x]));
+  const mintOf = addr => (byAddr[addr]?.fields || []).find(f => f.name === 'mint')?.value;
+  if (s.program === CB_ID) {
+    if (/Price/.test(nm)) return `Set a priority fee of ${fmt(a.micro_lamports || 0)} micro-lamports per compute unit (a tip so validators pick it up faster).`;
+    if (/Data Size/.test(nm)) return `Set a limit on how much account data the transaction may load.`;
+    if (/Limit/.test(nm)) return `Asked for a budget of ${fmt(a.units || 0)} compute units (how much work the transaction may do).`;
+    if (/Data Size/.test(nm)) return `Set a limit on how much account data the transaction may load.`;
+    return `Set a transaction limit (${nm}).`;
+  }
+  if (s.program === SYS_ID) {
+    if (nm === 'Transfer') return `Sent ${fmtSol(a.lamports || 0)} from ${short(acct(0))} to ${short(acct(1))}.`;
+    if (nm === 'Create Account') return `Created a new account ${short(acct(1))}, paid for by ${short(acct(0))}.`;
+    if (/Nonce/.test(nm)) return `Updated the durable nonce account ${short(acct(0))} (lets a pre-signed transaction stay valid).`;
+    if (nm === 'Allocate') return `Reserved space in account ${short(acct(0))}.`;
+    if (nm === 'Assign') return `Handed account ${short(acct(0))} to a different program.`;
+    return `System program: ${nm || 'instruction'}.`;
+  }
+  if (TOKEN_IDS.includes(s.program)) {
+    if (/^Transfer/.test(nm)) { const dst = nm.includes('Checked') ? acct(2) : acct(1); return `Moved ${tokenAmt(a.amount || 0, mintOf(acct(0)) || (nm.includes('Checked') ? acct(1) : null))} from ${short(acct(0))} to ${short(dst)}.`; }
+    if (nm === 'Sync Native') return `Turned the SOL sitting in ${short(acct(0))} into wrapped SOL tokens so a program can trade it.`;
+    if (nm === 'Close Account') return `Closed token account ${short(acct(0))} and returned its rent deposit to ${short(acct(1))}.`;
+    if (/^Initialize Account/.test(nm)) return `Set up ${short(acct(0))} as a token account.`;
+    if (/^Initialize Immutable/.test(nm)) return `Locked the owner of token account ${short(acct(0))} so it can never change.`;
+    if (nm === 'Get Account Data Size') return `Checked how big a token account needs to be.`;
+    if (/^Mint To/.test(nm)) return `Minted ${tokenAmt(a.amount || 0, acct(0))} into ${short(acct(1))}.`;
+    if (/^Burn/.test(nm)) return `Burned ${tokenAmt(a.amount || 0, mintOf(acct(0)))} from ${short(acct(0))}.`;
+    if (/^Approve/.test(nm)) return `Allowed ${short(acct(nm.includes('Checked') ? 2 : 1))} to spend tokens from ${short(acct(0))}.`;
+    return `Token program: ${nm || 'instruction'}.`;
+  }
+  if (s.program === ATA_ID) return `Made sure ${short(acct(2))} has a token account for ${short(acct(3))}${nm.includes('Idempotent') ? ' (created it only if missing)' : ''}.`;
+  if (nm === 'Emit Event') return `Recorded an event describing what just happened.`;
+  const n = (s.diffs || []).length;
+  const verb = nm ? `ran "${nm}"` : (s.depth > 1 ? 'was called to do part of the work' : 'ran an instruction it does not publish a name for');
+  return `${who} ${verb}${n ? `, changing ${n} account${n === 1 ? '' : 's'}` : ''}${s.cu_consumed != null ? ` (${fmt(s.cu_consumed)} compute units)` : ''}.`;
+}
+
+// The story at the top: outcome, who did what, and the net effect on the sender.
+function renderStory(tr) {
+  const ok = tr.result.success;
+  const top = tr.steps.filter(s => s.depth === 1);
+  const inner = tr.steps.length - top.length;
+  const progs = [...new Set(top.map(s => s.program).filter(p => p !== CB_ID))].map(p => progInfo(p)).map(p => p.known ? p.name : 'an unknown program');
+  const you = tr.fee_payer;
+  // Net effect per wallet: SOL on the fee payer, token amounts grouped by the
+  // wallet that owns each token account (in a swap the fee payer is often a
+  // relayer, so the person who got the tokens can be someone else).
+  let sol = 0; const byOwner = {};
+  top.forEach(s => (s.diffs || []).forEach(d => {
+    if (d.address === you) sol += d.lamports_after - d.lamports_before;
+    const st = (s.state || []).find(x => x.address === d.address);
+    const owner = (st?.fields || []).find(f => f.name === 'owner')?.value;
+    const mint = (st?.fields || []).find(f => f.name === 'mint')?.value;
+    const amt = d.fields.find(f => f.name === 'amount' && f.type === 'u64');
+    if (owner && amt && mint) { byOwner[owner] = byOwner[owner] || {}; byOwner[owner][mint] = (byOwner[owner][mint] || 0n) + (BigInt(amt.after) - BigInt(amt.before)); }
+  }));
+  const walletLines = [];
+  if (!ok) walletLines.push(`Because it failed, <b>every change was rolled back</b>: the sender <b>${copyPill(you)}</b> paid only the transaction fee, and no tokens or SOL moved.`);
+  const describeWallet = (w, toks) => Object.entries(toks).filter(([, d]) => d !== 0n)
+    .map(([m, d]) => `${d < 0n ? 'sent out' : 'received'} <b>${esc(tokenAmt((d < 0n ? -d : d).toString(), m))}</b>`);
+  const feeLine = sol ? `${sol < 0 ? 'paid' : 'received'} <b>${fmtSol(Math.abs(sol))}</b>${sol < 0 ? ' in fees and transfers' : ''}` : '';
+  const youToks = describeWallet(you, byOwner[you] || {});
+  const senderBits = [feeLine, ...youToks].filter(Boolean);
+  if (ok) walletLines.push(`The sender <b>${copyPill(you)}</b> ${senderBits.length ? senderBits.join(' and ') : 'had no net balance change'}.`);
+  if (ok) Object.entries(byOwner).filter(([w]) => w !== you).slice(0, 3).forEach(([w, toks]) => {
+    const bits = describeWallet(w, toks);
+    if (bits.length) walletLines.push(`Wallet <b>${copyPill(w)}</b> ${bits.join(' and ')}.`);
+  });
+  const failed = tr.failed_step != null ? tr.steps[tr.failed_step] : null;
+  const lead = ok
+    ? `This transaction succeeded.`
+    : `This transaction failed at step ${failed ? failed.path : '?'}${failed && progInfo(failed.program).known ? ' in ' + progInfo(failed.program).name : ''}.`;
+  const why = !ok && tr.explain ? `<div class="why"><b>Why:</b> ${esc(tr.explain.title)}. ${esc(tr.explain.detail)}</div>` : '';
+  const drift = tr.onchain_success != null && tr.onchain_success !== ok && !traceBase;
+  const driftLine = drift ? `<li>On the real network this transaction <b>${tr.onchain_success ? 'succeeded' : 'failed'}</b>. This replay ran against reconstructed state, so some account data may have moved on since; the difference is not necessarily a bug.</li>` : '';
+  $('dbgStory').innerHTML = `<div class="story"><div class="h">What happened</div>
+    <div class="lead${ok ? '' : ' bad'}">${lead}</div>${why}
+    <ul>
+      ${walletLines.map(l => `<li>${l}</li>`).join('')}
+      <li>It ran <b>${top.length} step${top.length === 1 ? '' : 's'}</b>${inner ? ` with <b>${inner} inner call${inner === 1 ? '' : 's'}</b> between programs` : ''}, using ${progs.length ? progs.map(p => `<b>${esc(p)}</b>`).join(', ') : 'only built-in programs'}.</li>
+      <li>Total work: <b>${fmt(tr.result.compute_units)}</b> compute units.</li>${driftLine}
+    </ul></div>`;
+  wireCopy($('dbgStory'));
+}
+
+function showDbgLanding() {
+  hideAllViews();
+  $('debug').classList.remove('hidden');
+  $('dbgLanding').classList.remove('hidden');
+  $('dbgMain').classList.add('hidden');
+  $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on');
+  $('dbgInput').focus();
+}
+$('navDebug').addEventListener('click', () => {
+  if (trace && dbgSigCur) { hideAllViews(); $('debug').classList.remove('hidden'); $('dbgLanding').classList.add('hidden'); $('dbgMain').classList.remove('hidden'); $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on'); history.pushState({ debug: dbgSigCur }, '', '/debug/' + encodeURIComponent(dbgSigCur)); }
+  else showDbgLanding();
+});
+$('dbgGo').addEventListener('click', () => { const v = $('dbgInput').value.trim(); if (v) showDebug(v, true); });
+$('dbgInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('dbgGo').click(); });
+$('dbgLanding').querySelectorAll('.ex a').forEach(a => a.addEventListener('click', () => { $('dbgInput').value = a.dataset.sig; showDebug(a.dataset.sig, true); }));
 let traceBase = null;      // the unmodified trace, for "what changed"
 let dbgMuts = [];          // staged what-if mutations (server MutationInput shape)
 
@@ -3912,8 +4086,13 @@ async function showDebug(sig, push) {
   }
   st.classList.add('hidden');
   $('debug').classList.remove('hidden');
+  $('dbgLanding').classList.add('hidden');
+  $('dbgMain').classList.remove('hidden');
+  $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on');
+  $('dbgInput').value = sig;
   renderTrace(trace);
   renderStage();
+  setDbgMode(dbgMode);
 }
 
 function renderTrace(tr) {
@@ -3941,6 +4120,7 @@ function renderTrace(tr) {
     </div></div>`;
   }
   $('dbgBanner').innerHTML = banner;
+  renderStory(tr);
 
   $('dbgTree').innerHTML = tr.steps.map((s, i) => {
     const cls = tr.failed_step === i ? 'fail' : s.prefix_artifact ? 'artifact' : (!s.success && tr.failed_step != null && i > tr.failed_step) ? 'skip' : 'ok';
@@ -3951,7 +4131,8 @@ function renderTrace(tr) {
     const cu = s.cu_consumed != null ? `<span class="cu">${fmt(s.cu_consumed)} CU</span>` : '<span class="cu"></span>';
     return `<div class="step ${cls} d${s.depth}" data-i="${i}" title="${esc(s.program)}">` +
       `<span class="mark">${mark}</span><span class="path">${esc(s.path)}</span><span class="rail">${rail}</span>` +
-      `${progChip(s.program)}${nm}${nchg}${cu}</div>`;
+      `${progChip(s.program)}${nm}${nchg}${cu}` +
+      `<span class="plain">${esc(plainStep(s))}</span></div>`;
   }).join('');
   $('dbgTree').querySelectorAll('.step').forEach(n => n.addEventListener('click', ev => {
     if (ev.target.closest('.addr-pill')) return;
@@ -4021,8 +4202,10 @@ function selectStep(i) {
 
   // Detail pane.
   const isFail = trace.failed_step === i;
+  const open = dbgMode === 'expert' ? ' open' : '';
   const head = `<div class="card"><h2>${progChip(s.program)}${s.name ? `<span class="ixname">${esc(s.name)}</span>` : ''}</h2>
-    <div class="kv">step <b>${esc(s.path)}</b> · depth <b>${s.depth}</b>` +
+    <div class="dbg-plain">${esc(plainStep(s))}</div>
+    <div class="kv">step <b>${esc(s.path)}</b>${s.depth > 1 ? ` · an inner call, ${s.depth - 1} level${s.depth > 2 ? 's' : ''} deep` : ''}` +
     (s.cu_consumed != null ? ` · <b>${fmt(s.cu_consumed)}</b> compute units` : '') +
     (s.prefix_artifact ? ` · <span style="color:var(--amber)">failed as a prefix but the whole transaction passed (mid-transaction state a later step fixes)</span>` : '') +
     (!s.state_known && s.depth > 1 ? ` · <span style="color:var(--text-3)">state shown is after the enclosing top-level step</span>` : '') +
@@ -4032,9 +4215,10 @@ function selectStep(i) {
         <div class="t">${esc(s.error.explain?.title || 'Failed here')}</div>
         <div class="d">${esc(s.error.explain?.detail || '')}</div>
         <div class="meta">${esc(s.error.raw)}</div></div></div>` : '') +
-    renderIxDetail(s, 'dbg-' + i).replace('class="ixdetail"', 'class="ixdetail open"') + `</div>`;
+    `<details class="tech"${open}><summary>Technical details: arguments and accounts</summary>` +
+    renderIxDetail(s, 'dbg-' + i).replace('class="ixdetail"', 'class="ixdetail open"') + `</details></div>`;
 
-  const diffs = (s.diffs || []).length ? `<div class="card"><h2>Account changes <span class="count">${s.diffs.length}</span></h2>
+  const diffs = (s.diffs || []).length ? `<div class="card"><h2>What this step changed <span class="count">${s.diffs.length}</span></h2>
     <div class="diffs">${s.diffs.map(d => {
       const dl = d.lamports_after - d.lamports_before;
       const lam = dl !== 0 ? `<span class="lam ${dl > 0 ? 'amt pos' : 'amt neg'}">${dl > 0 ? '+' : '−'}${fmtSol(Math.abs(dl))}</span>` : '';
@@ -4047,7 +4231,7 @@ function selectStep(i) {
         <span class="fv">${old}<span class="arr">→</span><span class="new">${esc(f.after)}</span></span></div>`;
       }).join('');
       const raw = d.raw_data_changed && !d.fields.length ? '<div class="drow"><span class="fname">data</span><span class="fv"><span class="new">changed (layout not decoded)</span></span></div>' : '';
-      const lamEdit = `<span class="lam editable" data-addr="${esc(d.address)}" data-lamports="${d.lamports_before}" title="click to change the balance before this step">${lam || 'set balance'}</span>`;
+      const lamEdit = `<span class="lam editable" data-addr="${esc(d.address)}" data-lamports="${d.lamports_before}" title="click to change the balance before this step">${lam || (dbgMode === 'expert' ? 'set balance' : '')}</span>`;
       return `<div class="dcard"><div class="dhead">${copyPill(d.address)}${progPill(d.owner)}${lamEdit}</div>${rows}${raw}</div>`;
     }).join('')}</div></div>`
     : (s.depth === 1 && s.state_known ? `<div class="card"><div class="dbg-empty">this step changed no account state</div></div>` : '');
@@ -4119,7 +4303,7 @@ function renderInspector(s) {
       const delta = BigInt(amt.after) - BigInt(amt.before);
       const mint = (st.fields.find(f => f.name === 'mint') || {}).value;
       const mi = mint ? mintInfo(mint) : null;
-      const shown = mi && mi.decimals != null ? fmtToken((delta < 0n ? -delta : delta).toString(), mi.decimals) + ' ' + (mi.symbol || short(mint)) : (delta < 0n ? -delta : delta).toString() + ' ' + (mint ? short(mint) : 'tokens');
+      const shown = tokenAmt((delta < 0n ? -delta : delta).toString(), mint);
       flows.push({ amt: Number(delta), unit: 'token', who: d.address, text: shown, owner: (st.fields.find(f => f.name === 'owner') || {}).value });
     }
   });
@@ -4130,18 +4314,18 @@ function renderInspector(s) {
   const acctOpts = accts.map(a => `<option value="${esc(a.address)}">${esc(a.role || short(a.address))} · ${esc(short(a.address))}${a.type_name ? ' · ' + esc(a.type_name) : ''}</option>`).join('');
 
   $('dbgDetail').insertAdjacentHTML('beforeend',
-    `<div class="card"><h2>Overrides <span class="count">what if</span></h2>
+    `<div class="card"><details class="tech"${dbgMode === 'expert' ? ' open' : ''}><summary>Change something and run it again</summary>
       <div class="ov-form">
         <div><label>target</label><select id="ovTarget">${argOpts}${acctOpts ? `<optgroup label="accounts">${acctOpts}</optgroup>` : ''}</select></div>
         <div><label>what</label><select id="ovWhat"></select></div>
         <div><label>new value</label><input id="ovVal" placeholder="value" spellcheck="false" /></div>
         <div><button class="btn sm" id="ovAdd">＋ Stage</button></div>
       </div>
-      <div class="ov-note">Account edits apply to the state before instruction 0; argument edits rewrite this instruction's data. Then press <b>Re-run with changes</b> at the top.</div>
-    </div>` +
-    `<div class="card"><h2>Accounts after this step <span class="count">${accts.length}</span></h2>${stateHtml}</div>` +
+      <div class="ov-note">Pick what to change, type a new value, press Stage, then <b>Re-run with changes</b> at the top. Account edits apply to the state before the transaction starts; argument edits rewrite this instruction.</div>
+    </details></div>` +
+    (ffHtml ? `<div class="card"><h2>Money moved in this step</h2>${ffHtml}</div>` : '') +
     (evHtml ? `<div class="card"><h2>Events <span class="count">${s.events.length}</span></h2>${evHtml}</div>` : '') +
-    (ffHtml ? `<div class="card"><h2>Fund flow</h2>${ffHtml}</div>` : ''));
+    `<div class="card"><details class="tech"${dbgMode === 'expert' ? ' open' : ''}><summary>Accounts after this step (${accts.length})</summary>${stateHtml}</details></div>`);
   wireCopy($('dbgDetail'));
 
   // Field "edit" links in the inspector stage a field override directly.
@@ -4205,7 +4389,8 @@ function renderInspector(s) {
 $('dbgBack').addEventListener('click', () => {
   history.pushState({}, '', '/');
   $('debug').classList.add('hidden');
-  if (analysis) $('out').classList.remove('hidden'); else $('hero').classList.remove('hidden');
+  $('navDebug').classList.remove('on');
+  if (analysis) { $('out').classList.remove('hidden'); $('navAnalyze').classList.add('on'); } else { $('hero').classList.remove('hidden'); $('navAnalyze').classList.add('on'); }
 });
 $('dbgShare').addEventListener('click', async () => {
   const url = location.origin + '/debug/' + encodeURIComponent(dbgSigCur);

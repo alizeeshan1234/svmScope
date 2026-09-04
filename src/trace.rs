@@ -22,6 +22,8 @@ use crate::replay::ReplayResult;
 pub struct Trace {
     /// The traced transaction's signature (empty for pre-flight transactions).
     pub signature: String,
+    /// The fee payer (first account), the "you" in a plain-language summary.
+    pub fee_payer: String,
     /// Every instruction and CPI, pre-order.
     pub steps: Vec<Step>,
     /// The full-transaction outcome (the last prefix, i.e. the whole thing).
