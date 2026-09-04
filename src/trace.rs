@@ -82,11 +82,69 @@ pub struct Step {
     /// The error, when this is the step that raised it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<StepError>,
+    /// Data the program returned (`set_return_data`), when this step's program
+    /// set it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_data: Option<ReturnData>,
+    /// Anchor events this invocation emitted (`Program data:` lines decoded
+    /// against the program's IDL).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<DecodedEvent>,
+    /// The accounts this instruction was given, decoded as they stand after
+    /// the step (for CPIs: after the enclosing top-level step).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub state: Vec<StepAccountState>,
     /// True when this prefix failed but the whole transaction did not: a
     /// mid-transaction state (e.g. below rent) that a later instruction fixes.
     /// Not a real failure.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub prefix_artifact: bool,
+}
+
+/// Return data a program set during a step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReturnData {
+    /// The program that set it.
+    pub program: String,
+    /// The bytes, base64.
+    pub data_base64: String,
+}
+
+/// One Anchor event, decoded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DecodedEvent {
+    /// The event's IDL name.
+    pub name: String,
+    /// Its fields, decoded up to the first variable-length one.
+    pub fields: Vec<crate::decode::Field>,
+}
+
+/// One account as it stands after a step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StepAccountState {
+    /// The account's address.
+    pub address: String,
+    /// The IDL role name the instruction gave it, where known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// The owning program.
+    pub owner: String,
+    /// Lamports after the step.
+    pub lamports: u64,
+    /// Data length in bytes.
+    pub data_len: usize,
+    /// Decoded type label ("SPL Token Account", an IDL account name), when the
+    /// layout is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+    /// Decoded fields, when the layout is known. Each carries its offset, type
+    /// and whether it is safe to edit in place.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<crate::decode::Field>,
+    /// Whether this step changed the account.
+    pub changed: bool,
+    /// Whether the account exists at all after the step.
+    pub exists: bool,
 }
 
 /// A failure attributed to a step.

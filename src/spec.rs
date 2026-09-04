@@ -72,6 +72,16 @@ pub enum MutationInput {
         /// The bytes to write, as hex (`0x`, spaces, underscores tolerated).
         bytes_hex: String,
     },
+    /// Set a named argument of a top-level instruction, re-encoded through the
+    /// program's IDL (fixed-size scalar arguments only).
+    IxArg {
+        /// Zero-based top-level instruction index.
+        index: usize,
+        /// The argument's IDL name.
+        arg: String,
+        /// The new value: a number, a bool, or a base58 string for a pubkey.
+        value: serde_json::Value,
+    },
     /// Set a named integer/bool field, resolved through the account's decoded
     /// layout (SPL layouts or the owner program's IDL) — no byte offsets.
     Field {
@@ -122,6 +132,7 @@ impl MutationInput {
                 offset,
                 bytes: hex_decode(&bytes_hex)?,
             },
+            MutationInput::IxArg { index, arg, value } => Mutation::IxArg { index, arg, value },
             MutationInput::Field {
                 address,
                 field,

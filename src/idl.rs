@@ -11,6 +11,7 @@
 //! are the stable seam callers (and the public API) hold IDLs as.
 
 use std::io::Read;
+use std::str::FromStr;
 
 use crate::decode::{DecodedAccount, Field};
 use crate::idl_model::{AccountNode, FieldDef, IdlModel, IdlType, IxDef, SeedDef};
@@ -608,6 +609,114 @@ fn walk_fields(
         *offset += size;
     }
     true
+}
+
+/// Decode an Anchor event payload (the base64 body of a `Program data:` log
+/// line) by its 8-byte discriminator. Supports the new IDL format (events carry
+/// an explicit discriminator and their fields live in `types`) and the legacy
+/// one (`sha256("event:Name")[..8]`, fields inline on the event).
+pub(crate) fn decode_event(idl: &Value, data: &[u8]) -> Option<DecodedAccount> {
+    use sha2::{Digest, Sha256};
+    if data.len() < 8 {
+        return None;
+    }
+    let disc = &data[..8];
+    let events = idl.get("events")?.as_array()?;
+    let ev = events.iter().find(|e| {
+        let Some(n) = e.get("name").and_then(|n| n.as_str()) else {
+            return false;
+        };
+        match e.get("discriminator").and_then(|d| d.as_array()) {
+            Some(arr) => {
+                let bytes: Vec<u8> = arr
+                    .iter()
+                    .filter_map(|b| b.as_u64())
+                    .map(|b| b as u8)
+                    .collect();
+                bytes == disc
+            }
+            None => Sha256::digest(format!("event:{n}").as_bytes())[..8] == *disc,
+        }
+    })?;
+    let name = ev.get("name")?.as_str()?.to_string();
+    let model = IdlModel::parse(idl);
+    let (fields_def, model) = match model.type_def(&name).and_then(|t| t.raw_fields.clone()) {
+        Some(f) => (f, model),
+        None => {
+            // Legacy: fields inline on the event. Build a one-type model so the
+            // same walker can read them.
+            let synth = serde_json::json!({
+                "types": [{ "name": name, "type": { "kind": "struct", "fields": ev.get("fields").cloned().unwrap_or(Value::Array(vec![])) } }]
+            });
+            let m2 = IdlModel::parse(&synth);
+            let f = m2.type_def(&name).and_then(|t| t.raw_fields.clone())?;
+            (f, m2)
+        }
+    };
+    let mut fields: Vec<Field> = Vec::new();
+    let mut offset = 8usize;
+    walk_fields(&fields_def, &model, data, &mut offset, "", &mut fields, 0);
+    Some(DecodedAccount {
+        type_name: name,
+        fields,
+    })
+}
+
+/// Where a named instruction argument sits in the instruction data: `(offset,
+/// size, type label)`. Only resolvable while every preceding argument is a
+/// fixed-size scalar; a `vec`/`string`/`option` before it makes the offset
+/// unknowable without a full decode.
+pub(crate) fn ix_arg_span(idl_ix: &IxDef, arg: &str) -> Option<(usize, usize, String)> {
+    let mut off = 8usize;
+    for a in &idl_ix.args {
+        let kind = a.ty.as_ref().and_then(resolve_fixed)?;
+        if a.name.as_deref() == Some(arg) {
+            return Some((off, kind.size(), kind.label()));
+        }
+        off += kind.size();
+    }
+    None
+}
+
+/// Encode a JSON value as the little-endian bytes of a fixed scalar (`u64`,
+/// `i32`, `bool`, `pubkey`, …), sized exactly `size`.
+pub(crate) fn encode_fixed(label: &str, size: usize, value: &Value) -> Option<Vec<u8>> {
+    let as_i128 = |v: &Value| -> Option<i128> {
+        if let Some(n) = v.as_i64() {
+            return Some(n as i128);
+        }
+        if let Some(n) = v.as_u64() {
+            return Some(n as i128);
+        }
+        v.as_str()?.trim().parse::<i128>().ok()
+    };
+    Some(match label {
+        "bool" => vec![u8::from(
+            value.as_bool().or_else(|| as_i128(value).map(|n| n != 0))?,
+        )],
+        "pubkey" => {
+            let s = value.as_str()?;
+            Address::from_str(s).ok()?.to_bytes().to_vec()
+        }
+        l if l.starts_with('u') => {
+            let n = as_i128(value)?;
+            if n < 0 || (size < 16 && n >= (1i128 << (size * 8))) {
+                return None;
+            }
+            (n as u128).to_le_bytes()[..size].to_vec()
+        }
+        l if l.starts_with('i') => {
+            let n = as_i128(value)?;
+            if size < 16 {
+                let lim = 1i128 << (size * 8 - 1);
+                if n < -lim || n >= lim {
+                    return None;
+                }
+            }
+            n.to_le_bytes()[..size].to_vec()
+        }
+        _ => return None,
+    })
 }
 
 /// Decode an account's raw bytes using its program's Anchor IDL.

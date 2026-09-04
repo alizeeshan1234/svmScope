@@ -1195,6 +1195,27 @@ pub enum Mutation {
         /// The bytes to write at that offset.
         bytes: Vec<u8>,
     },
+    /// Set a named argument of a top-level instruction, re-encoded through the
+    /// program's IDL — "what if the slippage were 5%?". Resolves to
+    /// [`Mutation::IxData`] before application; only fixed-size scalar
+    /// arguments preceded by fixed-size arguments can be located.
+    IxArg {
+        /// Zero-based index of the top-level instruction.
+        index: usize,
+        /// The argument's IDL name.
+        arg: String,
+        /// The new value (number, bool, or base58 string for a pubkey).
+        value: serde_json::Value,
+    },
+    /// Overwrite bytes of a top-level instruction's data at an offset.
+    IxData {
+        /// Zero-based index of the top-level instruction.
+        index: usize,
+        /// Byte offset into the instruction data.
+        offset: usize,
+        /// The bytes to write.
+        bytes: Vec<u8>,
+    },
     /// Set a **named** integer/bool field — no byte offsets. The field resolves
     /// through the account's decoded layout (SPL layouts, or the owner
     /// program's IDL) exactly like [`crate::Check`]'s named-field asserts:
@@ -1275,6 +1296,15 @@ impl Mutation {
         }
     }
 
+    /// Set a top-level instruction's named argument (see [`Mutation::IxArg`]).
+    pub fn ix_arg(index: usize, arg: impl Into<String>, value: serde_json::Value) -> Mutation {
+        Mutation::IxArg {
+            index,
+            arg: arg.into(),
+            value,
+        }
+    }
+
     fn address(&self) -> &str {
         match self {
             Mutation::Lamports { address, .. }
@@ -1282,6 +1312,7 @@ impl Mutation {
             | Mutation::DataPatch { address, .. }
             | Mutation::Field { address, .. }
             | Mutation::Owner { address, .. } => address,
+            Mutation::IxArg { .. } | Mutation::IxData { .. } => "",
         }
     }
 }
@@ -1332,6 +1363,9 @@ fn encode_field_value(f: &crate::decode::Field, value: i128) -> Result<Vec<u8>> 
 /// never folded into a "failed replay" — a typo'd address must not satisfy an
 /// `expect: revert` scenario.
 fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
+    if matches!(m, Mutation::IxArg { .. } | Mutation::IxData { .. }) {
+        return Ok(());
+    }
     let address = m.address();
     let addr =
         Address::from_str(address).map_err(|_| Error::InvalidAddress(address.to_string()))?;
@@ -1366,6 +1400,9 @@ fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
             account.owner =
                 Address::from_str(owner).map_err(|_| Error::InvalidAddress(owner.to_string()))?;
         }
+        // Instruction mutations rewrite the transaction, not an account; see
+        // `ReplayContext::tx_with_mutations`.
+        Mutation::IxArg { .. } | Mutation::IxData { .. } => return Ok(()),
     }
     svm.set_account(addr, account).map_err(|e| {
         Error::MalformedRpcResponse(format!("set_account failed for {address}: {e:?}"))
@@ -1710,6 +1747,45 @@ impl ReplayContext {
     /// mutation that replaces the account with a different layout is on the
     /// caller.
     fn resolve_mutation(&self, m: &Mutation) -> Result<Mutation> {
+        if let Mutation::IxArg { index, arg, value } = m {
+            let ixs = self.tx.message.instructions();
+            let ix = ixs.get(*index).ok_or_else(|| {
+                Error::InvalidSpec(format!(
+                    "instruction index {index} out of range ({} instructions)",
+                    ixs.len()
+                ))
+            })?;
+            let keys = self.tx.message.static_account_keys();
+            let program = keys
+                .get(ix.program_id_index as usize)
+                .map(|p| p.to_string())
+                .unwrap_or_default();
+            let idl = self.idls.get(&program).ok_or_else(|| {
+                Error::InvalidSpec(format!(
+                    "instruction {index}: program {program} has no IDL, so arguments cannot be re-encoded"
+                ))
+            })?;
+            let def = crate::idl::find_ix(idl, &ix.data).ok_or_else(|| {
+                Error::InvalidSpec(format!(
+                    "instruction {index}: data does not match any IDL instruction"
+                ))
+            })?;
+            let (offset, size, label) = crate::idl::ix_arg_span(&def, arg).ok_or_else(|| {
+                Error::InvalidSpec(format!(
+                    "instruction {index}: argument \"{arg}\" is not a fixed-size scalar at a known offset"
+                ))
+            })?;
+            let bytes = crate::idl::encode_fixed(&label, size, value).ok_or_else(|| {
+                Error::InvalidSpec(format!(
+                    "instruction {index}: value {value} does not fit argument \"{arg}\" ({label})"
+                ))
+            })?;
+            return Ok(Mutation::IxData {
+                index: *index,
+                offset,
+                bytes,
+            });
+        }
         let Mutation::Field {
             address,
             field,
@@ -1728,14 +1804,56 @@ impl ReplayContext {
         })
     }
 
+    /// The transaction with any instruction-data mutations applied (already
+    /// resolved to [`Mutation::IxData`]). Account mutations are ignored here.
+    fn tx_with_mutations(&self, resolved: &[Mutation]) -> Result<VersionedTransaction> {
+        use solana_message::VersionedMessage;
+        let mut tx = self.tx.clone();
+        for m in resolved {
+            let Mutation::IxData {
+                index,
+                offset,
+                bytes,
+            } = m
+            else {
+                continue;
+            };
+            let ixs: &mut Vec<_> = match &mut tx.message {
+                VersionedMessage::Legacy(m) => &mut m.instructions,
+                VersionedMessage::V0(m) => &mut m.instructions,
+                VersionedMessage::V1(m) => &mut m.instructions,
+            };
+            let ix = ixs.get_mut(*index).ok_or_else(|| {
+                Error::InvalidSpec(format!("instruction index {index} out of range"))
+            })?;
+            let end = offset
+                .checked_add(bytes.len())
+                .filter(|&e| e <= ix.data.len())
+                .ok_or_else(|| {
+                    Error::InvalidSpec(format!(
+                        "instruction {index}: patch at {offset}+{} exceeds data length {}",
+                        bytes.len(),
+                        ix.data.len()
+                    ))
+                })?;
+            ix.data[*offset..end].copy_from_slice(bytes);
+        }
+        Ok(tx)
+    }
+
     /// Run mutations and keep the post-replay SVM so state can be inspected.
     /// A mutation that can't be applied is a hard `Err`, never a failed replay.
     fn run_full(&self, mutations: &[Mutation]) -> Result<(ReplayResult, LiteSVM)> {
         let mut svm = self.fresh_svm();
-        for m in mutations {
-            apply_mutation(&mut svm, &self.resolve_mutation(m)?)?;
+        let resolved: Vec<Mutation> = mutations
+            .iter()
+            .map(|m| self.resolve_mutation(m))
+            .collect::<Result<_>>()?;
+        for m in &resolved {
+            apply_mutation(&mut svm, m)?;
         }
-        let result = to_replay_result(svm.send_transaction(self.tx.clone()));
+        let tx = self.tx_with_mutations(&resolved)?;
+        let result = to_replay_result(svm.send_transaction(tx));
         Ok((result, svm))
     }
 
@@ -1744,6 +1862,12 @@ impl ReplayContext {
     /// bounds. Lets a suite fail fast — before any scenario executes.
     pub(crate) fn validate_mutations(&self, mutations: &[Mutation]) -> Result<()> {
         for m in mutations {
+            if matches!(m, Mutation::IxArg { .. } | Mutation::IxData { .. }) {
+                // Resolving is the validation: index, IDL, offset and fit.
+                let r = self.resolve_mutation(m)?;
+                self.tx_with_mutations(&[r])?;
+                continue;
+            }
             let address = m.address();
             let addr = Address::from_str(address)
                 .map_err(|_| Error::InvalidAddress(address.to_string()))?;
@@ -1967,11 +2091,15 @@ impl ReplayContext {
     /// The transaction with only the top-level instructions at `keep`, in
     /// order. Signatures and header are untouched: sigverify is off, so the
     /// runtime only checks that the signature count matches the header.
-    fn tx_with_instructions(&self, keep: &[usize]) -> VersionedTransaction {
+    fn tx_with_instructions(
+        &self,
+        base: &VersionedTransaction,
+        keep: &[usize],
+    ) -> VersionedTransaction {
         use solana_message::VersionedMessage;
-        let all = self.tx.message.instructions();
+        let all = base.message.instructions();
         let subset: Vec<_> = keep.iter().filter_map(|&i| all.get(i).cloned()).collect();
-        let mut tx = self.tx.clone();
+        let mut tx = base.clone();
         match &mut tx.message {
             VersionedMessage::Legacy(m) => m.instructions = subset,
             VersionedMessage::V0(m) => m.instructions = subset,
@@ -1986,13 +2114,17 @@ impl ReplayContext {
     /// runtime derives the transaction's limits from the whole message.
     pub(crate) fn trace_raw(&self, mutations: &[Mutation]) -> Result<Vec<RawStepRun>> {
         let mut svm = self.fresh_svm();
-        for m in mutations {
-            apply_mutation(&mut svm, &self.resolve_mutation(m)?)?;
+        let resolved: Vec<Mutation> = mutations
+            .iter()
+            .map(|m| self.resolve_mutation(m))
+            .collect::<Result<_>>()?;
+        for m in &resolved {
+            apply_mutation(&mut svm, m)?;
         }
-        let keys = self.tx.message.static_account_keys();
-        let n = self.tx.message.instructions().len();
-        let is_cb: Vec<bool> = self
-            .tx
+        let base = self.tx_with_mutations(&resolved)?;
+        let keys = base.message.static_account_keys();
+        let n = base.message.instructions().len();
+        let is_cb: Vec<bool> = base
             .message
             .instructions()
             .iter()
@@ -2005,7 +2137,7 @@ impl ReplayContext {
         let mut runs = Vec::with_capacity(n);
         for k in 0..n {
             let keep: Vec<usize> = (0..n).filter(|&i| i <= k || is_cb[i]).collect();
-            let tx = self.tx_with_instructions(&keep);
+            let tx = self.tx_with_instructions(&base, &keep);
             let (result, post) = match svm.simulate_transaction(tx) {
                 Ok(info) => (
                     Ok(info.meta),

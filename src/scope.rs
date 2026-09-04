@@ -1212,7 +1212,10 @@ impl Replay {
     /// the initial state first ("what if this field were X, step by step").
     pub fn trace(&self, mutations: &[Mutation]) -> Result<Trace> {
         use crate::replay::replay_result_of;
-        use crate::trace::{spans_from_logs, LogSpan, Step, StepError};
+        use crate::trace::{
+            spans_from_logs, DecodedEvent, LogSpan, ReturnData, Step, StepAccountState, StepError,
+        };
+        use base64::Engine;
         use solana_account::Account;
         use std::collections::HashMap;
 
@@ -1327,6 +1330,56 @@ impl Replay {
                 diffs = decode_diffs(raw, idls);
             }
 
+            // State after this prefix, for the accounts each node names.
+            let changed: std::collections::HashSet<String> =
+                diffs.iter().map(|d| d.address.clone()).collect();
+            let state_of = |addr: &str, role: Option<String>| -> StepAccountState {
+                let acc = post
+                    .as_ref()
+                    .and_then(|m| {
+                        Address::from_str(addr)
+                            .ok()
+                            .and_then(|a| m.get(&a).cloned())
+                    })
+                    .or_else(|| self.ctx.pre_account_owned(addr));
+                match acc {
+                    Some(a) => {
+                        let owner = a.owner.to_string();
+                        let decoded = decode::decode_bytes(&owner, &a.data).or_else(|| {
+                            idls.get(&owner)
+                                .and_then(|i| idl::decode_with_idl(i, &a.data))
+                        });
+                        StepAccountState {
+                            address: addr.to_string(),
+                            role,
+                            owner,
+                            lamports: a.lamports,
+                            data_len: a.data.len(),
+                            type_name: decoded.as_ref().map(|d| d.type_name.clone()),
+                            fields: decoded.map(|d| d.fields).unwrap_or_default(),
+                            changed: changed.contains(addr),
+                            exists: true,
+                        }
+                    }
+                    None => StepAccountState {
+                        address: addr.to_string(),
+                        role,
+                        owner: String::new(),
+                        lamports: 0,
+                        data_len: 0,
+                        type_name: None,
+                        fields: Vec::new(),
+                        changed: changed.contains(addr),
+                        exists: false,
+                    },
+                }
+            };
+            let return_data = (!meta.return_data.data.is_empty()).then(|| ReturnData {
+                program: meta.return_data.program_id.to_string(),
+                data_base64: base64::engine::general_purpose::STANDARD
+                    .encode(&meta.return_data.data),
+            });
+
             // Emit the nodes.
             let base_index = steps.len();
             let mut path_stack: Vec<usize> = Vec::new(); // child counters per depth
@@ -1362,6 +1415,16 @@ impl Replay {
                     }
                 }
 
+                // Per-node state: the accounts this instruction names, capped so a
+                // 40-account Jupiter route doesn't dump megabytes of fields.
+                let mut seen = std::collections::HashSet::new();
+                let state: Vec<StepAccountState> = accounts
+                    .iter()
+                    .filter(|a| seen.insert(a.address.clone()))
+                    .take(32)
+                    .map(|a| state_of(&a.address, a.name.clone()))
+                    .collect();
+
                 let (logs, cu, success) = if aligned {
                     let s = &spans[i];
                     ((s.start, s.end), s.cu_consumed, s.success)
@@ -1375,6 +1438,32 @@ impl Replay {
                 if aligned && !success {
                     innermost_failure = Some(base_index + i);
                 }
+                // Events: `Program data: <b64>` lines inside this node's own log
+                // range, decoded against its program's IDL.
+                let events: Vec<DecodedEvent> = idls
+                    .get(&program)
+                    .map(|idl| {
+                        let (a, b) = logs;
+                        result.logs[a.min(result.logs.len())..b.min(result.logs.len())]
+                            .iter()
+                            .filter_map(|l| l.strip_prefix("Program data: "))
+                            .filter_map(|b64| {
+                                base64::engine::general_purpose::STANDARD
+                                    .decode(b64.trim())
+                                    .ok()
+                            })
+                            .filter_map(|bytes| idl::decode_event(idl, &bytes))
+                            .map(|d| DecodedEvent {
+                                name: d.type_name,
+                                fields: d.fields,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let node_return = return_data
+                    .as_ref()
+                    .filter(|r| r.program == program && i == 0 || r.program == program)
+                    .cloned();
                 steps.push(Step {
                     path,
                     depth: *depth,
@@ -1393,6 +1482,9 @@ impl Replay {
                     state_known: i == 0 && post.is_some() && !halted,
                     success: if halted { false } else { success },
                     error: None,
+                    return_data: node_return,
+                    events,
+                    state,
                     prefix_artifact: artifact,
                 });
             }

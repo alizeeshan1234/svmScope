@@ -1296,14 +1296,50 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 .dbg-edit { display: inline-flex; gap: 6px; align-items: center; }
 .dbg-edit input { font-family: var(--font-mono); font-size: 12px; width: 180px; background: var(--bg-inset); color: var(--text-1);
   border: 1px solid var(--brand-border); border-radius: 6px; padding: 3px 8px; }
-.ix-row .ix-edit { font-size: 10.5px; color: var(--text-3); cursor: pointer; margin-left: var(--s-2); white-space: nowrap; }
-.ix-row .ix-edit:hover { color: var(--brand-strong); }
+.ix-row .ix-edit { font-size: 10.5px; color: var(--text-3); cursor: pointer; margin-left: var(--s-3); white-space: nowrap;
+  opacity: 0; transition: opacity var(--t-fast) var(--ease); border: 1px solid var(--border); border-radius: var(--r-full); padding: 0 7px; }
+.ix-row:hover .ix-edit { opacity: 1; }
+.ix-row .ix-edit:hover { color: var(--brand-strong); border-color: var(--brand-border); }
 .dbg-cmp { margin-bottom: var(--s-4); }
 .dbg-cmp .crow { display: grid; grid-template-columns: 60px 1fr 1fr; gap: var(--s-3); padding: 6px 0; border-top: 1px solid var(--border); font-size: 12px; }
 .dbg-cmp .crow:first-of-type { border-top: 0; }
 .dbg-cmp .cpath { font-family: var(--font-mono); color: var(--brand-strong); font-weight: 600; }
 .dbg-cmp .cb { color: var(--text-3); } .dbg-cmp .ca { color: var(--text-1); }
 .dbg-cmp .ok { color: var(--green); } .dbg-cmp .bad { color: var(--red); }
+
+
+/* debugger: inspector, events, fund flow, overrides, nav */
+.dbg-nav { display: flex; gap: var(--s-2); align-items: center; margin-left: auto; }
+.dbg-nav .btn { padding: 2px 8px; font-size: 11px; }
+.dbg-nav label { font-size: 11px; color: var(--text-3); display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.dbg-tree.top-only .step:not(.d1) { display: none; }
+.st-acct { border: 1px solid var(--border); border-radius: var(--r-md); margin-bottom: var(--s-2); background: var(--bg-0); }
+.st-acct > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: var(--s-2); padding: 7px var(--s-3); flex-wrap: wrap; }
+.st-acct > summary::-webkit-details-marker { display: none; }
+.st-acct .role { font-size: 10.5px; font-weight: 700; color: var(--cyan); text-transform: uppercase; letter-spacing: .06em; min-width: 90px; }
+.st-acct .tn { font-size: 11px; color: var(--text-2); background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-full); padding: 0 8px; }
+.st-acct .chg { font-size: 10px; color: var(--amber); border: 1px solid rgba(251,191,36,.4); border-radius: var(--r-full); padding: 0 7px; }
+.st-acct .lam { margin-left: auto; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-2); }
+.st-acct .body { padding: 0 var(--s-3) var(--s-3); }
+.st-row { display: grid; grid-template-columns: 170px 1fr auto; gap: var(--s-3); align-items: baseline; padding: 4px 0; border-top: 1px solid var(--border); font-family: var(--font-mono); font-size: 11.5px; }
+.st-row .n { color: var(--text-2); } .st-row .ty { color: var(--text-3); font-size: 10px; margin-left: 4px; }
+.st-row .v { color: var(--text-1); word-break: break-all; } .st-row.changed .v { color: var(--green); font-weight: 600; }
+.st-row .ed { font-size: 10px; color: var(--text-3); cursor: pointer; opacity: 0; } .st-row:hover .ed { opacity: 1; } .st-row .ed:hover { color: var(--brand-strong); }
+.st-empty { color: var(--text-3); font-size: 11.5px; padding: 6px 0; }
+.ev { border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s-2) var(--s-3); margin-bottom: var(--s-2); background: var(--bg-0); }
+.ev .evn { font-weight: 700; color: var(--brand-strong); font-size: 12.5px; margin-bottom: 4px; }
+.ff-row { display: grid; grid-template-columns: 110px 1fr; gap: var(--s-3); padding: 5px 0; border-top: 1px solid var(--border); font-family: var(--font-mono); font-size: 11.5px; align-items: baseline; }
+.ff-row:first-of-type { border-top: 0; }
+.ff-row .amt.pos { color: var(--green); } .ff-row .amt.neg { color: var(--red); }
+.ov-form { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: var(--s-2); align-items: end; }
+.ov-form label { font-size: 10px; color: var(--text-3); text-transform: uppercase; letter-spacing: .08em; display: block; margin-bottom: 3px; }
+.ov-form select, .ov-form input { width: 100%; font-family: var(--font-mono); font-size: 12px; background: var(--bg-inset); color: var(--text-1); border: 1px solid var(--border-strong); border-radius: 6px; padding: 5px 8px; }
+.ov-note { font-size: 11px; color: var(--text-3); margin-top: var(--s-2); line-height: 1.5; }
+.cu-roll { display: flex; flex-direction: column; gap: 4px; margin-top: var(--s-3); }
+.cu-roll .r { display: grid; grid-template-columns: 150px 1fr 70px; gap: var(--s-2); align-items: center; font-size: 11px; }
+.cu-roll .bar { height: 6px; background: var(--brand); border-radius: 3px; opacity: .8; }
+.cu-roll .n { font-family: var(--font-mono); color: var(--text-3); text-align: right; }
+.kv .ret { font-family: var(--font-mono); font-size: 11px; color: var(--text-2); word-break: break-all; }
 
 .hidden { display: none !important; }
 
@@ -1652,9 +1688,15 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
     <div id="dbgCompare"></div>
     <div class="dbg-grid">
       <div class="card">
-        <h2>Steps <span class="count" id="dbgCount">0</span></h2>
+        <h2>Steps <span class="count" id="dbgCount">0</span>
+          <span class="dbg-nav">
+            <button class="btn ghost" id="dbgUp" title="to the parent step (u)">⇧ up</button>
+            <button class="btn ghost" id="dbgOver" title="skip this step's CPIs (o)">⤼ over</button>
+            <label><input type="checkbox" id="dbgTopOnly" /> top-level only</label>
+          </span></h2>
         <div class="dbg-tree" id="dbgTree"></div>
-        <div class="dbg-keys"><kbd>j</kbd> / <kbd>k</kbd> next / previous step · <kbd>f</kbd> jump to failure</div>
+        <div class="dbg-keys"><kbd>j</kbd> / <kbd>k</kbd> next / previous · <kbd>u</kbd> up · <kbd>o</kbd> over · <kbd>f</kbd> failure</div>
+        <div class="cu-roll" id="dbgCu"></div>
       </div>
       <div class="dbg-detail" id="dbgDetail"><div class="dbg-empty">select a step</div></div>
     </div>
@@ -3774,8 +3816,8 @@ function writtenEarlier(address, stepIdx) {
 }
 
 function stageMutation(m) {
-  const key = m.kind === 'field' ? `${m.address}:${m.field}` : `${m.address}:lamports`;
-  dbgMuts = dbgMuts.filter(x => (x.kind === 'field' ? `${x.address}:${x.field}` : `${x.address}:lamports`) !== key);
+  const keyOf = x => x.kind === 'ixarg' ? `ix:${x.index}:${x.arg}` : x.kind === 'field' ? `${x.address}:${x.field}` : `${x.address}:lamports`;
+  dbgMuts = dbgMuts.filter(x => keyOf(x) !== keyOf(m));
   dbgMuts.push(m);
   renderStage();
 }
@@ -3907,7 +3949,7 @@ function renderTrace(tr) {
     const nm = s.name ? `<span class="ixname">${esc(s.name)}</span>` : '';
     const nchg = s.diffs && s.diffs.length ? `<span class="nchg" title="accounts changed">${s.diffs.length} Δ</span>` : '';
     const cu = s.cu_consumed != null ? `<span class="cu">${fmt(s.cu_consumed)} CU</span>` : '<span class="cu"></span>';
-    return `<div class="step ${cls}" data-i="${i}" title="${esc(s.program)}">` +
+    return `<div class="step ${cls} d${s.depth}" data-i="${i}" title="${esc(s.program)}">` +
       `<span class="mark">${mark}</span><span class="path">${esc(s.path)}</span><span class="rail">${rail}</span>` +
       `${progChip(s.program)}${nm}${nchg}${cu}</div>`;
   }).join('');
@@ -3923,8 +3965,37 @@ function renderTrace(tr) {
   // Tag each line with its index so a step can highlight its range.
   $('dbgLogs').querySelectorAll('.lg-line').forEach((el, i) => el.dataset.i = i);
 
+  // Compute by program: top-level steps only (a program's CU is inclusive of
+  // its own CPIs, so summing nested rows would double count).
+  const cu = {};
+  tr.steps.filter(s => s.depth === 1 && s.cu_consumed != null).forEach(s => { cu[s.program] = (cu[s.program] || 0) + s.cu_consumed; });
+  const rows = Object.entries(cu).sort((a, b) => b[1] - a[1]);
+  const max = Math.max(1, ...rows.map(r => r[1]));
+  $('dbgCu').innerHTML = rows.length ? rows.map(([p, c]) =>
+    `<div class="r">${progChip(p)}<div class="bar" style="width:${Math.max(2, c / max * 100)}%"></div><span class="n">${fmt(c)} CU</span></div>`).join('') : '';
+  wireCopy($('dbgCu'));
+  $('dbgTree').classList.toggle('top-only', $('dbgTopOnly').checked);
+
   selectStep(tr.failed_step != null ? tr.failed_step : 0);
 }
+
+// Navigation: parent step, or the next step that is not inside this one.
+function stepUp() {
+  if (!trace || dbgSel < 0) return;
+  const s = trace.steps[dbgSel];
+  for (let i = dbgSel - 1; i >= 0; i--) if (trace.steps[i].depth < s.depth) return selectStep(i);
+}
+function stepOver() {
+  if (!trace || dbgSel < 0) return;
+  const s = trace.steps[dbgSel];
+  for (let i = dbgSel + 1; i < trace.steps.length; i++) if (trace.steps[i].depth <= s.depth) return selectStep(i);
+}
+$('dbgUp').addEventListener('click', stepUp);
+$('dbgOver').addEventListener('click', stepOver);
+$('dbgTopOnly').addEventListener('change', () => {
+  $('dbgTree').classList.toggle('top-only', $('dbgTopOnly').checked);
+  if ($('dbgTopOnly').checked && trace && trace.steps[dbgSel]?.depth > 1) stepUp();
+});
 
 function selectStep(i) {
   if (!trace || i < 0 || i >= trace.steps.length) return;
@@ -3945,8 +4016,9 @@ function selectStep(i) {
     <div class="kv">step <b>${esc(s.path)}</b> · depth <b>${s.depth}</b>` +
     (s.cu_consumed != null ? ` · <b>${fmt(s.cu_consumed)}</b> compute units` : '') +
     (s.prefix_artifact ? ` · <span style="color:var(--amber)">failed as a prefix but the whole transaction passed (mid-transaction state a later step fixes)</span>` : '') +
-    (!s.state_known && s.depth > 1 ? ` · <span style="color:var(--text-3)">state for CPIs is not captured yet; see the parent step</span>` : '') +
+    (!s.state_known && s.depth > 1 ? ` · <span style="color:var(--text-3)">state shown is after the enclosing top-level step</span>` : '') +
     `</div>` +
+    (s.return_data ? `<div class="kv">return data <span class="ret">${esc(s.return_data.data_base64)}</span> <span class="ix-ty">base64, ${esc(short(s.return_data.program))}</span></div>` : '') +
     (s.error ? `<div class="explain"><div class="ic">⚠️</div><div>
         <div class="t">${esc(s.error.explain?.title || 'Failed here')}</div>
         <div class="d">${esc(s.error.explain?.detail || '')}</div>
@@ -3990,17 +4062,7 @@ function selectStep(i) {
       stageMutation({ kind: 'lamports', address, lamports: Math.round(sol * 1e9), _label: `${short(address)} balance = ${v} SOL`, _warn: warn });
     });
   }));
-  // Any account the step touches can have its balance changed too.
-  $('dbgDetail').querySelectorAll('.ixdetail .ix-row .ix-v .addr-pill').forEach(pill => {
-    const address = pill.dataset.copy;
-    const e = document.createElement('span'); e.className = 'ix-edit'; e.textContent = 'set balance';
-    e.title = 'change this account\'s SOL balance before the transaction';
-    e.addEventListener('click', ev => { ev.stopPropagation(); inlineEdit(e, '', v => {
-      const sol = Number(v); if (!Number.isFinite(sol) || sol < 0) return;
-      stageMutation({ kind: 'lamports', address, lamports: Math.round(sol * 1e9), _label: `${short(address)} balance = ${v} SOL`, _warn: '' });
-    }); });
-    pill.parentElement.appendChild(e);
-  });
+  renderInspector(s);
 
   // Logs: highlight this step's range and scroll to it.
   const [a, b] = s.logs || [0, 0];
@@ -4010,6 +4072,125 @@ function selectStep(i) {
     const box = $('dbgLogs');
     box.scrollTop = Math.max(0, lines[a].offsetTop - box.offsetTop - box.clientHeight / 3);
   }
+}
+
+// Below the step detail: the accounts as they stand, the events it emitted,
+// where value moved, and the overrides form.
+function renderInspector(s) {
+  const changedFields = new Set((s.diffs || []).flatMap(d => d.fields.map(f => d.address + ':' + f.name)));
+  const changedAddr = new Set((s.diffs || []).map(d => d.address));
+
+  // --- State inspector ---
+  const accts = (s.state || []).map(a => ({ ...a, fields: a.fields || [] })).sort((a, b) => (b.changed | 0) - (a.changed | 0));
+  const stateHtml = accts.length ? accts.map(a => {
+    const rows = a.fields.length ? a.fields.map(f => {
+      const chg = changedFields.has(a.address + ':' + f.name);
+      const ed = f.editable && /^(u|i)(8|16|32|64|128)$|^bool$/.test(f.type)
+        ? `<span class="ed" data-addr="${esc(a.address)}" data-field="${esc(f.name)}" data-val="${esc(f.value)}">edit</span>` : '<span></span>';
+      return `<div class="st-row${chg ? ' changed' : ''}"><span class="n">${esc(f.name)}<span class="ty">${esc(f.type)}</span></span><span class="v">${esc(f.value)}</span>${ed}</div>`;
+    }).join('') : `<div class="st-empty">${a.exists ? (a.data_len ? `${fmt(a.data_len)} bytes, layout not decoded` : 'no data') : 'account does not exist'}</div>`;
+    return `<details class="st-acct"${a.changed ? ' open' : ''}>
+      <summary>${a.role ? `<span class="role">${esc(a.role)}</span>` : '<span class="role" style="color:var(--text-3)">account</span>'}${copyPill(a.address)}${a.exists ? progPill(a.owner) : ''}${a.type_name ? `<span class="tn">${esc(a.type_name)}</span>` : ''}${a.changed ? '<span class="chg">changed</span>' : ''}<span class="lam">${a.exists ? fmtSol(a.lamports) : ''}</span></summary>
+      <div class="body">${rows}</div></details>`;
+  }).join('') : '<div class="dbg-empty">no accounts</div>';
+
+  // --- Events ---
+  const evHtml = (s.events || []).length ? s.events.map(e => `<div class="ev"><div class="evn">${esc(e.name)}</div>${
+    (e.fields || []).map(f => `<div class="st-row"><span class="n">${esc(f.name)}<span class="ty">${esc(f.type)}</span></span><span class="v">${esc(f.value)}</span><span></span></div>`).join('')}</div>`).join('') : '';
+
+  // --- Fund flow: lamports and token amounts that moved in this step ---
+  const byAddr = Object.fromEntries((s.state || []).map(a => [a.address, a]));
+  const flows = [];
+  (s.diffs || []).forEach(d => {
+    const dl = d.lamports_after - d.lamports_before;
+    if (dl) flows.push({ amt: dl, unit: 'SOL', who: d.address, text: fmtSol(Math.abs(dl)) });
+    const amt = d.fields.find(f => f.name === 'amount' && /^u64$/.test(f.type));
+    const st = byAddr[d.address];
+    if (amt && st && /token account/i.test(st.type_name || '')) {
+      const delta = BigInt(amt.after) - BigInt(amt.before);
+      const mint = (st.fields.find(f => f.name === 'mint') || {}).value;
+      const mi = mint ? mintInfo(mint) : null;
+      const shown = mi && mi.decimals != null ? fmtToken((delta < 0n ? -delta : delta).toString(), mi.decimals) + ' ' + (mi.symbol || short(mint)) : (delta < 0n ? -delta : delta).toString() + ' ' + (mint ? short(mint) : 'tokens');
+      flows.push({ amt: Number(delta), unit: 'token', who: d.address, text: shown, owner: (st.fields.find(f => f.name === 'owner') || {}).value });
+    }
+  });
+  const ffHtml = flows.length ? flows.map(f => `<div class="ff-row"><span class="amt ${f.amt > 0 ? 'pos' : 'neg'}">${f.amt > 0 ? '+' : '−'}${esc(f.text)}</span><span>${copyPill(f.who)}${f.owner ? ` <span class="ix-ty">owner ${esc(short(f.owner))}</span>` : ''}</span></div>`).join('') : '';
+
+  // --- Overrides form ---
+  const argOpts = (s.depth === 1 && s.args && s.args.length) ? s.args.filter(a => a.value !== '' && /^(u|i)(8|16|32|64|128)$|^bool$|^pubkey$/.test(a.type)).map(a => `<option value="arg:${esc(a.name)}">argument · ${esc(a.name)} (${esc(a.type)}) = ${esc(a.value)}</option>`).join('') : '';
+  const acctOpts = accts.map(a => `<option value="${esc(a.address)}">${esc(a.role || short(a.address))} · ${esc(short(a.address))}${a.type_name ? ' · ' + esc(a.type_name) : ''}</option>`).join('');
+
+  $('dbgDetail').insertAdjacentHTML('beforeend',
+    `<div class="card"><h2>Overrides <span class="count">what if</span></h2>
+      <div class="ov-form">
+        <div><label>target</label><select id="ovTarget">${argOpts}${acctOpts ? `<optgroup label="accounts">${acctOpts}</optgroup>` : ''}</select></div>
+        <div><label>what</label><select id="ovWhat"></select></div>
+        <div><label>new value</label><input id="ovVal" placeholder="value" spellcheck="false" /></div>
+        <div><button class="btn sm" id="ovAdd">＋ Stage</button></div>
+      </div>
+      <div class="ov-note">Account edits apply to the state before instruction 0; argument edits rewrite this instruction's data. Then press <b>Re-run with changes</b> at the top.</div>
+    </div>` +
+    `<div class="card"><h2>Accounts after this step <span class="count">${accts.length}</span></h2>${stateHtml}</div>` +
+    (evHtml ? `<div class="card"><h2>Events <span class="count">${s.events.length}</span></h2>${evHtml}</div>` : '') +
+    (ffHtml ? `<div class="card"><h2>Fund flow</h2>${ffHtml}</div>` : ''));
+  wireCopy($('dbgDetail'));
+
+  // Field "edit" links in the inspector stage a field override directly.
+  $('dbgDetail').querySelectorAll('.st-row .ed').forEach(el => el.addEventListener('click', () => {
+    const address = el.dataset.addr, field = el.dataset.field;
+    inlineEdit(el, el.dataset.val, v => {
+      const n = Number(v); if (!Number.isFinite(n) && !/^(true|false)$/.test(v)) return;
+      const val = /^(true|false)$/.test(v) ? (v === 'true' ? 1 : 0) : n;
+      const warn = writtenEarlier(address, dbgSel) ? 'an earlier step also writes this account, so the edit applies to the initial state, not exactly to this step' : '';
+      stageMutation({ kind: 'field', address, field, value: val, _label: `${short(address)}.${field} = ${v}`, _warn: warn });
+    });
+  }));
+
+  // Overrides form wiring.
+  const target = $('ovTarget'), what = $('ovWhat'), val = $('ovVal');
+  const fillWhat = () => {
+    const tv = target.value || '';
+    if (tv.startsWith('arg:')) {
+      const a = s.args.find(x => x.name === tv.slice(4));
+      what.innerHTML = `<option value="arg">set argument (${esc(a?.type || '')})</option>`;
+      val.value = a?.value || '';
+      return;
+    }
+    const a = byAddr[tv];
+    const fields = (a?.fields || []).filter(f => f.editable && /^(u|i)(8|16|32|64|128)$|^bool$/.test(f.type));
+    what.innerHTML = `<option value="lamports">SOL balance</option>` + fields.map(f => `<option value="field:${esc(f.name)}">${esc(f.name)} (${esc(f.type)}) = ${esc(f.value)}</option>`).join('');
+    val.value = a ? (a.lamports / 1e9).toString() : '';
+  };
+  const fillVal = () => {
+    const tv = target.value || '', w = what.value || '';
+    if (tv.startsWith('arg:')) { val.value = s.args.find(x => x.name === tv.slice(4))?.value || ''; return; }
+    const a = byAddr[tv];
+    if (w === 'lamports') val.value = a ? (a.lamports / 1e9).toString() : '';
+    else { const f = a?.fields.find(x => x.name === w.slice(6)); val.value = f ? f.value : ''; }
+  };
+  target.addEventListener('change', fillWhat); what.addEventListener('change', fillVal); fillWhat();
+  $('ovAdd').addEventListener('click', () => {
+    const tv = target.value || '', w = what.value || '', v = val.value.trim();
+    if (!tv || v === '') return;
+    if (tv.startsWith('arg:')) {
+      const name = tv.slice(4), a = s.args.find(x => x.name === name);
+      const value = a?.type === 'bool' ? (v === 'true' || v === '1') : a?.type === 'pubkey' ? v : Number(v);
+      if (typeof value === 'number' && !Number.isFinite(value)) return;
+      stageMutation({ kind: 'ixarg', index: s.index, arg: name, value, _label: `ix ${s.index} · ${name} = ${v}`, _warn: '' });
+      return;
+    }
+    const address = tv;
+    const warn = writtenEarlier(address, dbgSel) ? 'an earlier step also writes this account, so the edit applies to the initial state, not exactly to this step' : '';
+    if (w === 'lamports') {
+      const sol = Number(v); if (!Number.isFinite(sol) || sol < 0) return;
+      stageMutation({ kind: 'lamports', address, lamports: Math.round(sol * 1e9), _label: `${short(address)} balance = ${v} SOL`, _warn: warn });
+    } else {
+      const field = w.slice(6);
+      const value = /^(true|false)$/.test(v) ? (v === 'true' ? 1 : 0) : Number(v);
+      if (!Number.isFinite(value)) return;
+      stageMutation({ kind: 'field', address, field, value, _label: `${short(address)}.${field} = ${v}`, _warn: warn });
+    }
+  });
 }
 
 $('dbgBack').addEventListener('click', () => {
@@ -4027,8 +4208,12 @@ document.addEventListener('keydown', e => {
   if ($('debug').classList.contains('hidden') || e.metaKey || e.ctrlKey) return;
   const el = document.activeElement;
   if (el && /INPUT|SELECT|TEXTAREA/.test(el.tagName)) return;
-  if (e.key === 'j') { e.preventDefault(); selectStep(dbgSel + 1); }
-  else if (e.key === 'k') { e.preventDefault(); selectStep(dbgSel - 1); }
+  const topOnly = $('dbgTopOnly').checked;
+  const next = (dir) => { let i = dbgSel + dir; while (trace && i >= 0 && i < trace.steps.length && topOnly && trace.steps[i].depth > 1) i += dir; selectStep(i); };
+  if (e.key === 'j') { e.preventDefault(); next(1); }
+  else if (e.key === 'k') { e.preventDefault(); next(-1); }
+  else if (e.key === 'u') { e.preventDefault(); stepUp(); }
+  else if (e.key === 'o') { e.preventDefault(); stepOver(); }
   else if (e.key === 'f' && trace && trace.failed_step != null) { e.preventDefault(); selectStep(trace.failed_step); }
 });
 window.addEventListener('popstate', e => {
