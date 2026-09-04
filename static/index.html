@@ -3911,7 +3911,7 @@ function renderStory(tr) {
   const top = tr.steps.filter(s => s.depth === 1);
   const inner = tr.steps.length - top.length;
   const progs = [...new Set(top.map(s => s.program).filter(p => p !== CB_ID))].map(p => progInfo(p)).map(p => p.known ? p.name : 'an unknown program');
-  const you = tr.fee_payer;
+  const you = tr.fee_payer || (tr.steps.find(s => s.depth === 1 && s.accounts && s.accounts.length)?.accounts[0].address) || '';
   // Net effect per wallet: SOL on the fee payer, token amounts grouped by the
   // wallet that owns each token account (in a swap the fee payer is often a
   // relayer, so the person who got the tokens can be someone else).
