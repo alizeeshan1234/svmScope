@@ -1352,6 +1352,28 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 .dbg-landing .ex a { color: var(--brand-strong); cursor: pointer; margin: 0 6px; }
 .dbg-progress { margin-top: 14px; font-size: 13px; color: var(--text-2); display: flex; align-items: center; justify-content: center; gap: 8px; }
 .dbg-err { margin-top: 14px; font-size: 13px; color: var(--red); background: var(--red-soft); border: 1px solid rgba(248,113,113,.3); border-radius: 8px; padding: 8px 12px; text-align: left; }
+.dbg-run { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; margin-bottom: var(--s-3); }
+.dbg-run .lbl { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .09em; color: var(--text-3); margin-right: 4px; }
+.dbg-run .cur { margin-left: auto; font-size: 12px; color: var(--text-2); }
+.dbg-run .cur b { color: var(--brand-strong); font-family: var(--font-mono); }
+.dbg-watch { margin-bottom: var(--s-4); overflow-x: auto; }
+.dbg-watch h2 { display: flex; align-items: center; gap: var(--s-2); }
+.dbg-watch .hint { font-size: 12px; color: var(--text-3); }
+.wt { border-collapse: collapse; font-family: var(--font-mono); font-size: 11.5px; width: 100%; }
+.wt th { font-size: 10px; font-weight: 700; color: var(--text-3); text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; cursor: pointer; }
+.wt th.col.on { color: var(--brand-strong); background: var(--brand-soft); border-radius: 6px 6px 0 0; }
+.wt td { padding: 5px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; color: var(--text-2); }
+.wt td.lab { color: var(--text-1); font-family: var(--font-sans); font-size: 12px; }
+.wt td.lab .role { color: var(--cyan); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; margin-right: 6px; }
+.wt td.lab .x { color: var(--text-3); cursor: pointer; margin-left: 8px; } .wt td.lab .x:hover { color: var(--red); }
+.wt td.chg { color: var(--green); font-weight: 600; background: var(--green-soft); }
+.wt td.chg.neg { color: var(--red); background: var(--red-soft); }
+.wt td.future { color: var(--text-3); }
+.wt td.on, .wt th.on { box-shadow: inset 0 -2px 0 var(--brand-strong); }
+.step.future { opacity: .32; }
+.step.future .plain { display: none; }
+.st-row .wat, .drow .wat { font-size: 10px; color: var(--text-3); cursor: pointer; margin-left: 8px; opacity: 0; }
+.st-row:hover .wat, .drow:hover .wat { opacity: 1; } .st-row .wat:hover, .drow .wat:hover { color: var(--brand-strong); }
 .story { background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s-4) var(--s-5); margin-bottom: var(--s-4); }
 .story .h { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .09em; color: var(--text-3); margin-bottom: 6px; }
 .story .lead { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-1); line-height: 1.45; }
@@ -1375,6 +1397,7 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
 .simple #dbgBanner .explain, .simple #dbgBanner .dbg-note { display: none; }
 .simple .cu-roll, .simple #dbgUp, .simple #dbgOver { display: none; }
 .simple .dhead .lam.editable, .simple .drow .old.editable { text-decoration: none; cursor: default; pointer-events: none; }
+.dhead .wat { opacity: 0; } .dcard:hover .dhead .wat { opacity: 1; }
 .step .plain { display: none; } .simple .step .plain { display: block; }
 .step.d2 .plain { padding-left: 84px; } .step.d3 .plain { padding-left: 108px; } .step.d4 .plain { padding-left: 132px; }
 
@@ -1728,6 +1751,16 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
     </div>
     <div id="dbgStory"></div>
     <div id="dbgBanner"></div>
+    <div class="dbg-run" id="dbgRun">
+      <span class="lbl">Run</span>
+      <button class="btn ghost sm" id="runStart" title="rewind to before the first step">⏮ from start</button>
+      <button class="btn ghost sm" id="runStep" title="reveal the next step (j)">⏵ step</button>
+      <button class="btn ghost sm" id="runFail" title="run until the step that fails">⏭ to failure</button>
+      <button class="btn ghost sm" id="runChange" title="run until a watched value changes">⏭ until a watched value changes</button>
+      <button class="btn ghost sm" id="runEnd" title="reveal everything">⏭ to end</button>
+      <span class="cur" id="runCur"></span>
+    </div>
+    <div class="card dbg-watch" id="dbgWatch"></div>
     <div class="dbg-stage hidden" id="dbgStage">
       <span class="lbl">What if</span><span id="dbgMuts"></span>
       <span class="spacer"></span>
@@ -3845,6 +3878,122 @@ document.querySelectorAll('.ex-chip[data-ex]').forEach(c => c.addEventListener('
 // Fetches a Trace (every instruction and CPI with what it changed) and renders
 // it as a tree + a detail pane + the logs, with the failing step pinpointed.
 let trace = null, dbgSel = -1, dbgSigCur = '';
+let dbgWatch = [];        // { address, field: string|null, label, role }
+let dbgCursor = null;     // null = everything revealed; else index of the last revealed top-level step (-1 = before start)
+
+// The value of a watched item after each top-level step, plus the value before
+// step 0. Reads diffs first (exact before/after), then per-step state, and
+// carries the last known value forward otherwise.
+function timeline(item) {
+  const tops = trace.steps.filter(s => s.depth === 1);
+  const vals = []; let cur = null, start = null;
+  tops.forEach(s => {
+    const d = (s.diffs || []).find(x => x.address === item.address);
+    let v = null;
+    if (d) {
+      if (item.field) { const f = d.fields.find(f => f.name === item.field); if (f) { if (start === null && cur === null) start = f.before; v = f.after; } }
+      else { if (start === null && cur === null) start = String(d.lamports_before); v = String(d.lamports_after); }
+    }
+    if (v === null) {
+      const st = (s.state || []).find(x => x.address === item.address);
+      if (st) v = item.field ? ((st.fields || []).find(f => f.name === item.field)?.value ?? null) : String(st.lamports);
+    }
+    if (v !== null) { if (start === null && cur === null) start = v; cur = v; }
+    vals.push(cur);
+  });
+  return { start, vals, tops };
+}
+function fmtWatch(item, v) {
+  if (v == null) return '?';
+  if (!item.field) return fmtSol(Number(v));
+  if (item.field === 'amount' && item.mint) return tokenAmt(v, item.mint);
+  return /^-?\d+$/.test(v) ? fmt(v) : v;
+}
+function addWatch(item) {
+  const key = x => x.address + ':' + (x.field || '');
+  if (dbgWatch.some(x => key(x) === key(item))) return;
+  dbgWatch.push(item); renderWatch();
+}
+function renderWatch() {
+  const box = $('dbgWatch');
+  if (!trace) { box.innerHTML = ''; return; }
+  const tops = trace.steps.filter(s => s.depth === 1);
+  const rows = dbgWatch.map((item, r) => {
+    const tl = timeline(item);
+    let prev = tl.start;
+    const cells = tl.vals.map((v, k) => {
+      const future = dbgCursor !== null && k > dbgCursor;
+      const changed = !future && v != null && prev != null && v !== prev;
+      let cls = future ? 'future' : changed ? 'chg' : '';
+      if (changed && /^-?\d+$/.test(v) && /^-?\d+$/.test(prev) && BigInt(v) < BigInt(prev)) cls += ' neg';
+      if (!future) prev = v;
+      const on = dbgCursor !== null ? k === dbgCursor : tops[k] && trace.steps[dbgSel] && tops[k].index === trace.steps[dbgSel].index;
+      return `<td class="${cls}${on ? ' on' : ''}" data-k="${k}">${future ? '?' : esc(fmtWatch(item, v))}</td>`;
+    }).join('');
+    return `<tr><td class="lab">${item.role ? `<span class="role">${esc(item.role)}</span>` : ''}${copyPill(item.address)} ${item.field ? '<b>' + esc(item.field) + '</b>' : 'SOL balance'}<span class="x" data-r="${r}" title="stop watching">✕</span></td><td>${esc(fmtWatch(item, tl.start))}</td>${cells}</tr>`;
+  }).join('');
+  const head = `<tr><th>watching</th><th>start</th>${tops.map((s, k) => `<th class="col${(dbgCursor !== null ? k === dbgCursor : trace.steps[dbgSel] && s.index === trace.steps[dbgSel].index) ? ' on' : ''}" data-k="${k}" title="${esc(s.name || s.program)}">${k}</th>`).join('')}</tr>`;
+  box.innerHTML = `<h2>Watch <span class="count">${dbgWatch.length}</span> <span class="hint">${dbgWatch.length ? 'one column per step · green = changed here · click a column to jump' : 'pin a balance or a field from any step (hover a value → watch) and see it change step by step'}</span></h2>` +
+    (dbgWatch.length ? `<table class="wt">${head}${rows}</table>` : '');
+  box.querySelectorAll('.x').forEach(x => x.addEventListener('click', () => { dbgWatch.splice(Number(x.dataset.r), 1); renderWatch(); }));
+  box.querySelectorAll('[data-k]').forEach(c => c.addEventListener('click', ev => { if (ev.target.closest('.addr-pill')) return; const k = Number(c.dataset.k); const s = tops[k]; if (!s) return; if (dbgCursor !== null && k > dbgCursor) dbgCursor = k; selectStep(trace.steps.indexOf(s)); }));
+  wireCopy(box);
+}
+// Default watches: the sender's SOL, and token accounts it owns that changed.
+function defaultWatches(tr) {
+  dbgWatch = [];
+  const you = tr.fee_payer || '';
+  if (you) dbgWatch.push({ address: you, field: null, label: 'sender', role: 'sender' });
+  // Then the token accounts that moved the most, whoever owns them.
+  const moves = {};
+  tr.steps.filter(s => s.depth === 1).forEach(s => (s.diffs || []).forEach(d => {
+    const amt = d.fields.find(f => f.name === 'amount' && f.type === 'u64');
+    if (!amt) return;
+    const st = (s.state || []).find(x => x.address === d.address);
+    const mint = (st?.fields || []).find(f => f.name === 'mint')?.value || '';
+    const owner = (st?.fields || []).find(f => f.name === 'owner')?.value || '';
+    const delta = BigInt(amt.after) - BigInt(amt.before);
+    const abs = delta < 0n ? -delta : delta;
+    const cur = moves[d.address] || { abs: 0n, mint, role: st?.role || (owner === you ? 'your tokens' : ''), owner };
+    if (abs > cur.abs) cur.abs = abs;
+    moves[d.address] = cur;
+  }));
+  Object.entries(moves).sort((a, b) => (b[1].abs > a[1].abs ? 1 : b[1].abs < a[1].abs ? -1 : 0)).slice(0, 4)
+    .forEach(([address, m]) => dbgWatch.push({ address, field: 'amount', mint: m.mint, role: m.role }));
+}
+
+// Cursor: which top-level steps are "reached". Rows past it grey out, watch
+// cells past it show '?'.
+function applyCursor() {
+  const tops = trace.steps.filter(s => s.depth === 1);
+  $('dbgTree').querySelectorAll('.step').forEach(n => {
+    const s = trace.steps[Number(n.dataset.i)];
+    n.classList.toggle('future', dbgCursor !== null && s.index > dbgCursor);
+  });
+  const at = dbgCursor === null ? 'all steps shown' : dbgCursor < 0 ? 'before step 0 — nothing has run yet' : `stopped after step <b>${dbgCursor}</b> of ${tops.length}`;
+  $('runCur').innerHTML = at;
+  $('runChange').disabled = dbgWatch.length === 0;
+  renderWatch();
+}
+function runTo(k) {
+  const tops = trace.steps.filter(s => s.depth === 1);
+  dbgCursor = Math.max(-1, Math.min(k, tops.length - 1));
+  if (dbgCursor >= 0) selectStep(trace.steps.indexOf(tops[dbgCursor])); else { dbgSel = -1; $('dbgTree').querySelectorAll('.step').forEach(n => n.classList.remove('on')); $('dbgDetail').innerHTML = '<div class="dbg-empty">Nothing has run yet. Press <b>step</b> (or <kbd>j</kbd>) to run the first instruction.</div>'; }
+  applyCursor();
+}
+$('runStart').addEventListener('click', () => runTo(-1));
+$('runStep').addEventListener('click', () => runTo((dbgCursor === null ? -1 : dbgCursor) + 1));
+$('runEnd').addEventListener('click', () => { dbgCursor = null; applyCursor(); });
+$('runFail').addEventListener('click', () => { if (trace.failed_step == null) { runTo(1e9); return; } runTo(trace.steps[trace.failed_step].index); });
+$('runChange').addEventListener('click', () => {
+  const from = dbgCursor === null ? -1 : dbgCursor;
+  const tops = trace.steps.filter(s => s.depth === 1);
+  for (const item of dbgWatch) {
+    const tl = timeline(item); let prev = from < 0 ? tl.start : tl.vals[from];
+    for (let k = from + 1; k < tops.length; k++) { const v = tl.vals[k]; if (v != null && prev != null && v !== prev) { runTo(k); return; } if (v != null) prev = v; }
+  }
+  runTo(1e9);
+});
 let dbgMode = (() => { try { return localStorage.getItem('svmscope.dbgMode') || 'simple'; } catch { return 'simple'; } })();
 const SYS_ID = '11111111111111111111111111111111', CB_ID = 'ComputeBudget111111111111111111111111111111';
 const TOKEN_IDS = ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'];
@@ -4188,6 +4337,8 @@ function renderTrace(tr) {
     `<div class="r">${progChip(p)}<div class="bar" style="width:${Math.max(2, c / max * 100)}%"></div><span class="n">${fmt(c)} CU</span></div>`).join('') : '';
   wireCopy($('dbgCu'));
   $('dbgTree').classList.toggle('top-only', $('dbgTopOnly').checked);
+  defaultWatches(tr);
+  dbgCursor = null;
 
   // Open on the failing step; on success, on the top-level step that changed
   // the most accounts, so the first screen shows the transaction's real work
@@ -4199,6 +4350,7 @@ function renderTrace(tr) {
     if (first == null) first = 0;
   }
   selectStep(first);
+  applyCursor();
 }
 
 // Navigation: parent step, or the next step that is not inside this one.
@@ -4223,6 +4375,7 @@ function selectStep(i) {
   if (!trace || i < 0 || i >= trace.steps.length) return;
   dbgSel = i;
   const s = trace.steps[i];
+  if (dbgCursor !== null && s.index > dbgCursor) { dbgCursor = s.index; }
   $('dbgTree').querySelectorAll('.step').forEach(n => n.classList.toggle('on', Number(n.dataset.i) === i));
   const row = $('dbgTree').querySelector(`.step[data-i="${i}"]`);
   if (row) {
@@ -4234,6 +4387,7 @@ function selectStep(i) {
 
   // Detail pane.
   const isFail = trace.failed_step === i;
+  const byAddrAll = Object.fromEntries((s.state || []).map(x => [x.address, x]));
   const open = dbgMode === 'expert' ? ' open' : '';
   const head = `<div class="card"><h2>${progChip(s.program)}${s.name ? `<span class="ixname">${esc(s.name)}</span>` : ''}</h2>
     <div class="dbg-plain">${esc(plainStep(s))}</div>
@@ -4259,12 +4413,14 @@ function selectStep(i) {
         const old = numeric
           ? `<span class="old editable" data-addr="${esc(d.address)}" data-field="${esc(f.name)}" data-val="${esc(f.before)}" title="click to change the value before this step">${esc(f.before)}</span>`
           : `<span class="old">${esc(f.before)}</span>`;
+        const wat = `<span class="wat" data-addr="${esc(d.address)}" data-field="${esc(f.name)}" data-role="" data-mint="${esc(((byAddrAll[d.address]?.fields || []).find(x => x.name === 'mint') || {}).value || '')}">👁 watch</span>`;
         return `<div class="drow"><span class="fname">${esc(f.name)} <span class="f-off">${esc(f.type)}</span></span>
-        <span class="fv">${old}<span class="arr">→</span><span class="new">${esc(f.after)}</span></span></div>`;
+        <span class="fv">${old}<span class="arr">→</span><span class="new">${esc(f.after)}</span>${wat}</span></div>`;
       }).join('');
       const raw = d.raw_data_changed && !d.fields.length ? '<div class="drow"><span class="fname">data</span><span class="fv"><span class="new">changed (layout not decoded)</span></span></div>' : '';
       const lamEdit = `<span class="lam editable" data-addr="${esc(d.address)}" data-lamports="${d.lamports_before}" title="click to change the balance before this step">${lam || (dbgMode === 'expert' ? 'set balance' : '')}</span>`;
-      return `<div class="dcard"><div class="dhead">${copyPill(d.address)}${progPill(d.owner)}${lamEdit}</div>${rows}${raw}</div>`;
+      const watBal = `<span class="wat" data-addr="${esc(d.address)}" data-field="" data-role="" title="watch this account's SOL balance">👁 watch balance</span>`;
+      return `<div class="dcard"><div class="dhead">${copyPill(d.address)}${progPill(d.owner)}${watBal}${lamEdit}</div>${rows}${raw}</div>`;
     }).join('')}</div></div>`
     : (s.depth === 1 && s.state_known ? `<div class="card"><div class="dbg-empty">this step changed no account state</div></div>` : '');
   $('dbgDetail').innerHTML = head + diffs;
@@ -4297,6 +4453,7 @@ function selectStep(i) {
     const box = $('dbgLogs');
     box.scrollTop = Math.max(0, lines[a].offsetTop - box.offsetTop - box.clientHeight / 3);
   }
+  applyCursor();
 }
 
 // Below the step detail: the accounts as they stand, the events it emitted,
@@ -4312,7 +4469,8 @@ function renderInspector(s) {
       const chg = changedFields.has(a.address + ':' + f.name);
       const ed = f.editable && /^(u|i)(8|16|32|64|128)$|^bool$/.test(f.type)
         ? `<span class="ed" data-addr="${esc(a.address)}" data-field="${esc(f.name)}" data-val="${esc(f.value)}">edit</span>` : '<span></span>';
-      return `<div class="st-row${chg ? ' changed' : ''}"><span class="n">${esc(f.name)}<span class="ty">${esc(f.type)}</span></span><span class="v">${esc(f.value)}</span>${ed}</div>`;
+      const wat = `<span class="wat" data-addr="${esc(a.address)}" data-field="${esc(f.name)}" data-role="${esc(a.role || '')}" data-mint="${esc((a.fields.find(x => x.name === 'mint') || {}).value || '')}">👁 watch</span>`;
+      return `<div class="st-row${chg ? ' changed' : ''}"><span class="n">${esc(f.name)}<span class="ty">${esc(f.type)}</span></span><span class="v">${esc(f.value)}${wat}</span>${ed}</div>`;
     }).join('') : `<div class="st-empty">${a.exists ? (a.data_len ? `${fmt(a.data_len)} bytes, layout not decoded` : 'no data') : 'account does not exist'}</div>`;
     return `<details class="st-acct"${a.changed ? ' open' : ''}>
       <summary>${a.role ? `<span class="role">${esc(a.role)}</span>` : '<span class="role" style="color:var(--text-3)">account</span>'}${copyPill(a.address)}${a.exists ? progPill(a.owner) : ''}${a.type_name ? `<span class="tn">${esc(a.type_name)}</span>` : ''}${a.changed ? '<span class="chg">changed</span>' : ''}<span class="lam">${a.exists ? fmtSol(a.lamports) : ''}</span></summary>
@@ -4418,6 +4576,12 @@ function renderInspector(s) {
   });
 }
 
+$('dbgDetail').addEventListener('click', ev => {
+  const w = ev.target.closest('.wat'); if (!w) return;
+  addWatch({ address: w.dataset.addr, field: w.dataset.field || null, role: w.dataset.role || '', mint: w.dataset.mint || '' });
+  const s = trace.steps[dbgSel]; const idx = trace.steps.findIndex(x => x === s);
+  applyCursor();
+});
 $('dbgBack').addEventListener('click', () => {
   history.pushState({}, '', '/');
   $('debug').classList.add('hidden');
@@ -4436,8 +4600,8 @@ document.addEventListener('keydown', e => {
   if (el && /INPUT|SELECT|TEXTAREA/.test(el.tagName)) return;
   const topOnly = $('dbgTopOnly').checked;
   const next = (dir) => { let i = dbgSel + dir; while (trace && i >= 0 && i < trace.steps.length && topOnly && trace.steps[i].depth > 1) i += dir; selectStep(i); };
-  if (e.key === 'j') { e.preventDefault(); next(1); }
-  else if (e.key === 'k') { e.preventDefault(); next(-1); }
+  if (e.key === 'j') { e.preventDefault(); if (dbgCursor !== null) runTo(dbgCursor + 1); else next(1); }
+  else if (e.key === 'k') { e.preventDefault(); if (dbgCursor !== null) runTo(dbgCursor - 1); else next(-1); }
   else if (e.key === 'u') { e.preventDefault(); stepUp(); }
   else if (e.key === 'o') { e.preventDefault(); stepOver(); }
   else if (e.key === 'f' && trace && trace.failed_step != null) { e.preventDefault(); selectStep(trace.failed_step); }
