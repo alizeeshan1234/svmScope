@@ -263,6 +263,22 @@ fn enrich_with(
         TOKEN | TOKEN_2022 | SYSTEM | COMPUTE_BUDGET | ATA | MEMO | MEMO_V1
     );
 
+    // Anchor's `emit_cpi!` invokes the program itself with the event bytes,
+    // prefixed by a fixed 8-byte "event CPI" discriminator. Name it so the tree
+    // says what it is instead of `?`.
+    const ANCHOR_EVENT_CPI: [u8; 8] = [0xe4, 0x45, 0xa5, 0x2e, 0x51, 0xcb, 0x9a, 0x1d];
+    if data.len() >= 8 && data[..8] == ANCHOR_EVENT_CPI {
+        let accounts = addresses
+            .into_iter()
+            .enumerate()
+            .map(|(i, address)| IxAccount {
+                name: (i == 0).then(|| "Event Authority".to_string()),
+                address,
+            })
+            .collect();
+        return (Some("Emit Event".into()), vec![], accounts);
+    }
+
     // Name + args + per-position account names.
     let (name, args, names): (Option<String>, Vec<IxArg>, Vec<Option<String>>) = if is_native {
         let name = match program {

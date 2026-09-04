@@ -46,6 +46,49 @@ fn b64_decode(s: &str) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+/// Process-wide cache of program ELFs, keyed by programdata address and the
+/// slot it was last upgraded at. Program binaries are the largest thing a replay
+/// downloads (Jupiter alone is over a megabyte) and they change only on upgrade,
+/// so one 45-byte header fetch per program replaces the full download whenever
+/// the upgrade slot is unchanged.
+type ElfCache = HashMap<(String, u64), std::sync::Arc<Vec<u8>>>;
+static ELF_CACHE: std::sync::LazyLock<std::sync::Mutex<ElfCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+const ELF_CACHE_MAX_ENTRIES: usize = 256;
+
+/// The ELF inside an upgradeable program's programdata account, served from
+/// [`ELF_CACHE`] when the account's upgrade slot has not changed.
+fn fetch_programdata_elf_cached(client: &RpcClient, pd_addr: &str) -> Option<Vec<u8>> {
+    // Header only: [0..4] variant, [4..12] last-upgrade slot, [12..45] authority.
+    let header: serde_json::Value = client
+        .send(
+            RpcRequest::GetAccountInfo,
+            json!([pd_addr, { "encoding": "base64", "commitment": "confirmed", "dataSlice": { "offset": 0, "length": 45 } }]),
+        )
+        .ok()?;
+    let head = b64_decode(header["value"]["data"][0].as_str()?);
+    let slot = head
+        .get(4..12)
+        .and_then(|b| b.try_into().ok())
+        .map(u64::from_le_bytes)?;
+    let key = (pd_addr.to_string(), slot);
+    if let Ok(cache) = ELF_CACHE.lock() {
+        if let Some(elf) = cache.get(&key) {
+            return Some(elf.as_ref().clone());
+        }
+    }
+    let elf = fetch_account_data(client, pd_addr)
+        .filter(|d| d.len() > 45)
+        .map(|d| d[45..].to_vec())?;
+    if let Ok(mut cache) = ELF_CACHE.lock() {
+        if cache.len() >= ELF_CACHE_MAX_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(key, std::sync::Arc::new(elf.clone()));
+    }
+    Some(elf)
+}
+
 /// Fetch a single account's raw data via getAccountInfo.
 fn fetch_account_data(client: &RpcClient, address: &str) -> Option<Vec<u8>> {
     let resp: serde_json::Value = client
@@ -225,9 +268,7 @@ fn fetch_loaded(client: &RpcClient, account_keys: &[String]) -> Result<LoadedAcc
                 if prog.len() >= 36 {
                     let pd_bytes: [u8; 32] = prog[4..36].try_into().unwrap();
                     let pd_addr = Address::from(pd_bytes);
-                    fetch_account_data(client, &pd_addr.to_string())
-                        .filter(|d| d.len() > 45)
-                        .map(|d| d[45..].to_vec())
+                    fetch_programdata_elf_cached(client, &pd_addr.to_string())
                 } else {
                     None
                 }

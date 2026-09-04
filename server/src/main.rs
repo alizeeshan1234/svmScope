@@ -584,7 +584,7 @@ async fn trace_handler(
         tokio::task::spawn_blocking(move || -> Result<svmscope::Trace, svmscope::Error> {
             let scope = Scope::new(url);
             let mut replay = match (req.signature, req.transaction) {
-                (Some(sig), _) => scope.replay(&sig)?,
+                (Some(sig), _) => scope.replay_at_slot(&sig)?,
                 (None, Some(b64)) => scope.preflight(&b64)?,
                 (None, None) => unreachable!("validated above"),
             };
@@ -604,14 +604,42 @@ async fn trace_handler(
 }
 
 /// GET /trace/{signature} — the plain trace, cacheable, for share links.
+/// Traces of landed transactions, kept for hours so a shared `/debug/<sig>`
+/// link opens instantly long after the short response cache has expired. A
+/// landed transaction's as-it-happened trace does not change, so the only
+/// reason to expire is memory.
+type TraceStore = std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<String>)>;
+static TRACE_STORE: std::sync::LazyLock<std::sync::Mutex<TraceStore>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+const TRACE_STORE_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+const TRACE_STORE_MAX: usize = 300;
+
 async fn trace_get_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
-) -> Result<Json<svmscope::Trace>, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::response::IntoResponse;
+    let json_response = |body: std::sync::Arc<String>| {
+        (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            body.as_str().to_owned(),
+        )
+            .into_response()
+    };
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let key = format!("{}|{}", signature, url);
+    let hit = TRACE_STORE.lock().ok().and_then(|store| {
+        store
+            .get(&key)
+            .filter(|(at, _)| at.elapsed() < TRACE_STORE_TTL)
+            .map(|(_, v)| v.clone())
+    });
+    if let Some(body) = hit {
+        return Ok(json_response(body));
+    }
     let result =
         tokio::task::spawn_blocking(move || -> Result<svmscope::Trace, svmscope::Error> {
-            Scope::new(url).replay(&signature)?.trace(&[])
+            Scope::new(url).replay_at_slot(&signature)?.trace(&[])
         })
         .await
         .map_err(|e| {
@@ -620,7 +648,22 @@ async fn trace_get_handler(
                 format!("task error: {e}"),
             )
         })?;
-    result.map(Json).map_err(lib_err)
+    let trace = result.map_err(lib_err)?;
+    let body = std::sync::Arc::new(
+        serde_json::to_string(&trace)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?,
+    );
+    if let Ok(mut store) = TRACE_STORE.lock() {
+        if store.len() >= TRACE_STORE_MAX {
+            let now = std::time::Instant::now();
+            store.retain(|_, (at, _)| now.duration_since(*at) < TRACE_STORE_TTL / 2);
+            if store.len() >= TRACE_STORE_MAX {
+                store.clear();
+            }
+        }
+        store.insert(key, (std::time::Instant::now(), body.clone()));
+    }
+    Ok(json_response(body))
 }
 
 /// POST body for IDL-assisted decoding / instruction listing.

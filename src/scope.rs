@@ -163,16 +163,38 @@ impl Scope {
     }
 
     /// A program's on-chain IDL, fetched once and cached (`None` = has none).
+    /// Two layers: per-`Scope` (this request) and process-wide with a 10-minute
+    /// TTL, so a server handling many requests for the same programs fetches
+    /// each IDL once, not once per request.
     fn idl_for(&self, program: &str) -> Option<serde_json::Value> {
+        type IdlCache = HashMap<String, (Instant, Option<serde_json::Value>)>;
+        static GLOBAL: std::sync::LazyLock<Mutex<IdlCache>> =
+            std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+        const TTL: Duration = Duration::from_secs(600);
+
         let mut cache = self.idl_cache.lock().unwrap();
-        cache
-            .entry(program.to_string())
-            .or_insert_with(|| {
-                Address::from_str(program)
-                    .ok()
-                    .and_then(|a| idl::fetch_idl_json(&self.client, a))
-            })
-            .clone()
+        if let Some(v) = cache.get(program) {
+            return v.clone();
+        }
+        if let Ok(g) = GLOBAL.lock() {
+            if let Some((at, v)) = g.get(program) {
+                if at.elapsed() < TTL {
+                    cache.insert(program.to_string(), v.clone());
+                    return v.clone();
+                }
+            }
+        }
+        let fetched = Address::from_str(program)
+            .ok()
+            .and_then(|a| idl::fetch_idl_json(&self.client, a));
+        cache.insert(program.to_string(), fetched.clone());
+        if let Ok(mut g) = GLOBAL.lock() {
+            if g.len() >= 512 {
+                g.clear();
+            }
+            g.insert(program.to_string(), (Instant::now(), fetched.clone()));
+        }
+        fetched
     }
 
     /// Decode a transaction: the full CPI tree with IDL-named instructions,
@@ -1219,6 +1241,15 @@ impl Replay {
         use solana_account::Account;
         use std::collections::HashMap;
 
+        // A prefix replay per instruction: bound it so a pathological 60-instruction
+        // transaction can't turn one request into a minute of CPU.
+        const MAX_TRACE_INSTRUCTIONS: usize = 64;
+        let n_ix = self.ctx.transaction().message.instructions().len();
+        if n_ix > MAX_TRACE_INSTRUCTIONS {
+            return Err(Error::InvalidSpec(format!(
+                "transaction has {n_ix} instructions; the debugger traces up to {MAX_TRACE_INSTRUCTIONS}"
+            )));
+        }
         let runs = self.ctx.trace_raw(mutations)?;
         let idls = self.ctx.idl_map();
         let keys = self.ctx.message_account_keys();
@@ -1839,7 +1870,9 @@ fn explain_error(
     }
 
     // Fall back to a friendly reading of the common runtime errors.
-    let (title, detail) = if raw.contains("AccountNotFound") {
+    let (title, detail) = if let Some(named) = runtime_error(raw) {
+        named
+    } else if raw.contains("AccountNotFound") {
         ("Account not found", "An account the transaction needs doesn't exist (an account with zero lamports is treated as deleted).")
     } else if raw.contains("InsufficientFunds") {
         (
@@ -1889,6 +1922,46 @@ fn explain_error(
         program,
         raw: raw.clone(),
     })
+}
+
+/// Plain-language readings of the runtime's own `InstructionError` /
+/// `TransactionError` variants, matched on the formatted error string.
+fn runtime_error(raw: &str) -> Option<(&'static str, &'static str)> {
+    const TABLE: &[(&str, &str, &str)] = &[
+        ("ProgramFailedToComplete", "Program failed to complete", "The program aborted: a panic, an out-of-bounds access, or an exceeded compute budget. Check the last log lines of the failing step."),
+        ("ComputationalBudgetExceeded", "Compute budget exceeded", "The transaction used more compute units than it requested. Raise the compute unit limit."),
+        ("InvalidAccountData", "Invalid account data", "An account's data was not what the program expected: wrong layout, uninitialized, or owned by a different program."),
+        ("AccountDataTooSmall", "Account data too small", "An account is smaller than the program requires."),
+        ("MissingRequiredSignature", "Missing required signature", "An account that must sign did not."),
+        ("IncorrectProgramId", "Incorrect program id", "An account is owned by a different program than expected."),
+        ("InvalidArgument", "Invalid argument", "The program rejected an instruction argument."),
+        ("InvalidInstructionData", "Invalid instruction data", "The instruction data did not decode."),
+        ("PrivilegeEscalation", "Privilege escalation", "A CPI tried to use an account as a signer or writable when the caller could not."),
+        ("ExternalAccountLamportSpend", "External account lamport spend", "A program debited lamports from an account it does not own."),
+        ("ReadonlyLamportChange", "Read-only lamport change", "A program changed the balance of an account passed as read-only."),
+        ("ReadonlyDataModified", "Read-only data modified", "A program wrote to an account passed as read-only."),
+        ("ExecutableDataModified", "Executable data modified", "A program tried to write to an executable account."),
+        ("AccountBorrowFailed", "Account borrow failed", "The same account was borrowed mutably twice in one instruction."),
+        ("UnbalancedInstruction", "Unbalanced instruction", "Lamports were created or destroyed: the sums before and after differ."),
+        ("MaxSeedLengthExceeded", "Max seed length exceeded", "A PDA seed is longer than 32 bytes."),
+        ("InvalidSeeds", "Invalid seeds", "The seeds do not derive the given program address."),
+        ("InvalidRealloc", "Invalid realloc", "The account resize was rejected."),
+        ("AccountAlreadyInitialized", "Account already initialized", "The account was already initialized."),
+        ("UninitializedAccount", "Uninitialized account", "The account has not been initialized."),
+        ("NotEnoughAccountKeys", "Not enough account keys", "The instruction was given fewer accounts than it needs."),
+        ("InsufficientFundsForRent", "Insufficient funds for rent", "An account would be left below the rent-exempt minimum."),
+        ("InsufficientFundsForFee", "Insufficient funds for fee", "The fee payer cannot cover the transaction fee."),
+        ("BlockhashNotFound", "Blockhash not found", "The transaction's blockhash is not recent."),
+        ("AlreadyProcessed", "Already processed", "This exact transaction was already executed."),
+        ("TooManyAccountLocks", "Too many account locks", "The transaction references more accounts than allowed."),
+        ("MaxLoadedAccountsDataSizeExceeded", "Loaded accounts too large", "The accounts loaded exceed the requested data size limit."),
+        ("InvalidAddressLookupTableIndex", "Lookup table index invalid", "The transaction referenced an address lookup table entry that isn't active at this slot."),
+        ("AccountNotFound", "Account not found", "An account the transaction needs doesn't exist (an account with zero lamports is treated as deleted)."),
+    ];
+    TABLE
+        .iter()
+        .find(|(needle, _, _)| raw.contains(needle))
+        .map(|(_, t, d)| (*t, *d))
 }
 
 /// Error names for the native programs that have no IDL (System, SPL Token,

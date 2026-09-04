@@ -35,8 +35,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     if signature == "debug" {
         let sig = args
             .get(2)
-            .ok_or("usage: svmscope debug <signature> [--json]")?;
-        let replay = scope.replay(sig)?;
+            .ok_or("usage: svmscope debug <signature> [--json] [--now]")?;
+        // Landed transactions are traced as they happened: balances and the
+        // clock rewound to the transaction's slot (exact state when an archive
+        // is configured). `--now` traces against today's state instead.
+        let replay = if args.iter().any(|a| a == "--now") {
+            scope.replay(sig)?
+        } else {
+            scope.replay_at_slot(sig)?
+        };
         let trace = replay.trace(&[])?;
         if args.iter().any(|a| a == "--json") {
             println!("{}", serde_json::to_string_pretty(&trace)?);
