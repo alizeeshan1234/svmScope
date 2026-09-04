@@ -3976,7 +3976,16 @@ function renderTrace(tr) {
   wireCopy($('dbgCu'));
   $('dbgTree').classList.toggle('top-only', $('dbgTopOnly').checked);
 
-  selectStep(tr.failed_step != null ? tr.failed_step : 0);
+  // Open on the failing step; on success, on the top-level step that changed
+  // the most accounts, so the first screen shows the transaction's real work
+  // rather than a compute-budget instruction.
+  let first = tr.failed_step;
+  if (first == null) {
+    let best = -1;
+    tr.steps.forEach((s, i) => { const n = (s.diffs || []).length; if (s.depth === 1 && n > best) { best = n; first = i; } });
+    if (first == null) first = 0;
+  }
+  selectStep(first);
 }
 
 // Navigation: parent step, or the next step that is not inside this one.
