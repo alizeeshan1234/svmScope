@@ -39,6 +39,12 @@ fn token_ix(data: &[u8]) -> Option<&'static str> {
         16 => "Initialize Account 2",
         17 => "Sync Native",
         18 => "Initialize Account 3",
+        19 => "Initialize Multisig 2",
+        20 => "Initialize Mint 2",
+        21 => "Get Account Data Size",
+        22 => "Initialize Immutable Owner",
+        23 => "Amount To Ui Amount",
+        24 => "Ui Amount To Amount",
         _ => return None,
     })
 }
