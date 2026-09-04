@@ -1372,7 +1372,7 @@ details.tech > summary { cursor: pointer; font-size: 11px; font-weight: 700; tex
 details.tech > summary::-webkit-details-marker { display: none; }
 details.tech > summary::before { content: '▸ '; } details.tech[open] > summary::before { content: '▾ '; }
 .simple .dbg-keys { display: none; }
-.simple #dbgBanner .explain { display: none; }
+.simple #dbgBanner .explain, .simple #dbgBanner .dbg-note { display: none; }
 .simple .cu-roll, .simple #dbgUp, .simple #dbgOver { display: none; }
 .simple .dhead .lam.editable, .simple .drow .old.editable { text-decoration: none; cursor: default; pointer-events: none; }
 .step .plain { display: none; } .simple .step .plain { display: block; }
@@ -3969,7 +3969,19 @@ $('navDebug').addEventListener('click', () => {
   if (trace && dbgSigCur) { hideAllViews(); $('debug').classList.remove('hidden'); $('dbgLanding').classList.add('hidden'); $('dbgMain').classList.remove('hidden'); $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on'); history.pushState({ debug: dbgSigCur }, '', '/debug/' + encodeURIComponent(dbgSigCur)); }
   else showDbgLanding();
 });
-$('dbgGo').addEventListener('click', () => { const v = $('dbgInput').value.trim(); if (v) showDebug(v, true); });
+$('dbgGo').addEventListener('click', () => {
+  const v = $('dbgInput').value.trim();
+  if (!v) return;
+  let len = 0; try { len = bs58decode(v).length; } catch {}
+  if (len !== 64) {
+    $('dbgErr').textContent = len === 32
+      ? "That's an account or program address, not a transaction. Paste a transaction signature (about 88 characters), or open the address in Analyze to pick one of its transactions."
+      : "That doesn't look like a transaction signature. It should be about 88 characters of letters and digits, from an explorer or your wallet's history.";
+    $('dbgErr').classList.remove('hidden');
+    return;
+  }
+  showDebug(v, true);
+});
 $('dbgInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('dbgGo').click(); });
 $('dbgLanding').querySelectorAll('.ex a').forEach(a => a.addEventListener('click', () => { $('dbgInput').value = a.dataset.sig; showDebug(a.dataset.sig, true); }));
 let traceBase = null;      // the unmodified trace, for "what changed"
