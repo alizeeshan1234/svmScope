@@ -1350,6 +1350,8 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 .dbg-landing input { flex: 1; font-family: var(--font-mono); font-size: 13px; background: var(--bg-inset); color: var(--text-1); border: 1px solid var(--border-strong); border-radius: 8px; padding: 10px 12px; }
 .dbg-landing .ex { margin-top: 14px; font-size: 12px; color: var(--text-3); }
 .dbg-landing .ex a { color: var(--brand-strong); cursor: pointer; margin: 0 6px; }
+.dbg-progress { margin-top: 14px; font-size: 13px; color: var(--text-2); display: flex; align-items: center; justify-content: center; gap: 8px; }
+.dbg-err { margin-top: 14px; font-size: 13px; color: var(--red); background: var(--red-soft); border: 1px solid rgba(248,113,113,.3); border-radius: 8px; padding: 8px 12px; text-align: left; }
 .story { background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s-4) var(--s-5); margin-bottom: var(--s-4); }
 .story .h { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .09em; color: var(--text-3); margin-bottom: 6px; }
 .story .lead { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-1); line-height: 1.45; }
@@ -1711,6 +1713,8 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
       <h1>See exactly what a transaction did, step by step</h1>
       <p>Paste any Solana transaction signature. You get a plain-English account of what happened, which step failed and why, and you can change a value and run it again.</p>
       <div class="row"><input id="dbgInput" placeholder="transaction signature" spellcheck="false" autocomplete="off" /><button class="btn" id="dbgGo">Debug ⟶</button></div>
+      <div class="dbg-progress hidden" id="dbgProgress"><span class="spinner"></span><span id="dbgProgressText">reconstructing the transaction's world…</span></div>
+      <div class="dbg-err hidden" id="dbgErr"></div>
       <div class="ex">Try: <a data-sig="2LviLQLdKkV8cYma2TkxfAUcd4dtD32Ltvm4V62HCJ9NU4pUt1WjhrmqCAnf2NjMTc8mAQoLq2KykJXV1RP7V6po">a Jupiter swap</a> · <a data-sig="3PgGv3WCyJvufeBJZQiSYYsbKGAzSpRfJkPLn8ipSNyekBdY9G12hjPnpLMY8qBumvh9xUZDyHAVeo7Y52QqM3uy">a pump.fun buy</a> · <a data-sig="47ZqgUey7sWfQQr7h6c1q3pAka3yvs98dvms4yPhVCs6Px3syRF7kBES6w1zCLaya292PBuPQ7s9tE9FLHKQhR26">a failed sniper bot</a></div>
     </div>
     <div id="dbgMain" class="hidden">
@@ -4071,28 +4075,44 @@ function hideAllViews() {
 async function showDebug(sig, push) {
   if (sig !== dbgSigCur) { dbgMuts = []; traceBase = null; $('dbgCompare').innerHTML = ''; }
   dbgSigCur = sig;
+  // Load in place: the debugger page stays up with a progress line under the
+  // input, instead of the whole page going blank for the replay.
   hideAllViews();
-  const st = $('status'); st.className = 'status'; st.classList.remove('hidden');
-  st.innerHTML = '<span class="spinner"></span>tracing every instruction…';
+  $('debug').classList.remove('hidden');
+  $('dbgLanding').classList.remove('hidden');
+  $('dbgMain').classList.add('hidden');
+  $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on');
+  $('dbgInput').value = sig; $('sig').value = sig;
+  $('dbgErr').classList.add('hidden');
+  $('dbgProgress').classList.remove('hidden');
+  $('dbgGo').disabled = true;
+  const phases = ['fetching the transaction…', 'reconstructing the accounts and programs it touched…', 'replaying it instruction by instruction…', 'decoding every step…', 'almost there…'];
+  let ph = 0; const t0 = Date.now();
+  const tick = setInterval(() => { ph = Math.min(ph + 1, phases.length - 1); $('dbgProgressText').textContent = `${phases[ph]} (${Math.round((Date.now() - t0) / 1000)}s)`; }, 2500);
+  $('dbgProgressText').textContent = phases[0];
   if (push) history.pushState({ debug: sig }, '', '/debug/' + encodeURIComponent(sig));
   try {
     const res = await api('/trace/' + encodeURIComponent(sig) + clusterQ());
     if (!res.ok) throw new Error(await res.text());
     trace = await res.json();
   } catch (e) {
-    st.className = 'status err';
-    st.textContent = 'trace failed: ' + (e.message || e);
+    clearInterval(tick);
+    $('dbgProgress').classList.add('hidden'); $('dbgGo').disabled = false;
+    const msg = (e.message || String(e));
+    $('dbgErr').textContent = /not found|NotFound/i.test(msg) ? "Couldn't find that transaction. Check the signature, and that the cluster selector matches the network it was sent on."
+      : /upstream RPC/i.test(msg) ? 'The RPC behind the engine had trouble. Try again in a moment.'
+      : 'Could not trace this transaction: ' + msg;
+    $('dbgErr').classList.remove('hidden');
     return;
   }
-  st.classList.add('hidden');
-  $('debug').classList.remove('hidden');
+  clearInterval(tick);
+  $('dbgProgress').classList.add('hidden'); $('dbgGo').disabled = false;
   $('dbgLanding').classList.add('hidden');
   $('dbgMain').classList.remove('hidden');
-  $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on');
-  $('dbgInput').value = sig;
   renderTrace(trace);
   renderStage();
   setDbgMode(dbgMode);
+  window.scrollTo(0, 0);
 }
 
 function renderTrace(tr) {
