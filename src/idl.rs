@@ -6,7 +6,7 @@
 //! discriminators and account/argument specs, and decodes account data into
 //! named fields using the IDL's type definitions.
 //!
-//! The JSON itself is parsed once into the typed [`crate::idl_model`] and all
+//! The JSON itself is parsed once into the typed `idl_model` and all
 //! walking happens over that model; the `serde_json::Value` signatures below
 //! are the stable seam callers (and the public API) hold IDLs as.
 

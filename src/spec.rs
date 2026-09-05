@@ -462,10 +462,9 @@ mod tests {
 
     #[test]
     fn field_unchanged_needs_no_value_and_other_kinds_do() {
-        let a: AssertInput = serde_json::from_str(
-            r#"{"address":"X","kind":"field_unchanged","field":"authority"}"#,
-        )
-        .unwrap();
+        let a: AssertInput =
+            serde_json::from_str(r#"{"address":"X","kind":"field_unchanged","field":"authority"}"#)
+                .unwrap();
         match a.into_assert().unwrap().check {
             StateCheck::FieldUnchanged { name } => assert_eq!(name, "authority"),
             other => panic!("expected FieldUnchanged, got {other:?}"),

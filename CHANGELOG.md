@@ -74,6 +74,9 @@ All notable changes to svmscope are documented here. The format follows
 - **LiteSVM 0.16 / Agave 4.2** — `litesvm` bumped from 0.15.2 to 0.16 and
   `solana-client` from 4.1.1 to 4.2.1 to match. Build, clippy and the full test
   suite pass unchanged; a live mainnet replay reproduces on-chain compute.
+- **MSRV 1.91 → 1.93.** The Agave 4.2 `solana-syscalls` crate uses
+  `MaybeUninit::write_copy_of_slice`, stabilised in Rust 1.93; verified by
+  building and running the full suite on 1.93 (1.92 fails to compile).
 - **`spec::AssertInput::value` is now `Option<i64>`** so the `field_unchanged`
   kind can omit it. Every other kind still requires it and errors with
   `assert kind "…" needs a "value"` when missing; existing JSON suites are

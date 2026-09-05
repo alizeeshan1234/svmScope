@@ -1764,7 +1764,11 @@ impl AccountAssert {
 /// The raw bytes a decoded field occupies — for `coption-*` fields that is the
 /// 4-byte tag plus the payload, so a `None → Some(x)` flip counts as a change.
 pub(crate) fn field_bytes<'a>(data: &'a [u8], f: &crate::decode::Field) -> Result<&'a [u8]> {
-    let span = if f.ty.starts_with("coption-") { f.size + 4 } else { f.size };
+    let span = if f.ty.starts_with("coption-") {
+        f.size + 4
+    } else {
+        f.size
+    };
     f.offset
         .checked_add(span)
         .and_then(|end| data.get(f.offset..end))

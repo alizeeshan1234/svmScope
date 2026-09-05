@@ -11,7 +11,7 @@ cargo fmt --all --check     # CI enforces formatting
 cargo clippy --workspace --all-targets -- -D warnings   # CI enforces zero warnings
 ```
 
-The minimum supported Rust version is **1.91** (declared in `Cargo.toml` and
+The minimum supported Rust version is **1.93** (declared in `Cargo.toml` and
 checked in CI).
 
 Two integration tests exercise live submission and are `#[ignore]`d by
