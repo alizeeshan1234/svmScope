@@ -357,6 +357,9 @@ fn svm_from_loaded(loaded: &[(Address, Loaded)], features: &[FeatureToggle], slo
         match l {
             // A load failure here (malformed account, unloadable ELF) surfaces
             // through the replay result itself — a library must not print.
+            // Sysvar accounts (the Rent sysvar is always in the world, see
+            // `with_rent_sysvar`) refresh LiteSVM's sysvar cache on insert, so
+            // the runtime and programs read the cluster's parameters.
             Loaded::Data(a) => {
                 let _ = svm.set_account(*addr, a.clone());
             }
@@ -760,6 +763,55 @@ impl ReplayContext {
 /// (Only token accounts that existed pre-transaction appear in `preTokenBalances`,
 /// so restoring them is safe — it never resurrects an account the tx creates.)
 const SPL_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+/// The Rent sysvar. Always loaded with the world (see [`with_rent_sysvar`]) so
+/// the replay enforces the *cluster's* rent parameters, not LiteSVM's defaults.
+pub(crate) const SYSVAR_RENT: &str = "SysvarRent111111111111111111111111111111111";
+
+/// Add the Rent sysvar to a key list unless the transaction already references
+/// it. Mainnet lowered rent (6,333 lamports per byte-year at a 1.0 exemption
+/// threshold, versus the 3,480 × 2.0 default LiteSVM starts from), so an account
+/// created since then holds *less* than the default minimum: every
+/// `ConstraintRentExempt` check and every system-program rent check on such an
+/// account would fail in a replay of a transaction that succeeded on-chain.
+pub(crate) fn with_rent_sysvar(keys: &mut Vec<String>) {
+    if !keys.iter().any(|k| k == SYSVAR_RENT) {
+        keys.push(SYSVAR_RENT.to_string());
+    }
+}
+
+/// The rent parameters encoded in a Rent sysvar account (`u64` lamports per
+/// byte-year, `f64` exemption threshold, `u8` burn percent, little-endian).
+/// Test-only: production code loads the sysvar bytes verbatim and lets LiteSVM
+/// decode them.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RentParams {
+    pub(crate) lamports_per_byte_year: u64,
+    pub(crate) exemption_threshold: f64,
+    pub(crate) burn_percent: u8,
+}
+
+#[cfg(test)]
+impl RentParams {
+    /// The rent-exempt minimum for an account with `data_len` bytes of data.
+    pub(crate) fn minimum_balance(&self, data_len: usize) -> u64 {
+        const ACCOUNT_STORAGE_OVERHEAD: u64 = 128;
+        (((ACCOUNT_STORAGE_OVERHEAD + data_len as u64) * self.lamports_per_byte_year) as f64
+            * self.exemption_threshold) as u64
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn parse_rent(data: &[u8]) -> Option<RentParams> {
+    if data.len() < 17 {
+        return None;
+    }
+    Some(RentParams {
+        lamports_per_byte_year: u64::from_le_bytes(data[0..8].try_into().ok()?),
+        exemption_threshold: f64::from_le_bytes(data[8..16].try_into().ok()?),
+        burn_percent: data[16],
+    })
+}
 
 /// Pre-transaction token-account details, enough to rebuild a closed one.
 struct TokenInfo {
@@ -883,6 +935,7 @@ pub(crate) fn build_context(
             all_keys.push(l.account_key.to_string());
         }
     }
+    with_rent_sysvar(&mut all_keys);
     let (mut loaded, existing) = fetch_loaded(client, &all_keys)?;
 
     if !pre_state.is_empty() {
@@ -957,6 +1010,7 @@ pub(crate) fn build_context_at_slot(
             all_keys.push(l.account_key.to_string());
         }
     };
+    with_rent_sysvar(&mut all_keys);
     let (mut loaded, existing) = fetch_loaded_at_slot(archive, &all_keys, state_slot)?;
 
     if !pre_state.is_empty() {
@@ -1062,6 +1116,7 @@ pub(crate) fn preflight_context(
             all_keys.push(l.account_key.to_string());
         }
     }
+    with_rent_sysvar(&mut all_keys);
     let (loaded, _existing) = fetch_loaded(client, &all_keys)?;
     let slot = client.get_slot().ok();
     // Real wall-clock time for that slot — a pre-flight simulation should run
@@ -2252,6 +2307,57 @@ mod tests {
             editable: true,
             note: None,
         }
+    }
+
+    #[test]
+    fn rent_sysvar_from_the_loaded_world_replaces_litesvm_defaults() {
+        // Mainnet's post-reduction parameters: 6,333 / byte-year, threshold 1.0.
+        let mut data = Vec::new();
+        data.extend_from_slice(&6_333u64.to_le_bytes());
+        data.extend_from_slice(&1.0f64.to_le_bytes());
+        data.push(50);
+        let rent = parse_rent(&data).unwrap();
+        assert_eq!(rent.lamports_per_byte_year, 6_333);
+        assert_eq!(
+            rent.minimum_balance(165),
+            1_855_569,
+            "a token account's minimum on mainnet"
+        );
+        assert!(parse_rent(&[0u8; 5]).is_none());
+
+        let rent_addr = Address::from_str(SYSVAR_RENT).unwrap();
+        let loaded = vec![(
+            rent_addr,
+            Loaded::Data(Account {
+                lamports: 1_009_200,
+                data: data.clone(),
+                owner: Address::from_str("Sysvar1111111111111111111111111111111111111").unwrap(),
+                executable: false,
+                rent_epoch: 0,
+            }),
+        )];
+        let svm = svm_from_loaded(&loaded, &[], 0);
+        let stored = svm
+            .get_account(&rent_addr)
+            .expect("rent sysvar account in the world");
+        assert_eq!(parse_rent(&stored.data), Some(rent));
+        // The runtime-side cache took it too, not just the account bytes.
+        assert_eq!(svm.minimum_balance_for_rent_exemption(165), 1_855_569);
+        // Without it, LiteSVM's default (3,480 × 2.0) applies.
+        let default = svm_from_loaded(&[], &[], 0);
+        let default_rent = parse_rent(&default.get_account(&rent_addr).unwrap().data).unwrap();
+        assert_eq!(default_rent.minimum_balance(165), 2_039_280);
+
+        let mut keys = vec!["X".to_string(), SYSVAR_RENT.to_string()];
+        with_rent_sysvar(&mut keys);
+        assert_eq!(
+            keys.len(),
+            2,
+            "no duplicate when the tx already references it"
+        );
+        let mut keys = vec!["X".to_string()];
+        with_rent_sysvar(&mut keys);
+        assert_eq!(keys.last().map(String::as_str), Some(SYSVAR_RENT));
     }
 
     #[test]

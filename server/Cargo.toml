@@ -1,6 +1,6 @@
 [package]
 name = "svmscope-server"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 rust-version = "1.93"
 description = "HTTP API server over the svmscope engine — deployment infrastructure for the hosted UI, not a library artifact."

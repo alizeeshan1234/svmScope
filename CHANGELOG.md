@@ -4,6 +4,28 @@ All notable changes to svmscope are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] — 2026-09-05
+
+### Fixed
+
+- **Replays now enforce the cluster's rent parameters, not LiteSVM's defaults.**
+  Mainnet lowered rent to 6,333 lamports per byte-year at a 1.0 exemption
+  threshold; LiteSVM starts from the historical 3,480 × 2.0. Every account
+  created since the change therefore held *less* than the local minimum, so
+  Anchor `ConstraintRentExempt` checks and system-program rent checks on such
+  accounts failed in replays of transactions that succeeded on-chain (the
+  "rent-exempt drift" class seen on Raydium and Pump AMM). The Rent sysvar is
+  now loaded with every world — current-state, reconstructed, exact, pre-flight
+  — and frozen into fixtures, so offline replays enforce the same parameters.
+  On a fresh sample of 24 on-chain successes the reconstructed tier reproduces
+  16; every remaining miss is price, slippage or timestamp drift in current
+  account data, none are rent.
+
+### Added
+
+- `examples/fidelity_sweep.rs` — measure how many recent on-chain successes the
+  reconstructed tier reproduces, printing each miss with its decoded error.
+
 ## [0.4.0] — 2026-09-05
 
 ### Added
