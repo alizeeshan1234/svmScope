@@ -21,7 +21,7 @@ cargo add --dev svmscope
 
 ```toml
 [dev-dependencies]
-svmscope = "0.3"
+svmscope = "0.4"
 ```
 
 Then point it at a real transaction and replay it locally — no validator, no
@@ -176,7 +176,7 @@ initialize that state/PDA first and put its address in
 
 ```toml
 [dev-dependencies]
-svmscope = "0.3"
+svmscope = "0.4"
 serde_json = "1"
 solana-address = "2.6"
 solana-keypair = "3.1"

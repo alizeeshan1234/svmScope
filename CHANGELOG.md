@@ -4,6 +4,85 @@ All notable changes to svmscope are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-09-05
+
+### Added
+
+- **Replay at the transaction's own slot** — `Scope::replay_at_slot` (and
+  `replay_at(input, slot)` for a slot you choose). Two fidelity tiers, both
+  labelled on the result: *reconstructed* (free, default) loads current
+  accounts, rewinds SOL and SPL-token balances to their recorded
+  pre-transaction values and anchors the clock to the slot; *exact* (opt-in via
+  `Scope::with_archive`) loads accounts and program ELFs at the true slot from
+  an archive endpoint that actually honours the historical `slot` parameter.
+  Exact loads fetch at S-1 and patch the recorded pre-balances. Every replay
+  carries a `Fidelity` label so a drifted run is never mistaken for an exact
+  one; `Replay::certificate` returns a per-account provenance report
+  (`FidelityCertificate`, `AccountProvenance`).
+- **Step debugger** — `Replay::trace(&[Mutation])` unrolls a transaction into
+  pre-order `Step`s (top-level instructions and CPIs) with the decoded
+  instruction, touched accounts with decoded fields and roles, compute, its
+  slice of the logs, Anchor events (`DecodedEvent`), return data and, for
+  top-level steps, the exact before → after diff of every changed account.
+  The failing step is pinpointed with its error decoded. `Mutation::IxArg` /
+  `Mutation::IxData` edit an instruction argument via IDL re-encode, so a value
+  can be changed at any step and the trace re-run (`TraceDiff` compares the two
+  runs step by step). CLI: `svmscope debug <signature> [--json] [--now]`.
+- **Diagnose** — `Scope::diagnose` / `Diagnosis`: why a transaction failed and
+  how to fix it, leading with the meaning rather than the raw code. Curated
+  Anchor framework error map (exact names, no IDL needed), runtime and native
+  System / Token / ATA error names, a swap-context heuristic for unnamed
+  custom errors, codes shown in decimal and hex, and an honest
+  "custom error N, no IDL" fallback.
+- **Plain-English read-out** — a deterministic narrator (`Explanation`) that
+  describes what a transaction did and where it can break. No model, no API.
+- **Breaking-point scan** — `scan_breaking_points` / `ScanOptions` /
+  `BreakingPoint`: auto-discover every numeric threshold, discrete break
+  (closed or frozen accounts, authority changes, owner reassignment) and
+  schema-driven field edit that flips the outcome.
+- **Counterfactual search** — `Replay::find_threshold` (`Threshold`) finds the
+  balance or field value at which the outcome flips; `minimize_mutations`
+  finds the smallest set of changes that does.
+- **Invariant templates** — `Invariant`: named security properties evaluated
+  over replay state.
+- **Patch Lab** — `Replay::replace_program` and `compare_patch`
+  (`PatchComparison`) replay the same incident against the original and a
+  patched program ELF.
+- **Regression-test generation** — freeze an incident into a fixture plus a
+  scenario suite (`Replay::to_fixture`, `run_suite`, `verify`) so it becomes a
+  permanent, hermetic CI test.
+- **Pre-flight** — `Scope::preflight` / `preflight_tx` / `preflight_overview`
+  and `parse_unsigned_b64`: inspect an unsigned wallet message before signing,
+  with per-program compute (`compute_breakdown`) and account roles
+  (`AccountRole`, `PreflightIx`, `PreflightOverview`).
+- **Instruction names** — the remaining Token instructions (Token-2022
+  extensions, `GetAccountDataSize`, `InitializeImmutableOwner`) and Anchor
+  `emit_cpi` rows named "Emit Event"; runtime `InstructionError` names.
+- **Caches** — process-wide ELF cache keyed by (programdata, upgrade slot) and
+  a 10-minute IDL cache; a 64-instruction cap on traces.
+
+### Changed
+
+- **LiteSVM 0.16 / Agave 4.2** — `litesvm` bumped from 0.15.2 to 0.16 and
+  `solana-client` from 4.1.1 to 4.2.1 to match. Build, clippy and the full test
+  suite pass unchanged; a live mainnet replay reproduces on-chain compute.
+- Install snippets now say `svmscope = "0.4"`.
+
+### Fixed
+
+- Enable LiteSVM's `precompiles` feature so transactions that invoke the
+  ed25519 / secp256k1 signature-verify precompiles replay instead of failing
+  with `InvalidProgramForExecution`.
+
+### Server and web (not part of the crate)
+
+- `POST /trace`, `GET /trace/{sig}` (6-hour in-memory store for share links),
+  `GET /debug/{sig}`; the `/debug/<sig>` step-debugger UI with a Debugger tab,
+  plain-English story with Simple / Expert modes, per-wallet net effects, state
+  inspector, overrides panel, events, fund flow, watch panel with per-step
+  timeline, run-to breakpoints and deep links; auto-diagnose card for failed
+  transactions; "Scan for all breaking points"; the counterfactual box.
+
 ## [0.3.1] — 2026-08-29
 
 Docs-only: the README/lib install snippets said `svmscope = "0.2"`, which

@@ -5,7 +5,7 @@
 FROM rust:1-slim-bookworm AS build
 WORKDIR /app
 
-# Native deps for solana-client (TLS, protobuf) and the build. litesvm 0.15
+# Native deps for solana-client (TLS, protobuf) and the build. litesvm 0.16
 # (via agave-precompiles → openssl/vendored) builds OpenSSL from source, which
 # needs full perl (FindBin) and make — perl-base in the slim image isn't enough.
 RUN apt-get update && apt-get install -y --no-install-recommends \
