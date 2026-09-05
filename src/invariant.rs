@@ -23,11 +23,10 @@ pub struct Invariant;
 impl Invariant {
     /// An account's authority (or any identity field) must not change — the
     /// classic account-takeover guard. `field` is resolved via the account's
-    /// layout or owner IDL.
+    /// layout or owner IDL and compared byte-for-byte, so it works on the
+    /// pubkey fields authorities actually are.
     pub fn authority_unchanged(account: impl Into<String>, field: impl Into<String>) -> Check {
-        Check::account(account)
-            .field_delta(field, Cmp::eq(0))
-            .build()
+        Check::account(account).field_unchanged(field).build()
     }
 
     /// An account's lamports must not decrease — no unexpected SOL outflow.
@@ -62,10 +61,9 @@ impl Invariant {
     }
 
     /// A field must be unchanged by the transaction (a frozen config value).
+    /// Any field type: compared byte-for-byte.
     pub fn field_constant(account: impl Into<String>, field: impl Into<String>) -> Check {
-        Check::account(account)
-            .field_delta(field, Cmp::eq(0))
-            .build()
+        Check::account(account).field_unchanged(field).build()
     }
 
     /// A field must hold an exact expected value after the transaction.
@@ -111,16 +109,12 @@ mod tests {
     }
 
     #[test]
-    fn authority_unchanged_is_a_zero_field_delta() {
+    fn authority_unchanged_compares_the_field_bytes() {
         let c = Invariant::authority_unchanged("Mkt", "admin");
         let (_, sc) = one_assert(&c);
         match sc {
-            StateCheck::FieldDelta { name, op, value } => {
-                assert_eq!(name, "admin");
-                assert_eq!(*op, CmpOp::Eq);
-                assert_eq!(*value, 0);
-            }
-            other => panic!("expected FieldDelta, got {other:?}"),
+            StateCheck::FieldUnchanged { name } => assert_eq!(name, "admin"),
+            other => panic!("expected FieldUnchanged, got {other:?}"),
         }
     }
 

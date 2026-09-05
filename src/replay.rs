@@ -120,24 +120,33 @@ fn fetch_account_at_slot(
     }
 }
 
+/// How far behind the transaction's slot the archive probe asks. A non-archive
+/// answers every query at its current tip, so probing at the transaction's own
+/// slot is fooled whenever that slot *is* the tip (a transaction from the latest
+/// finalized slot, or anything on a fresh localnet). Probing ~10k slots
+/// (about an hour) earlier leaves no tip a non-archive could answer from.
+const ARCHIVE_PROBE_LAG: u64 = 10_000;
+
 /// Verify the endpoint actually honors historical `slot` queries before we
 /// trust anything it returns. A non-archival RPC (Helius, a public node)
 /// silently *ignores* the `slot` param and answers at the current tip — which
 /// would make a "replay at slot" quietly wrong. We probe an always-present
-/// account (the SPL Token program) and confirm the response was evaluated at a
-/// slot no later than the one we asked for.
+/// account (the SPL Token program) at a slot well before the transaction's and
+/// confirm the response was evaluated no later than that.
 pub(crate) fn archive_honors_slot(archive: &RpcClient, slot: u64) -> bool {
+    let probe = slot.saturating_sub(ARCHIVE_PROBE_LAG);
     let resp: serde_json::Value = match archive.send(
         RpcRequest::GetAccountInfo,
-        json!([SPL_TOKEN_PROGRAM, { "encoding": "base64", "slot": slot }]),
+        json!([SPL_TOKEN_PROGRAM, { "encoding": "base64", "slot": probe }]),
     ) {
         Ok(v) => v,
         Err(_) => return false,
     };
     // An archive evaluates the query at (≤) the requested slot; a non-archive
-    // ignores `slot` and answers at the current tip, far ahead of an old tx.
+    // ignores `slot` and answers at the current tip, which is past `probe`
+    // by construction (the transaction itself landed after it).
     match resp["context"]["slot"].as_u64() {
-        Some(ctx_slot) => ctx_slot <= slot,
+        Some(ctx_slot) => ctx_slot <= probe,
         None => false,
     }
 }
@@ -1581,6 +1590,9 @@ pub(crate) enum StateCheck {
         op: CmpOp,
         value: i128,
     },
+    /// The named field's raw bytes are identical before and after — works for
+    /// every field type (pubkeys, options, integers), not just numeric ones.
+    FieldUnchanged { name: String },
 }
 
 /// A post-replay assertion targeting one account.
@@ -1673,6 +1685,7 @@ impl AccountAssert {
             StateCheck::FieldDelta { name, op, value } => {
                 format!("{a} {name} Δ {} {value}", op.symbol())
             }
+            StateCheck::FieldUnchanged { name } => format!("{a} {name} unchanged"),
         }
     }
 
@@ -1738,8 +1751,27 @@ impl AccountAssert {
                 let delta = read_field_int(&acc.data, f)? - read_field_int(&pre.data, f)?;
                 Ok(op.test_i128(delta, *value))
             }
+            StateCheck::FieldUnchanged { name } => {
+                let (dec, pre) = ctx.decode_pre(&self.address)?;
+                let f = find_field(&dec, name)?;
+                let acc = acc.ok_or_else(|| Error::AccountNotFound(self.address.clone()))?;
+                Ok(field_bytes(&acc.data, f)? == field_bytes(&pre.data, f)?)
+            }
         }
     }
+}
+
+/// The raw bytes a decoded field occupies — for `coption-*` fields that is the
+/// 4-byte tag plus the payload, so a `None → Some(x)` flip counts as a change.
+pub(crate) fn field_bytes<'a>(data: &'a [u8], f: &crate::decode::Field) -> Result<&'a [u8]> {
+    let span = if f.ty.starts_with("coption-") { f.size + 4 } else { f.size };
+    f.offset
+        .checked_add(span)
+        .and_then(|end| data.get(f.offset..end))
+        .ok_or_else(|| Error::OutOfRange {
+            what: format!("{} @{}", f.name, f.offset),
+            len: data.len(),
+        })
 }
 
 fn short(s: &str) -> String {

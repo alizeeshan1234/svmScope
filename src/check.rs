@@ -196,6 +196,12 @@ impl AccountCheck {
             value: c.value,
         })
     }
+    /// The named field is byte-for-byte identical before and after the
+    /// transaction. Unlike [`field_delta`](Self::field_delta) this works for
+    /// every field type — a pubkey authority, an optional delegate, a flag.
+    pub fn field_unchanged(self, name: impl Into<String>) -> Self {
+        self.push(StateCheck::FieldUnchanged { name: name.into() })
+    }
 
     /// Finish the builder.
     pub fn build(self) -> Check {

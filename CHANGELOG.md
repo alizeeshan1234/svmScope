@@ -60,12 +60,24 @@ All notable changes to svmscope are documented here. The format follows
   `emit_cpi` rows named "Emit Event"; runtime `InstructionError` names.
 - **Caches** — process-wide ELF cache keyed by (programdata, upgrade slot) and
   a 10-minute IDL cache; a 64-instruction cap on traces.
+- **`Scope::add_idl`** — register a program's IDL for every API on the scope
+  (`analyze`, `diagnose`, `preflight_overview`, by-signature replays and
+  traces), so local or private deployments with no on-chain IDL are still
+  fully named. `program_with_idl` registers its IDL automatically.
+- **`field_unchanged` check** — `AccountCheck::field_unchanged(name)` and the
+  JSON assert kind `"field_unchanged"` compare a named field byte-for-byte
+  before and after, for every field type. `Invariant::authority_unchanged` and
+  `Invariant::field_constant` are built on it.
 
 ### Changed
 
 - **LiteSVM 0.16 / Agave 4.2** — `litesvm` bumped from 0.15.2 to 0.16 and
   `solana-client` from 4.1.1 to 4.2.1 to match. Build, clippy and the full test
   suite pass unchanged; a live mainnet replay reproduces on-chain compute.
+- **`spec::AssertInput::value` is now `Option<i64>`** so the `field_unchanged`
+  kind can omit it. Every other kind still requires it and errors with
+  `assert kind "…" needs a "value"` when missing; existing JSON suites are
+  unaffected.
 - Install snippets now say `svmscope = "0.4"`.
 
 ### Fixed
@@ -73,6 +85,13 @@ All notable changes to svmscope are documented here. The format follows
 - Enable LiteSVM's `precompiles` feature so transactions that invoke the
   ed25519 / secp256k1 signature-verify precompiles replay instead of failing
   with `InvalidProgramForExecution`.
+- The archive check behind the *exact* fidelity tier probed the endpoint at the
+  transaction's own slot, so a plain non-archival RPC passed whenever that slot
+  was the current tip (a transaction from the latest finalized slot, or any
+  localnet). It now probes ~10k slots earlier, where only a real archive can
+  answer, so current state is never labelled `exact@slot`.
+- `Invariant::authority_unchanged` rejected pubkey fields ("only integer/bool
+  fields can be asserted") — the one kind of field an authority ever is.
 
 ### Server and web (not part of the crate)
 

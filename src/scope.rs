@@ -87,6 +87,18 @@ impl Scope {
         }
     }
 
+    /// Register a program's IDL for every API on this scope — `analyze`,
+    /// `diagnose`, `preflight_overview`, and the replays and traces built from
+    /// signatures — so instructions, accounts, arguments, events and errors of
+    /// that program are named even when it publishes no IDL on-chain (a local
+    /// or private deployment). Takes precedence over the on-chain lookup.
+    pub fn add_idl(&self, program: impl Into<String>, idl: serde_json::Value) {
+        self.idl_cache
+            .lock()
+            .unwrap()
+            .insert(program.into(), Some(idl));
+    }
+
     /// Attach an archival RPC endpoint (e.g. Alchemy's Account Archive) so
     /// `replay_at_slot` can fetch account state as of a transaction's slot.
     pub fn with_archive(mut self, archive_url: impl Into<String>) -> Scope {

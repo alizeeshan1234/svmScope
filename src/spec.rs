@@ -156,6 +156,8 @@ impl MutationInput {
 ///   or the owner program's IDL), e.g. `"field":"pool.reserveA"`. Matched by
 ///   exact name or final dot-segment; integer/bool fields only, signed included.
 /// - `"field_delta"` — change in the named `field` (post − pre); may be negative.
+/// - `"field_unchanged"` — the named `field` is byte-for-byte identical before and
+///   after; any field type (pubkeys included). Takes no `value`.
 ///
 /// `op` is one of `== != < <= > >=` (default `==`).
 #[derive(Deserialize)]
@@ -175,7 +177,9 @@ pub struct AssertInput {
     #[serde(default = "default_op")]
     pub op: String,
     /// Signed so deltas can be negative; non-delta kinds require it to be ≥ 0.
-    pub value: i64,
+    /// Required for every kind except `field_unchanged`.
+    #[serde(default)]
+    pub value: Option<i64>,
 }
 
 fn default_kind() -> String {
@@ -196,9 +200,15 @@ impl AssertInput {
             ">=" | "ge" => CmpOp::Ge,
             other => return Err(Error::InvalidSpec(format!("unknown assert op: {other}"))),
         };
+        // Every kind but `field_unchanged` compares against a value.
+        let value = || -> Result<i64> {
+            self.value.ok_or_else(|| {
+                Error::InvalidSpec(format!("assert kind \"{}\" needs a \"value\"", self.kind))
+            })
+        };
         // Non-delta kinds compare against an unsigned value.
         let unsigned = || -> Result<u64> {
-            u64::try_from(self.value)
+            u64::try_from(value()?)
                 .map_err(|_| Error::InvalidSpec(format!("{} value must be ≥ 0", self.kind)))
         };
         // Field kinds compare signed (an i64 timestamp is a legitimate target).
@@ -228,22 +238,23 @@ impl AssertInput {
             },
             "lamports_delta" => StateCheck::LamportsDelta {
                 op,
-                value: self.value as i128,
+                value: value()? as i128,
             },
             "token_delta" => StateCheck::TokenDelta {
                 op,
-                value: self.value as i128,
+                value: value()? as i128,
             },
             "field" => StateCheck::Field {
                 name: field()?,
                 op,
-                value: self.value as i128,
+                value: value()? as i128,
             },
             "field_delta" => StateCheck::FieldDelta {
                 name: field()?,
                 op,
-                value: self.value as i128,
+                value: value()? as i128,
             },
+            "field_unchanged" => StateCheck::FieldUnchanged { name: field()? },
             other => return Err(Error::InvalidSpec(format!("unknown assert kind: {other}"))),
         };
         Ok(AccountAssert {
@@ -447,6 +458,22 @@ mod tests {
             } => assert_eq!(name, "reserveA"),
             _ => panic!("expected FieldDelta == -500"),
         }
+    }
+
+    #[test]
+    fn field_unchanged_needs_no_value_and_other_kinds_do() {
+        let a: AssertInput = serde_json::from_str(
+            r#"{"address":"X","kind":"field_unchanged","field":"authority"}"#,
+        )
+        .unwrap();
+        match a.into_assert().unwrap().check {
+            StateCheck::FieldUnchanged { name } => assert_eq!(name, "authority"),
+            other => panic!("expected FieldUnchanged, got {other:?}"),
+        }
+        let missing: AssertInput =
+            serde_json::from_str(r#"{"address":"X","kind":"lamports"}"#).unwrap();
+        let err = missing.into_assert().unwrap_err().to_string();
+        assert!(err.contains("needs a \"value\""), "{err}");
     }
 
     #[test]

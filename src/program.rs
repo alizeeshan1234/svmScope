@@ -39,6 +39,10 @@ impl Scope {
     /// Build a program client from a caller-supplied IDL, which is the normal
     /// path for a program deployed only to a local validator.
     pub fn program_with_idl(&self, program_id: Address, idl: Value) -> ProgramClient<'_> {
+        // The IDL you build with is the IDL everything else on this scope
+        // should decode with — register it so by-signature APIs name the
+        // program too, without a second call.
+        self.add_idl(program_id.to_string(), idl.clone());
         ProgramClient {
             scope: self,
             program_id,
