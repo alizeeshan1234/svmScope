@@ -368,6 +368,8 @@ replay: ok ✅ · 58,501 CU charged · 34,556 BPF instructions across 9 program 
           75  sol_memcpy_
 ```
 
+Hosted: [svmscope.vercel.app](https://svmscope.vercel.app) has a **Profile** tab — paste a signature and the flamegraph is the first thing on screen; `/flame/<signature>` is a shareable link to one.
+
 How it works: LiteSVM records every BPF instruction each program frame executes; the profiler folds that trace into call stacks (function boundaries come from the program's own call graph, so they are exact), counts syscalls by name, and attaches the runtime's measured compute per frame — exclusive of the CPIs it made — from the `consumed` log lines. The folded stacks are flamegraph input; the hosted debugger draws them.
 
 Names: every mainnet program is stripped, so functions read as `function_<pc>`. For your own program, build with `cargo build-sbf --debug`, deploy that `.so`, keep the `.debug` beside it, and pass `--symbols <program>=<path>.debug` (or upload it in the debugger UI): every function gets its Rust name. A plain release build has different code from a `--debug` build, so the `.debug` must come from the same build as the deployed `.so`; the profiler checks the entrypoint and refuses a mismatch.

@@ -5,6 +5,10 @@
     {
       "source": "/debug/:sig*",
       "destination": "/"
+    },
+    {
+      "source": "/flame/:sig*",
+      "destination": "/"
     }
   ],
   "headers": [

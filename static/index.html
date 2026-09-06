@@ -1454,6 +1454,7 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
         <button class="navtab on" id="navAnalyze">Analyze</button>
         <button class="navtab" id="navSim">⚡ Simulate</button>
         <button class="navtab" id="navDebug">🐞 Debugger</button>
+        <button class="navtab" id="navProfile" title="Where the compute went: a flamegraph of every instruction the transaction executed">🔥 Profile</button>
       </nav>
       <div class="search">
         <select id="cluster" class="cluster" title="Cluster / RPC">
@@ -1816,6 +1817,27 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
       <div id="dbgProfile"><div class="prof-note">Traces every BPF instruction the transaction executes, per program and per function, and draws where the compute units went. Takes a few seconds.</div></div>
     </div>
     <div class="card tech-card" style="margin-top:14px"><h2>Program logs</h2><div class="logs" id="dbgLogs"></div></div>
+    </div>
+  </section>
+  <section id="profile" class="hidden">
+    <div class="dbg-landing" id="profLanding">
+      <h1>Where did the compute go?</h1>
+      <p>Paste any Solana transaction signature. Every BPF instruction it executed is attributed to programs, functions and syscalls and drawn as a flamegraph. Built your program yourself? Add its <code>.debug</code> file and every function gets its Rust name.</p>
+      <div class="row"><input id="profInput" placeholder="transaction signature" spellcheck="false" autocomplete="off" /><button class="btn" id="profStart">Profile ⟶</button></div>
+      <div class="dbg-progress hidden" id="profProgress"><span class="spinner"></span><span id="profProgressText">tracing every instruction…</span></div>
+      <div class="dbg-err hidden" id="profErr"></div>
+      <div class="ex">Try: <a data-sig="5RRooiiuvsj6MdAi28XCLtbTX7nxYNpSnaTqbwbcfM5Fcxph5RPRQVv1YFDNwPTuiyZnDsxFac9D773DWg9Hj5ag">a pump.fun buy</a> · <a data-sig="5TufpeQ58oMSK2vsPSdixELru1gBNW7cqKyiULSkzBKvFtgj8EWfcofNQCma97Qf42Qh1Dcx7CYt1BjYRN7gS37J">a Jupiter swap</a> · <a data-sig="4bMwxf6wqTAbmsfM61LKegvBvkC6bBxRTcRhHaqoHpnK7hZZSr2a6ZYDug6Dmmn6tmK7ksgfnSBdNW7zqoBgL1Df">a Marinade deposit</a></div>
+    </div>
+    <div id="profMain" class="hidden">
+      <div class="dbg-head">
+        <span class="verdict" id="profVerdict"></span>
+        <span class="sig" id="profSigLbl"></span>
+        <span class="spacer"></span>
+        <button class="btn ghost sm" id="profShare" title="Copy a link to this profile">⎘ Copy link</button>
+        <button class="btn ghost sm" id="profToDebug" title="Step through the same transaction">🐞 Step debugger</button>
+        <button class="btn ghost sm" id="profBack">← Back</button>
+      </div>
+      <div class="card"><h2 style="margin-top:0">Where the compute went</h2><div id="profView"></div></div>
     </div>
   </section>
   </main>
@@ -2247,12 +2269,14 @@ function renderReplayPanel() {
          <button class="btn ghost sm" id="runReplay">▶ Replay now</button>
          <button class="btn ghost sm" id="reconSlot">⟲ Replay as it happened</button>
          <button class="btn ghost sm" id="openDebug" title="Step through every instruction and CPI">⋮ Step debugger</button>
+         <button class="btn ghost sm" id="openProfile" title="Where the compute went: a flamegraph of every instruction">🔥 Profile compute</button>
        </div>
        <span class="cu-note" style="display:block;margin-top:8px"><b>Replay now</b> re-runs this transaction against <i>today's</i> on-chain state. <b>Replay as it happened</b> rewinds the balances and clock back to the exact moment it originally landed — free, and it tells you how accurate the result is.</span>
        <div id="certPanel"></div>
        ${cfBox()}`;
   $('replay').innerHTML = body;
   $('openDebug')?.addEventListener('click', () => showDebug(currentSig, true));
+  $('openProfile')?.addEventListener('click', () => showProfile(currentSig, true));
   $('runReplay')?.addEventListener('click', async () => {
     const b = $('runReplay'); b.disabled = true; b.textContent = '▶ Replaying…';
     try { await ensureBaseline(); renderReplayPanel(); }
@@ -4144,11 +4168,11 @@ function showDbgLanding() {
   $('debug').classList.remove('hidden');
   $('dbgLanding').classList.remove('hidden');
   $('dbgMain').classList.add('hidden');
-  $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on');
+  $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on'); $('navProfile').classList.remove('on');
   $('dbgInput').focus();
 }
 $('navDebug').addEventListener('click', () => {
-  if (trace && dbgSigCur) { hideAllViews(); $('debug').classList.remove('hidden'); $('dbgLanding').classList.add('hidden'); $('dbgMain').classList.remove('hidden'); $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on'); history.pushState({ debug: dbgSigCur }, '', '/debug/' + encodeURIComponent(dbgSigCur)); }
+  if (trace && dbgSigCur) { hideAllViews(); $('debug').classList.remove('hidden'); $('dbgLanding').classList.add('hidden'); $('dbgMain').classList.remove('hidden'); $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on'); $('navProfile').classList.remove('on'); history.pushState({ debug: dbgSigCur }, '', '/debug/' + encodeURIComponent(dbgSigCur)); }
   else showDbgLanding();
 });
 $('dbgGo').addEventListener('click', () => {
@@ -4263,7 +4287,7 @@ $('dbgReset').addEventListener('click', () => {
 });
 
 function hideAllViews() {
-  ['hero', 'status', 'txlist', 'out', 'sim', 'debug'].forEach(id => $(id).classList.add('hidden'));
+  ['hero', 'status', 'txlist', 'out', 'sim', 'debug', 'profile'].forEach(id => $(id).classList.add('hidden'));
 }
 
 async function showDebug(sig, push) {
@@ -4275,7 +4299,7 @@ async function showDebug(sig, push) {
   $('debug').classList.remove('hidden');
   $('dbgLanding').classList.remove('hidden');
   $('dbgMain').classList.add('hidden');
-  $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on');
+  $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on'); $('navProfile').classList.remove('on');
   $('dbgInput').value = sig; $('sig').value = sig;
   $('dbgErr').classList.add('hidden');
   $('dbgProgress').classList.remove('hidden');
@@ -4642,19 +4666,22 @@ document.addEventListener('keydown', e => {
 });
 window.addEventListener('popstate', e => {
   if (e.state && e.state.debug) showDebug(e.state.debug, false);
+  else if (e.state && e.state.flame) showProfile(e.state.flame, false);
   else if (!$('debug').classList.contains('hidden')) $('dbgBack').click();
+  else if (!$('profile').classList.contains('hidden')) showProfLanding();
 });
 // ---------------- compute profiler ----------------
 let prof = null, profFrame = 0, profZoom = [], profSymbols = {};   // program → base64 .debug
+let profSigCur = '', profContainer = 'dbgProfile';                  // which signature, and which panel draws it
 function profReset() { prof = null; profFrame = 0; profZoom = []; profSymbols = {}; $('dbgProfile').innerHTML = '<div class="prof-note">Traces every BPF instruction the transaction executes, per program and per function, and draws where the compute units went. Takes a few seconds.</div>'; }
-$('profGo').addEventListener('click', () => runProfile());
+$('profGo').addEventListener('click', () => { profSigCur = dbgSigCur; profContainer = 'dbgProfile'; runProfile(); });
 async function runProfile() {
-  if (!dbgSigCur) return;
+  if (!profSigCur) return;
   $('profGo').disabled = true;
-  $('dbgProfile').innerHTML = '<div class="dbg-progress"><span class="spinner"></span><span>tracing every instruction…</span></div>';
+  $(profContainer).innerHTML = '<div class="dbg-progress"><span class="spinner"></span><span>tracing every instruction…</span></div>';
   try {
     const symbols = Object.entries(profSymbols).map(([program, elf_b64]) => ({ program, elf_b64 }));
-    const body = { signature: dbgSigCur, mutations: [], time_travel: timeTravel, features: activeFeatures, symbols, ...clusterParams() };
+    const body = { signature: profSigCur, mutations: [], time_travel: timeTravel, features: activeFeatures, symbols, ...clusterParams() };
     const res = await api('/profile', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     if (!res.ok) throw new Error(await res.text());
     prof = await res.json();
@@ -4666,7 +4693,7 @@ async function runProfile() {
   } catch (e) {
     const msg = String(e.message || e);
     const skew = /404|not found/i.test(msg) && !/transaction/i.test(msg);
-    $('dbgProfile').innerHTML = skew
+    $(profContainer).innerHTML = skew
       ? `<div class="explain"><div class="ic">⏳</div><div><div class="t">The engine is updating</div><div class="d">The profiler shipped in the page before the engine behind it finished redeploying. Try again in a few minutes.</div></div></div>`
       : `<div class="explain"><div class="ic">⚠️</div><div><div class="t">Profile failed</div><div class="d">${esc(msg)}</div></div></div>`;
   } finally { $('profGo').disabled = false; }
@@ -4682,7 +4709,7 @@ function profColor(name, program) {
 }
 function renderProfile() {
   const p = prof.profile, frames = p.frames;
-  if (!frames.length) { $('dbgProfile').innerHTML = '<div class="prof-note">No BPF frames were traced (a transaction of builtins only).</div>'; return; }
+  if (!frames.length) { $(profContainer).innerHTML = '<div class="prof-note">No BPF frames were traced (a transaction of builtins only).</div>'; return; }
   const totalInsns = frames.reduce((a, f) => a + f.instructions, 0);
   const byProg = {};
   for (const f of frames) byProg[f.program] = (byProg[f.program] || 0) + (f.compute_units ?? f.instructions);
@@ -4713,8 +4740,8 @@ function renderProfile() {
     + `<input type="file" id="profSymFile" accept=".debug,.so,application/octet-stream" /> <span id="profSymStatus"></span></div>`;
   html += '<div class="prof-note">Counts are executed BPF instructions (one CU each); per-function CU splits the frame\'s charged compute in proportion. The flamegraph is exact in shape; click a box to zoom, click the crumb to zoom out.</div>';
   html += '</div></div>';
-  $('dbgProfile').innerHTML = html;
-  $('dbgProfile').querySelectorAll('.prof-frames button').forEach(b => b.addEventListener('click', () => { profFrame = +b.dataset.i; profZoom = []; renderProfile(); }));
+  $(profContainer).innerHTML = html;
+  $(profContainer).querySelectorAll('.prof-frames button').forEach(b => b.addEventListener('click', () => { profFrame = +b.dataset.i; profZoom = []; renderProfile(); }));
   $('profSymFile').addEventListener('change', async (ev) => {
     const file = ev.target.files[0]; if (!file) return;
     const buf = new Uint8Array(await file.arrayBuffer());
@@ -4771,6 +4798,86 @@ function renderFlame(f) {
     const chain = []; const find = (node, depth) => { if (node === r.node) return true; for (const k of Object.values(node.kids)) { chain.push(k.name); if (find(k, depth + 1)) return true; chain.pop(); } return false; };
     if (find(view, 0)) { profZoom = profZoom.concat(chain); renderFlame(f); }
   }));
+}
+
+// ---------------- standalone Profile tab ----------------
+function showProfLanding() {
+  hideAllViews();
+  $('profile').classList.remove('hidden');
+  $('profLanding').classList.remove('hidden');
+  $('profMain').classList.add('hidden');
+  ['navDebug', 'navAnalyze', 'navSim'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on');
+  $('profInput').focus();
+}
+async function showProfile(sig, push) {
+  if (!sig) return showProfLanding();
+  hideAllViews();
+  $('profile').classList.remove('hidden');
+  $('profLanding').classList.remove('hidden');
+  $('profMain').classList.add('hidden');
+  ['navDebug', 'navAnalyze', 'navSim'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on');
+  $('profInput').value = sig; $('sig').value = sig;
+  $('profErr').classList.add('hidden');
+  $('profProgress').classList.remove('hidden');
+  $('profStart').disabled = true;
+  const t0 = Date.now();
+  const tick = setInterval(() => { $('profProgressText').textContent = `tracing every instruction… (${Math.round((Date.now() - t0) / 1000)}s)`; }, 1000);
+  if (push) history.pushState({ flame: sig }, '', '/flame/' + encodeURIComponent(sig));
+  profSigCur = sig; profContainer = 'profView'; profSymbols = {}; profZoom = []; profFrame = 0;
+  try {
+    const res = await api('/profile/' + encodeURIComponent(sig) + clusterQ());
+    if (!res.ok) throw new Error(await res.text());
+    prof = await res.json();
+    const fr = prof.profile.frames;
+    profFrame = fr.reduce((best, f, i) => (f.compute_units ?? f.instructions) > (fr[best].compute_units ?? fr[best].instructions) ? i : best, 0);
+  } catch (e) {
+    clearInterval(tick);
+    $('profProgress').classList.add('hidden'); $('profStart').disabled = false;
+    const msg = (e.message || String(e));
+    $('profErr').textContent = /not found|NotFound/i.test(msg) && /transaction/i.test(msg) ? "Couldn't find that transaction. Check the signature, and that the cluster selector matches the network it was sent on."
+      : /404/.test(msg) ? 'The engine is updating; try again in a few minutes.'
+      : /upstream RPC/i.test(msg) ? 'The RPC behind the engine had trouble. Try again in a moment.'
+      : 'Could not profile this transaction: ' + msg;
+    $('profErr').classList.remove('hidden');
+    return;
+  }
+  clearInterval(tick);
+  $('profProgress').classList.add('hidden'); $('profStart').disabled = false;
+  $('profLanding').classList.add('hidden');
+  $('profMain').classList.remove('hidden');
+  const ok = prof.result.success;
+  $('profVerdict').className = 'verdict ' + (ok ? 'ok' : 'bad');
+  $('profVerdict').textContent = ok ? '✓ replay succeeded' : '✗ replay failed';
+  $('profSigLbl').innerHTML = copyPill(sig, short(sig, 10));
+  renderProfile();
+  window.scrollTo(0, 0);
+}
+$('navProfile').addEventListener('click', () => {
+  if (prof && profSigCur && profContainer === 'profView') { hideAllViews(); $('profile').classList.remove('hidden'); $('profLanding').classList.add('hidden'); $('profMain').classList.remove('hidden'); ['navDebug', 'navAnalyze', 'navSim'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on'); history.pushState({ flame: profSigCur }, '', '/flame/' + encodeURIComponent(profSigCur)); }
+  else showProfLanding();
+});
+$('profStart').addEventListener('click', () => {
+  const v = $('profInput').value.trim();
+  if (!v) return;
+  let len = 0; try { len = bs58decode(v).length; } catch {}
+  if (len !== 64) {
+    $('profErr').textContent = len === 32 ? "That's an account or program address, not a transaction. Paste a transaction signature (about 88 characters)." : "That doesn't look like a transaction signature. It should be about 88 characters of letters and digits.";
+    $('profErr').classList.remove('hidden');
+    return;
+  }
+  showProfile(v, true);
+});
+$('profInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('profStart').click(); });
+$('profLanding').querySelectorAll('.ex a').forEach(a => a.addEventListener('click', () => { $('profInput').value = a.dataset.sig; showProfile(a.dataset.sig, true); }));
+$('profBack').addEventListener('click', () => showProfLanding());
+$('profToDebug').addEventListener('click', () => showDebug(profSigCur, true));
+$('profShare').addEventListener('click', async () => {
+  const url = location.origin + '/flame/' + encodeURIComponent(profSigCur);
+  try { await navigator.clipboard.writeText(url); $('profShare').textContent = '✓ Copied'; setTimeout(() => { $('profShare').textContent = '⎘ Copy link'; }, 1500); } catch { prompt('Copy this link', url); }
+});
+if (location.pathname.startsWith('/flame/')) {
+  const sig = decodeURIComponent(location.pathname.slice('/flame/'.length)).replace(/\/$/, '');
+  if (sig) { $('sig').value = sig; showProfile(sig, false); }
 }
 
 // Deep link: /debug/<signature> opens the debugger directly.
