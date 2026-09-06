@@ -919,11 +919,33 @@ fn elf_parse(elf: &[u8]) -> Option<(Vec<u8>, FunctionSymbols)> {
 
 /// `foo::bar::h9a99872dbe52d553` → `foo::bar`.
 fn strip_hash(name: &str) -> String {
+    // `__rustc[95bceff0ff0a01a5]::__rust_alloc`: the compiler's own crate
+    // disambiguator on allocator shims — noise, not a name.
+    let name = match name.strip_prefix("__rustc[") {
+        Some(rest) => rest.split_once("]::").map_or(name, |(_, tail)| tail),
+        None => name,
+    };
     match name.rsplit_once("::h") {
         Some((head, hash)) if hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()) => {
             head.to_string()
         }
         _ => name.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod strip_hash_tests {
+    #[test]
+    fn strips_rustc_disambiguator_and_symbol_hash() {
+        assert_eq!(
+            super::strip_hash("__rustc[95bceff0ff0a01a5]::__rust_alloc"),
+            "__rust_alloc"
+        );
+        assert_eq!(
+            super::strip_hash("core::fmt::write::h0123456789abcdef"),
+            "core::fmt::write"
+        );
+        assert_eq!(super::strip_hash("memcpy"), "memcpy");
     }
 }
 
