@@ -1,0 +1,90 @@
+# Builds a shape corpus for the profiler: open-source Solana programs compiled
+# with symbols across several platform-tools versions, plus Phoenix at its
+# verified commit inside its original toolchain image (x86 only, hence CI).
+# Manual: gh workflow run symbol-corpus.yml
+name: symbol-corpus
+on:
+  workflow_dispatch:
+
+jobs:
+  corpus:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tools: [v1.43, v1.45, v1.48, v1.50, v1.52]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Agave CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - name: Build svmscope (corpus tool)
+        run: cargo build --release --bin svmscope
+      - name: Clone sources
+        run: |
+          mkdir -p src
+          git clone --depth 1 https://github.com/alizeeshan1234/svmscope_example.git src/example
+          git clone --depth 1 https://github.com/marinade-finance/liquid-staking-program.git src/marinade
+          git clone --depth 1 https://github.com/solana-program/token.git src/spl-token
+          git clone --depth 1 https://github.com/solana-program/token-2022.git src/spl-token-2022
+          git clone --depth 1 https://github.com/solana-program/associated-token-account.git src/spl-ata
+          git clone --depth 1 https://github.com/coral-xyz/anchor.git src/anchor
+      - name: Build programs with symbols (${{ matrix.tools }})
+        continue-on-error: true
+        run: |
+          set +e
+          build() { # name dir
+            echo "== $1 ($2)"
+            (cd "$2" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/out/$1" cargo build-sbf --debug --tools-version ${{ matrix.tools }} 2>&1 | tail -3)
+          }
+          build example      src/example/programs/svmscope_crate
+          build marinade     src/marinade/programs/marinade-finance
+          build spl-token    src/spl-token/program
+          build spl-token-2022 src/spl-token-2022/program
+          build spl-ata      src/spl-ata/program
+          for ex in basic-0 basic-1 basic-2 basic-3 basic-4 basic-5; do
+            for p in src/anchor/examples/tutorial/$ex/programs/*; do
+              [ -d "$p" ] && build "anchor-$ex" "$p"
+            done
+          done
+      - name: Dump shapes
+        run: |
+          mkdir -p corpus
+          for d in out/*/deploy; do
+            for so in "$d"/*.so; do
+              base="${so%.so}"; dbg="$base.debug"
+              [ -f "$dbg" ] || continue
+              name="$(basename "$(dirname "$d")")-$(basename "$base")"
+              ./target/release/svmscope symbols dump "$so" "$dbg" -o "corpus/${name}.jsonl" || true
+            done
+          done
+          wc -l corpus/*.jsonl || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: corpus-${{ matrix.tools }}
+          path: corpus/
+          if-no-files-found: warn
+
+  phoenix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build Phoenix at its verified commit in its toolchain image
+        run: |
+          cat > Dockerfile <<'DOCKER'
+          FROM ellipsislabs/solana:latest
+          RUN git clone https://github.com/Ellipsis-Labs/phoenix-v1.git /build
+          WORKDIR /build
+          RUN git checkout e879f1c2b455a98f3cb72f9757ea73c836b3978c
+          RUN cargo build-sbf -- --locked --frozen && mkdir -p /out/release && cp target/deploy/*.so /out/release/
+          RUN (CARGO_TARGET_DIR=/build/target-debug cargo build-sbf --debug -- --locked --frozen || CARGO_TARGET_DIR=/build/target-debug cargo build-sbf --debug) && mkdir -p /out/debug && cp /build/target-debug/deploy/* /out/debug/
+          RUN sha256sum /out/release/*.so
+          DOCKER
+          docker build -t phoenix-symbols .
+          id=$(docker create phoenix-symbols) && docker cp "$id:/out" ./phoenix-out && docker rm "$id"
+          ls -la phoenix-out/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phoenix-build
+          path: phoenix-out/

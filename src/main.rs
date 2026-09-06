@@ -6,6 +6,7 @@
 use std::env;
 use std::error::Error;
 
+use std::io::Write;
 use svmscope::{spec, Mutation, Replay, ReplayResult, ScenarioOutcome, Scope, Trace};
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -53,6 +54,30 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    // Symbol corpus: `svmscope symbols dump <path.so> <path.debug> [-o corpus.jsonl]`
+    // writes one JSON line per named function shape of a build, for
+    // `svmscope profile --corpus corpus.jsonl` to name the same library
+    // functions inside stripped programs.
+    #[cfg(feature = "profiler")]
+    if signature == "symbols" {
+        let usage = "usage: svmscope symbols dump <path.so> <path.debug> [-o corpus.jsonl]";
+        if args.get(2).map(String::as_str) != Some("dump") {
+            return Err(usage.into());
+        }
+        let so = std::fs::read(args.get(3).ok_or(usage)?)?;
+        let debug = std::fs::read(args.get(4).ok_or(usage)?)?;
+        let entries = svmscope::profile::corpus_from_build(&so, &debug)?;
+        let mut out: Box<dyn std::io::Write> = match args.iter().position(|a| a == "-o") {
+            Some(i) => Box::new(std::fs::File::create(args.get(i + 1).ok_or(usage)?)?),
+            None => Box::new(std::io::stdout()),
+        };
+        for e in &entries {
+            writeln!(out, "{}", serde_json::to_string(e)?)?;
+        }
+        eprintln!("{} function shapes", entries.len());
+        return Ok(());
+    }
+
     // Profiler: `svmscope profile <signature> [--now] [--json]
     // [--symbols <program>=<path/to/program.debug>]...` traces every BPF
     // instruction the transaction executes and attributes it to functions,
@@ -70,6 +95,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         let (result, mut profile) = replay.profile(&[])?;
         let mut i = 3;
         while i < args.len() {
+            if args[i] == "--corpus" {
+                let path = args.get(i + 1).ok_or("--corpus needs <corpus.jsonl>")?;
+                let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+                let corpus: Vec<svmscope::profile::CorpusEntry> = text
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(serde_json::from_str)
+                    .collect::<Result<_, _>>()?;
+                let n = profile.symbolize_from_corpus(&corpus);
+                eprintln!("corpus {path}: {} shapes, named {n} functions", corpus.len());
+                i += 2;
+                continue;
+            }
             if args[i] == "--symbols" {
                 let spec = args.get(i + 1).ok_or("--symbols needs <program>=<path>")?;
                 let (program, paths) = spec

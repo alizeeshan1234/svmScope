@@ -145,6 +145,51 @@ impl Default for Shape {
     }
 }
 
+/// One line of a shape corpus: a function's shape and its name, from a build
+/// with symbols. Library code (`core`, `alloc`, borsh, `anchor_lang`,
+/// `solana_program`) compiles to the same shape in every program built with
+/// the same toolchain, so a corpus from open-source programs names the same
+/// functions inside stripped ones.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct CorpusEntry {
+    /// [`Shape::full`].
+    pub full: u64,
+    /// [`Shape::len`].
+    pub len: usize,
+    /// Demangled, hash-stripped symbol name.
+    pub name: String,
+}
+
+/// Dump every named function of a build (its `.so` for code, its `.debug` for
+/// symbols) as corpus entries. Functions whose shape is shared by several
+/// names in this build are dropped as ambiguous.
+pub fn corpus_from_build(so: &[u8], debug: &[u8]) -> crate::Result<Vec<CorpusEntry>> {
+    let (text, symbols) = elf_parse(so)
+        .and_then(|(text, _)| elf_parse(debug).map(|(_, syms)| (text, syms)))
+        .ok_or_else(|| crate::Error::InvalidSpec("expected an ELF .so and a .debug with a symbol table".into()))?;
+    let mut by_full: BTreeMap<u64, Option<CorpusEntry>> = BTreeMap::new();
+    for (&pc, (name, size)) in &symbols {
+        if *size < 2 {
+            continue; // one-instruction stubs collide constantly
+        }
+        let sh = Shape::of(&text, pc, pc + size);
+        let pretty = strip_hash(&rustc_demangle::demangle(name).to_string());
+        by_full
+            .entry(sh.full)
+            .and_modify(|v| {
+                if v.as_ref().is_some_and(|e| e.name != pretty) {
+                    *v = None;
+                }
+            })
+            .or_insert(Some(CorpusEntry {
+                full: sh.full,
+                len: sh.len,
+                name: pretty,
+            }));
+    }
+    Ok(by_full.into_values().flatten().collect())
+}
+
 /// What [`Profile::symbolize_from_build`] managed to name.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct SymbolizeReport {
@@ -491,6 +536,41 @@ impl Profile {
             }
         }
         Ok(report)
+    }
+
+    /// Name anonymous functions from a shape corpus (see [`CorpusEntry`]):
+    /// exact shape matches only, across every frame. Returns how many were
+    /// named. Real symbols and behavioural labels are left alone; a corpus
+    /// name lands in `name`, so it shows everywhere a symbol would.
+    pub fn symbolize_from_corpus(&mut self, corpus: &[CorpusEntry]) -> usize {
+        let index: std::collections::HashMap<u64, &CorpusEntry> = corpus.iter().map(|e| (e.full, e)).collect();
+        let mut renamed = 0usize;
+        for frame in &mut self.frames {
+            let mut rename: BTreeMap<String, String> = BTreeMap::new();
+            for f in &mut frame.functions {
+                if !f.name.starts_with("function_") {
+                    continue;
+                }
+                if let Some(e) = index.get(&f.shape.full) {
+                    if e.len == f.shape.len {
+                        rename.insert(f.name.clone(), e.name.clone());
+                        f.name = e.name.clone();
+                        renamed += 1;
+                    }
+                }
+            }
+            if rename.is_empty() {
+                continue;
+            }
+            for (stack, _) in &mut frame.stacks {
+                *stack = stack
+                    .split(';')
+                    .map(|s| rename.get(s).cloned().unwrap_or_else(|| s.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(";");
+            }
+        }
+        renamed
     }
 
     /// Total BPF instructions across every frame.
