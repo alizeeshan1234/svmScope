@@ -37,7 +37,9 @@ jobs:
           set +e
           build() { # name dir
             echo "== $1 ($2)"
-            (cd "$2" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/out/$1" cargo build-sbf --debug --tools-version ${{ matrix.tools }} 2>&1 | tail -3)
+            # `-- --release` pins the optimised profile: with some tools versions
+            # `--debug` alone builds the dev profile, whose shapes match nothing.
+            (cd "$2" && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/out/$1" cargo build-sbf --debug --tools-version ${{ matrix.tools }} -- --release 2>&1 | tail -3)
           }
           build example      src/example/programs/svmscope_crate
           build marinade     src/marinade/programs/marinade-finance
@@ -52,14 +54,13 @@ jobs:
       - name: Dump shapes
         run: |
           mkdir -p corpus
-          for d in out/*/deploy; do
-            for so in "$d"/*.so; do
-              base="${so%.so}"; dbg="$base.debug"
-              [ -f "$dbg" ] || continue
-              name="$(basename "$(dirname "$d")")-$(basename "$base")"
-              ./target/release/svmscope symbols dump "$so" "$dbg" -o "corpus/${name}.jsonl" || true
-            done
+          find out -name '*.debug' | while read -r dbg; do
+            so="${dbg%.debug}.so"
+            [ -f "$so" ] || continue
+            name="$(echo "$dbg" | cut -d/ -f2)-$(basename "${dbg%.debug}")"
+            ./target/release/svmscope symbols dump "$so" "$dbg" -o "corpus/${name}.jsonl" || true
           done
+          find out -name '*.so' -o -name '*.debug' | head -40
           wc -l corpus/*.jsonl || true
       - uses: actions/upload-artifact@v4
         with:
