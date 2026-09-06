@@ -67,10 +67,6 @@ solana-message = "=4.4.1"
 solana-signer = "=3.0.1"
 sha2 = "0.10"
 
-[[example]]
-name = "profile_demo"
-required-features = ["profiler"]
-
 [features]
 # The profiler is on by default so `cargo install svmscope` profiles out of the
 # box; `default-features = false` drops it and LiteSVM's register tracing.
