@@ -4,6 +4,25 @@ All notable changes to svmscope are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] — 2026-09-06
+
+### Added
+
+- **Shape corpus: library functions named inside stripped programs, automatically.**
+  Library code — `core`, `alloc`, borsh, `anchor_lang`, `solana_program`, the
+  SPL programs — compiles to the same code shape in every program built with
+  the same toolchain. The crate now bundles a corpus of such shapes
+  (`symbols/corpus.jsonl.gz`, from open-source builds with symbols, including
+  Phoenix at its verified commit) and `profile()` applies it to every frame:
+  exact shape matches only, no flags, no uploads, on the CLI and the hosted
+  engine alike. `svmscope symbols dump <so> <debug> [-o]` writes a build's
+  shapes as corpus lines; `svmscope profile --corpus <file>` applies extra
+  ones. Measured on mainnet: Phoenix's frame 66 of 95 functions named;
+  a Pump.fun buy 325 of 837 across its frames (its own private functions
+  cannot be named by any method; the library layer around them is).
+- CI workflow `symbol-corpus` (manual) builds corpus programs across
+  platform-tools versions and Phoenix in its original toolchain image.
+
 ## [0.5.1] — 2026-09-06
 
 ### Added
