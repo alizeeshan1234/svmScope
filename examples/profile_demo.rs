@@ -5,9 +5,14 @@
 //!
 //! Each `program=path` names that program's functions from the unstripped
 //! ELF of the same build (`cargo build-sbf --debug` writes it next to the .so).
-use svmscope::Scope;
+#[cfg(not(feature = "profiler"))]
+fn main() {
+    eprintln!("build with the `profiler` feature (on by default): cargo run --example profile_demo");
+}
 
+#[cfg(feature = "profiler")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use svmscope::Scope;
     let args: Vec<String> = std::env::args().collect();
     let sig = args
         .get(1)
