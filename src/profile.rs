@@ -327,6 +327,11 @@ pub struct FrameProfile {
     /// decoded. Attached by [`Profile::attach_names`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Compute this instruction consumed *on chain*, from the transaction's
+    /// own logs — to compare with `compute_units`, which is what the replay
+    /// charged. Attached by [`Profile::attach_names`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onchain_compute_units: Option<u64>,
     /// The program that ran.
     pub program: String,
     /// Total BPF instructions the frame executed.
@@ -387,6 +392,11 @@ impl FrameProfile {
 pub struct Profile {
     /// One entry per program frame, in execution order.
     pub frames: Vec<FrameProfile>,
+    /// How many program frames the transaction ran on chain (instructions that
+    /// entered the VM). Compared with `frames.len()` it shows how far a
+    /// diverged replay got. Attached by [`Profile::attach_names`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onchain_frames: Option<usize>,
 }
 
 impl Profile {
@@ -407,12 +417,18 @@ impl Profile {
     pub fn attach_names(&mut self, tree: &[crate::CpiEntry], logs: &[String]) -> usize {
         let spans = crate::trace::spans_from_logs(logs, 0);
         let mut aligned = true;
+        let mut onchain: Vec<Option<u64>> = Vec::with_capacity(spans.len());
         let names: Vec<Option<String>> = spans
             .iter()
             .enumerate()
             .map(|(k, span)| {
                 let entry = tree.get(k).filter(|e| e.program == span.program);
                 aligned &= entry.is_some();
+                onchain.push(if aligned {
+                    entry.and_then(|e| e.compute_units)
+                } else {
+                    None
+                });
                 if aligned {
                     entry.and_then(|e| e.name.clone())
                 } else {
@@ -434,9 +450,11 @@ impl Profile {
                 continue;
             }
             frame.name = names[i].clone();
+            frame.onchain_compute_units = onchain[i];
             named += frame.name.is_some() as usize;
             next += 1;
         }
+        self.onchain_frames = Some(tree.iter().filter(|e| e.compute_units.is_some()).count());
         named
     }
 
@@ -1118,6 +1136,7 @@ fn profile_frame(program: String, exe: &Executable, trace: &RegisterTrace) -> Op
     folded.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     Some(FrameProfile {
         name: None,
+        onchain_compute_units: None,
         program,
         instructions: trace.len() as u64,
         compute_units: None,
@@ -1277,7 +1296,10 @@ impl crate::Replay {
         let tx = self.ctx.tx_for(mutations)?;
         let result = crate::replay::replay_result_of(&svm.send_transaction(tx));
         let frames = std::mem::take(&mut *frames.lock().unwrap());
-        let mut profile = Profile { frames };
+        let mut profile = Profile {
+            frames,
+            onchain_frames: None,
+        };
         profile.attach_compute(&result.logs);
         // Exact names first: a bundled symbol map for a program whose on-chain
         // ELF hash matches names every function by address.
@@ -1364,6 +1386,7 @@ mod tests {
     fn frame(program: &str, fns: &[(usize, &str, u64)]) -> FrameProfile {
         FrameProfile {
             name: None,
+            onchain_compute_units: None,
             program: program.into(),
             instructions: fns.iter().map(|f| f.2).sum(),
             compute_units: None,
@@ -1465,6 +1488,7 @@ mod tests {
     fn symbolize_renames_functions_and_stacks_and_refuses_a_mismatch() {
         let mut p = Profile {
             frames: vec![frame("P", &[(0, "entrypoint", 10), (3, "function_3", 90)])],
+            onchain_frames: None,
         };
         let renamed = p.symbolize("P", &tiny_elf()).unwrap();
         assert_eq!(renamed, 1);
@@ -1473,6 +1497,7 @@ mod tests {
         // Entrypoint at a different pc than the ELF says: refused, untouched.
         let mut q = Profile {
             frames: vec![frame("P", &[(5, "entrypoint", 10), (3, "function_3", 90)])],
+            onchain_frames: None,
         };
         assert!(q.symbolize("P", &tiny_elf()).is_err());
         assert_eq!(q.frames[0].functions[1].name, "function_3");
@@ -1521,6 +1546,7 @@ mod tests {
                     (9, "function_9", 30),
                 ],
             )],
+            onchain_frames: None,
         };
         p.frames[0].functions[1].shape = Shape {
             full: 42,
@@ -1575,6 +1601,7 @@ mod tests {
                 frame("Tok", &[(0, "entrypoint", 100)]),
                 frame("Amm", &[(0, "entrypoint", 300), (9, "function_9", 700)]),
             ],
+            onchain_frames: None,
         };
         // Amm calls Tok: the runtime logs Tok's `consumed` first (it finishes
         // first) and records Tok's trace first for the same reason.
@@ -1625,6 +1652,7 @@ mod frame_name_tests {
     fn frame(program: &str) -> FrameProfile {
         FrameProfile {
             name: None,
+            onchain_compute_units: None,
             program: program.into(),
             instructions: 1,
             compute_units: None,
@@ -1675,6 +1703,7 @@ mod frame_name_tests {
                 .into_iter()
                 .map(frame)
                 .collect(),
+            onchain_frames: None,
         };
         assert_eq!(p.attach_names(&tree, &logs), 4);
         let names: Vec<_> = p

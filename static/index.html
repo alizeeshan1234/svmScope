@@ -1294,6 +1294,7 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 .prof-sum { font-size: 12px; color: var(--text-2); line-height: 1.6; margin: var(--s-2) 0 var(--s-3); }
 .prof-sum b { color: var(--text-1); font-family: var(--font-mono); font-weight: 500; }
 .prof-ixs tr.on td { background: var(--brand-soft); color: var(--brand-strong); }
+.prof-ixs td.diff { color: var(--yellow, #e2b93b); }
 .prof-frames { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: var(--s-3); }
 .prof-frames button { font-family: var(--font-mono); font-size: 11px; padding: 3px 9px; border-radius: var(--r-full); border: 1px solid var(--border);
   background: var(--bg-2); color: var(--text-2); cursor: pointer; }
@@ -4735,8 +4736,17 @@ function renderProfile() {
     + (prof.symbolized.length ? ' · symbols: ' + prof.symbolized.map(([pg, n]) => `${esc(short(pg))} (${n} named)`).join(', ') : '') + '</div>';
   html += '<div class="cu-roll">' + progRows.map(([pg, n]) => `<div class="r"><span title="${esc(pg)}">${esc(short(pg))}</span><div class="bar" style="width:${Math.max(2, 100 * n / maxProg)}%"></div><span class="n">${fmt(n)}</span></div>`).join('') + '</div>';
   // The instruction each frame ran, with its compute: the first thing to read.
-  html += '<table class="prof-tbl prof-ixs" style="margin-top:12px"><thead><tr><th>#</th><th>instruction</th><th>program</th><th style="text-align:right">CU</th></tr></thead><tbody>'
-    + frames.map((f, i) => `<tr class="${i === profFrame ? 'on' : ''}" data-i="${i}" style="cursor:pointer"><td class="n">${i + 1}</td><td class="fn${f.name ? '' : ' anon'}">${esc(f.name || 'not decoded')}</td><td class="fn">${esc(progInfo(f.program).known ? progInfo(f.program).name : short(f.program))}</td><td class="n">${f.compute_units != null ? fmt(f.compute_units) : fmt(f.instructions) + ' insns'}</td></tr>`).join('')
+  // Replay CU next to on-chain CU: the replay runs against reconstructed
+  // state and can diverge, so the transaction's own numbers sit beside it.
+  const hasChain = frames.some(f => f.onchain_compute_units != null);
+  const onchainFrames = prof.profile.onchain_frames;
+  if (onchainFrames != null && onchainFrames !== frames.length) {
+    html += `<div class="prof-note" style="margin-top:10px">This replay ran <b>${frames.length}</b> of the <b>${onchainFrames}</b> program frames the transaction ran on chain${prof.result && !prof.result.success ? ' — it failed part-way against reconstructed state' : ''}. Replay CU is what this run charged; on-chain CU is from the transaction's own logs.</div>`;
+  } else if (hasChain) {
+    html += `<div class="prof-note" style="margin-top:10px">Replay CU is what this run charged; on-chain CU is from the transaction's own logs.</div>`;
+  }
+  html += `<table class="prof-tbl prof-ixs" style="margin-top:12px"><thead><tr><th>#</th><th>instruction</th><th>program</th><th style="text-align:right">replay CU</th>${hasChain ? '<th style="text-align:right">on-chain CU</th>' : ''}</tr></thead><tbody>`
+    + frames.map((f, i) => `<tr class="${i === profFrame ? 'on' : ''}" data-i="${i}" style="cursor:pointer"><td class="n">${i + 1}</td><td class="fn${f.name ? '' : ' anon'}">${esc(f.name || 'not decoded')}</td><td class="fn">${esc(progInfo(f.program).known ? progInfo(f.program).name : short(f.program))}</td><td class="n">${f.compute_units != null ? fmt(f.compute_units) : fmt(f.instructions) + ' insns'}</td>${hasChain ? `<td class="n${f.onchain_compute_units != null && f.compute_units != null && f.onchain_compute_units !== f.compute_units ? ' diff' : ''}">${f.onchain_compute_units != null ? fmt(f.onchain_compute_units) : '—'}</td>` : ''}</tr>`).join('')
     + '</tbody></table>';
   html += '<div class="prof-frames" style="margin-top:12px">' + frames.map((f, i) => `<button class="${i === profFrame ? 'on' : ''}" data-i="${i}" title="${esc(f.program)}">#${i + 1} ${f.name ? esc(f.name) + ' · ' : ''}${esc(short(f.program))} · ${fmt(f.compute_units ?? f.instructions)}${f.compute_units != null ? ' CU' : ' insns'}</button>`).join('') + '</div>';
   const f = frames[profFrame];
