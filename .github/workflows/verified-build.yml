@@ -69,10 +69,12 @@ jobs:
           rec["mount_path"] = opt("--mount-path", ".")
           rec["base_image"] = opt("--base-image") or opt("-b")
           rec["cargo_args"] = a[a.index("--")+1:] if "--" in a else []
+          # `--cargo-build-sbf-args="--tools-version v1.54"`: flags for cargo build-sbf itself.
+          rec["sbf_args"] = " ".join(x.split("=", 1)[1].strip('"\'') for x in a if x.startswith("--cargo-build-sbf-args="))
           print(json.dumps(rec, indent=1))
           json.dump(rec, open("record.json", "w"))
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-              for k in ("git_url", "commit", "library_name", "mount_path", "base_image", "on_chain_hash"):
+              for k in ("git_url", "commit", "library_name", "mount_path", "base_image", "on_chain_hash", "sbf_args"):
                   f.write(f"{k}={rec[k]}\n")
               f.write("cargo_args=" + " ".join(rec["cargo_args"]) + "\n")
           PY
@@ -88,9 +90,9 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Build release and debug in that image
         run: |
-          lib="${{ steps.rec.outputs.library_name }}"; mp="${{ steps.rec.outputs.mount_path }}"; extra="${{ steps.rec.outputs.cargo_args }}"
+          lib="${{ steps.rec.outputs.library_name }}"; mp="${{ steps.rec.outputs.mount_path }}"; extra="${{ steps.rec.outputs.cargo_args }}"; sbf="${{ steps.rec.outputs.sbf_args }}"
           run() { docker run --rm -v "$PWD/src:/build" -w "/build/$mp" "${{ steps.img.outputs.image }}" sh -c "$1"; }
-          run "cargo build-sbf -- --locked --frozen $extra || cargo build-sbf -- $extra"
+          run "cargo build-sbf $sbf -- --locked --frozen $extra || cargo build-sbf $sbf -- $extra"
           mkdir -p out/release && cp src/target/deploy/*.so out/release/ && ls -la out/release
           # cargo-build-sbf strips the linker output into target/deploy; the
           # unstripped original keeps the full symbol table for identical code.
