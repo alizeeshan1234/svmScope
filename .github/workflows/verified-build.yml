@@ -10,6 +10,10 @@ on:
         description: space-separated program ids
         required: true
         default: PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY
+      signer:
+        description: only use the build record uploaded by this signer (optional)
+        required: false
+        default: ""
 jobs:
   plan:
     runs-on: ubuntu-latest
@@ -31,7 +35,7 @@ jobs:
         id: rec
         run: |
           pip install -q solders requests
-          python3 - "${{ matrix.program }}" <<'PY'
+          python3 - "${{ matrix.program }}" "${{ inputs.signer }}" <<'PY'
           import json, sys, base64, os, re, requests
           from solders.pubkey import Pubkey
           program = sys.argv[1]
@@ -41,6 +45,8 @@ jobs:
           # redeployed since its last verification still has the right recipe
           # if the hash check below passes).
           signers = ([s["signer"] for s in st if s.get("is_verified")] + [s["signer"] for s in st if not s.get("is_verified")]) if isinstance(st, list) else []
+          if len(sys.argv) > 2 and sys.argv[2]:
+              signers = [sys.argv[2]]
           rpc = "https://api.mainnet-beta.solana.com"
           rec = None
           for signer in signers:
