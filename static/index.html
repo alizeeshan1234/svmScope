@@ -4695,8 +4695,15 @@ function renderProfile() {
   html += '<div class="prof-cols"><div><table class="prof-tbl"><thead><tr><th>function</th><th style="text-align:right">self</th><th style="text-align:right">total</th><th style="text-align:right">calls</th><th style="text-align:right">~CU</th></tr></thead><tbody>'
     + f.functions.slice(0, 25).map(x => `<tr><td class="fn ${/^function_\d+$/.test(x.name) ? 'anon' : ''}">${esc(profName(x.name))}</td><td class="n">${fmt(x.self_insns)}</td><td class="n">${fmt(x.total_insns)}</td><td class="n">${fmt(x.calls)}</td><td class="n">${x.compute_units != null ? fmt(x.compute_units) : '–'}</td></tr>`).join('')
     + '</tbody></table></div><div>';
-  html += '<table class="prof-tbl"><thead><tr><th>syscall</th><th style="text-align:right">calls</th></tr></thead><tbody>'
-    + (f.syscalls.length ? f.syscalls.map(([n, c]) => `<tr><td class="fn">${esc(n)}</td><td class="n">${fmt(c)}</td></tr>`).join('') : '<tr><td class="fn anon" colspan="2">none</td></tr>') + '</tbody></table>';
+  // Runtime fixed charges per syscall (solana-program-runtime defaults); a lower bound,
+  // since memory ops, hashing, return data and CPI account bytes also charge per byte.
+  const sysBase = (n) => /^sol_invoke_signed/.test(n) ? 1000 : /program_address$/.test(n) ? 1500 : n === 'sol_secp256k1_recover' ? 25000
+    : /^sol_(sha256|keccak256|blake3|poseidon)$/.test(n) ? 85 : /^sol_mem(cpy|move|cmp|set)_$/.test(n) ? 10 : 100;
+  const sysRows = f.syscalls.map(([n, c]) => [n, c, c * sysBase(n)]).sort((a, b) => b[2] - a[2]);
+  const sysFloor = sysRows.reduce((a, r) => a + r[2], 0);
+  html += '<table class="prof-tbl"><thead><tr><th>syscall</th><th style="text-align:right">calls</th><th style="text-align:right">≥ CU</th></tr></thead><tbody>'
+    + (sysRows.length ? sysRows.map(([n, c, cu]) => `<tr><td class="fn">${esc(n)}</td><td class="n">${fmt(c)}</td><td class="n">${fmt(cu)}</td></tr>`).join('') : '<tr><td class="fn anon" colspan="3">none</td></tr>') + '</tbody></table>'
+    + (f.syscall_overhead != null && sysRows.length ? `<div class="prof-note">Fixed charges explain at least <b>${fmt(sysFloor)}</b> of the <b>${fmt(f.syscall_overhead)}</b> CU beyond instructions; the rest scales with bytes copied, hashed, or passed to CPIs.</div>` : '');
   html += `<div class="prof-sym">${anon ? `<b>${anon}</b> of ${f.functions.length} functions are unnamed: this program is stripped (every mainnet program is). ` : 'All functions named. '}`
     + `Built it yourself? Add the <code>.debug</code> file <code>cargo build-sbf --debug</code> writes next to the .so, and every function gets its Rust name.<br>`
     + `<input type="file" id="profSymFile" accept=".debug,.so,application/octet-stream" /> <span id="profSymStatus"></span></div>`;

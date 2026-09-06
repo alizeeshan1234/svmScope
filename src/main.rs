@@ -404,9 +404,16 @@ fn print_profile(result: &ReplayResult, profile: &svmscope::profile::Profile) {
             );
         }
         if !f.syscalls.is_empty() {
-            println!("   syscalls:");
-            for (name, n) in f.syscalls.iter().take(10) {
-                println!("   {n:>9}  {name}");
+            let est = f.syscall_estimate();
+            let floor: u64 = est.iter().map(|(_, _, cu)| cu).sum();
+            println!("   syscalls (calls · at least CU by the runtime's fixed charge):");
+            for (name, n, cu) in est.iter().take(10) {
+                println!("   {n:>9} · ≥{cu:>7}  {name}");
+            }
+            if let Some(over) = f.syscall_overhead {
+                println!(
+                    "   fixed charges explain ≥{floor} of the {over} CU beyond instructions; the rest scales with bytes copied, hashed or passed to CPIs"
+                );
             }
         }
     }

@@ -68,6 +68,37 @@ pub struct FrameProfile {
     pub stacks: Vec<(String, u64)>,
 }
 
+/// Where a syscall's price comes from: the runtime's fixed per-call charge
+/// (`solana-program-runtime` execution budget defaults). Calls that also
+/// charge per byte (memory ops, CPI account data, hashing, return data) are
+/// floored at their base, so an estimate built from these is a *lower bound*.
+fn syscall_base_cost(name: &str) -> u64 {
+    match name {
+        "sol_invoke_signed_rust" | "sol_invoke_signed_c" => 1_000,
+        "sol_create_program_address" | "sol_try_find_program_address" => 1_500,
+        "sol_secp256k1_recover" => 25_000,
+        "sol_sha256" | "sol_keccak256" | "sol_blake3" | "sol_poseidon" => 85,
+        "sol_memcpy_" | "sol_memmove_" | "sol_memcmp_" | "sol_memset_" => 10,
+        _ => 100, // sol_log_*, sysvar getters, return data, everything else
+    }
+}
+
+impl FrameProfile {
+    /// A lower-bound itemisation of `syscall_overhead`: each syscall's calls
+    /// times its fixed charge. The gap between the sum and the measured
+    /// overhead is data-size dependent cost (bytes copied, compared, hashed
+    /// or passed to CPIs) the trace cannot see.
+    pub fn syscall_estimate(&self) -> Vec<(String, u64, u64)> {
+        let mut v: Vec<(String, u64, u64)> = self
+            .syscalls
+            .iter()
+            .map(|(name, calls)| (name.clone(), *calls, calls * syscall_base_cost(name)))
+            .collect();
+        v.sort_by_key(|(_, _, cu)| std::cmp::Reverse(*cu));
+        v
+    }
+}
+
 /// The whole transaction's profile: one entry per program frame, in
 /// execution order.
 #[derive(Debug, Clone, Serialize)]
@@ -622,6 +653,22 @@ mod tests {
         assert_eq!(q.frames[0].functions[1].name, "function_3");
         assert_eq!(strip_hash("a::b::h0123456789abcdef"), "a::b");
         assert_eq!(strip_hash("a::b::hxyz"), "a::b::hxyz");
+    }
+
+    #[test]
+    fn syscall_estimate_is_a_lower_bound_by_fixed_charge() {
+        let mut f = frame("P", &[(0, "entrypoint", 10)]);
+        f.syscalls = vec![
+            ("sol_memcpy_".into(), 100),
+            ("sol_invoke_signed_rust".into(), 3),
+            ("sol_try_find_program_address".into(), 2),
+            ("sol_log_".into(), 4),
+        ];
+        let est = f.syscall_estimate();
+        assert_eq!(est[0], ("sol_invoke_signed_rust".into(), 3, 3_000));
+        assert_eq!(est[1], ("sol_try_find_program_address".into(), 2, 3_000));
+        assert_eq!(est[2], ("sol_memcpy_".into(), 100, 1_000));
+        assert_eq!(est[3], ("sol_log_".into(), 4, 400));
     }
 
     #[test]
