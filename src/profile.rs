@@ -249,14 +249,24 @@ pub fn exact_from_build(program: &str, so: &[u8], debug: &[u8]) -> crate::Result
     })
 }
 
-/// Exact symbol maps shipped with the crate (`symbols/exact/*.json`), one per
-/// verified mainnet program rebuilt byte-for-byte with symbols.
+/// Exact symbol maps shipped with the crate (`symbols/exact.jsonl.gz`, one
+/// JSON map per line), one per verified mainnet program rebuilt byte-for-byte
+/// with symbols. Decoded once per process.
 pub fn builtin_exact() -> &'static [ExactSymbols] {
     static EXACT: std::sync::LazyLock<Vec<ExactSymbols>> = std::sync::LazyLock::new(|| {
-        const FILES: &[&str] = &[];
-        FILES
-            .iter()
-            .filter_map(|t| serde_json::from_str(t).ok())
+        use std::io::Read;
+        const GZ: &[u8] = include_bytes!("../symbols/exact.jsonl.gz");
+        let mut text = String::new();
+        if GZ.is_empty()
+            || flate2::read::GzDecoder::new(GZ)
+                .read_to_string(&mut text)
+                .is_err()
+        {
+            return Vec::new();
+        }
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
             .collect()
     });
     &EXACT

@@ -22,7 +22,7 @@ include = [
     "/src/**",
     "/examples/**",
     "/symbols/corpus.jsonl.gz",
-    "/symbols/exact/**",
+    "/symbols/exact.jsonl.gz",
     "/idls/**",
     "/tests/**",
     "/README.md",
