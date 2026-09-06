@@ -118,6 +118,7 @@
 //! at <https://svmscope.vercel.app> — identical results in all four.
 
 mod analyze;
+mod bundled_idls;
 mod check;
 mod compute;
 mod cpi_tree;

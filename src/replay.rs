@@ -89,6 +89,22 @@ fn fetch_programdata_elf_cached(client: &RpcClient, pd_addr: &str) -> Option<Vec
     Some(elf)
 }
 
+/// A program's ELF given its program id, whichever loader owns it: the
+/// programdata account for the upgradeable loader (served from [`ELF_CACHE`]),
+/// or the program account itself for the legacy loaders.
+pub(crate) fn fetch_program_elf(client: &RpcClient, program: &str) -> Option<Vec<u8>> {
+    let data = fetch_account_data(client, program)?;
+    if data.starts_with(b"\x7fELF") {
+        return Some(data);
+    }
+    // Upgradeable loader program account: [0..4]=variant (2 = Program), [4..36]=programdata.
+    if data.len() == 36 && data[..4] == [2, 0, 0, 0] {
+        let pd: [u8; 32] = data[4..36].try_into().ok()?;
+        return fetch_programdata_elf_cached(client, &Address::from(pd).to_string());
+    }
+    None
+}
+
 /// Fetch a single account's raw data via getAccountInfo.
 fn fetch_account_data(client: &RpcClient, address: &str) -> Option<Vec<u8>> {
     let resp: serde_json::Value = client

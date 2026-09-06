@@ -439,10 +439,48 @@ fn parse_discriminator(entry: &Value) -> DiscField {
     }
 }
 
+/// An instruction's discriminator across every IDL dialect: the explicit
+/// `discriminator` array (Anchor 0.30+), the `discriminant: { type, value }`
+/// tag of Shank/Codama IDLs (native programs: Phoenix, Metaplex), or, for a
+/// legacy Anchor IDL with neither, the `sha256("global:<snake_name>")[..8]`
+/// the program itself was compiled with.
+fn instruction_discriminator(ix: &Value) -> DiscField {
+    use sha2::Digest;
+    match parse_discriminator(ix) {
+        DiscField::Absent => {
+            if let Some(d) = ix.get("discriminant") {
+                let width = match d.get("type").and_then(Value::as_str) {
+                    Some("u16") => 2,
+                    Some("u32") => 4,
+                    Some("u64") => 8,
+                    _ => 1,
+                };
+                if let Some(v) = d.get("value").and_then(Value::as_u64) {
+                    return DiscField::Bytes(
+                        v.to_le_bytes()[..width]
+                            .iter()
+                            .map(|b| Some(*b as u64))
+                            .collect(),
+                    );
+                }
+            }
+            match ix.get("name").and_then(Value::as_str) {
+                Some(name) => {
+                    let snake = crate::program::camel_to_snake(name);
+                    let hash = sha2::Sha256::digest(format!("global:{snake}").as_bytes());
+                    DiscField::Bytes(hash[..8].iter().map(|b| Some(*b as u64)).collect())
+                }
+                None => DiscField::Absent,
+            }
+        }
+        other => other,
+    }
+}
+
 fn parse_instruction(ix: &Value) -> IxDef {
     IxDef {
         name: str_field(ix, "name"),
-        discriminator: parse_discriminator(ix),
+        discriminator: instruction_discriminator(ix),
         docs: ix
             .get("docs")
             .and_then(Value::as_array)
@@ -612,7 +650,12 @@ mod tests {
         assert!(modern.accounts[1].children.is_some());
 
         let legacy = model.instruction("legacy").unwrap();
-        assert!(matches!(legacy.discriminator, DiscField::Absent));
+        // No `discriminator` key: derived the way the program was compiled.
+        use sha2::Digest;
+        assert_eq!(
+            legacy.discriminator.lossy_bytes().unwrap(),
+            sha2::Sha256::digest(b"global:legacy")[..8].to_vec()
+        );
         // isMut/isSigner drive the builder view but not the modern lister view.
         assert!(legacy.accounts[0].writable() && legacy.accounts[0].signer());
         assert!(!legacy.accounts[0].writable_modern());

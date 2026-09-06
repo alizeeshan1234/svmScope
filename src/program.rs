@@ -381,7 +381,7 @@ fn instruction_discriminator(instruction: &IxDef, method: &str) -> Result<Vec<u8
     Ok(Sha256::digest(format!("global:{rust_name}").as_bytes())[..8].to_vec())
 }
 
-fn camel_to_snake(name: &str) -> String {
+pub(crate) fn camel_to_snake(name: &str) -> String {
     let mut output = String::with_capacity(name.len());
     for (index, character) in name.chars().enumerate() {
         if character.is_ascii_uppercase() {

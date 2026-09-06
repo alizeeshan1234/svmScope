@@ -17,6 +17,143 @@ const TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const ATA: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 const MEMO: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 const MEMO_V1: &str = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
+const STAKE: &str = "Stake11111111111111111111111111111111111111";
+const VOTE: &str = "Vote111111111111111111111111111111111111111";
+const ALT: &str = "AddressLookupTab1e1111111111111111111111111";
+const LOADER_UPGRADEABLE: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
+const RAYDIUM_AMM: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+const SERUM_V3: &str = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
+const OPENBOOK_V1: &str = "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX";
+
+/// Little-endian u32 tag at the start of the data (the enum layout of the
+/// bincode-serialised native programs: Stake, Vote, ALT, the loaders).
+fn u32_tag(data: &[u8]) -> Option<u32> {
+    data.get(..4)
+        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+}
+
+fn stake_ix(data: &[u8]) -> Option<&'static str> {
+    Some(match u32_tag(data)? {
+        0 => "Initialize",
+        1 => "Authorize",
+        2 => "Delegate Stake",
+        3 => "Split",
+        4 => "Withdraw",
+        5 => "Deactivate",
+        6 => "Set Lockup",
+        7 => "Merge",
+        8 => "Authorize With Seed",
+        9 => "Initialize Checked",
+        10 => "Authorize Checked",
+        11 => "Authorize Checked With Seed",
+        12 => "Set Lockup Checked",
+        13 => "Get Minimum Delegation",
+        14 => "Deactivate Delinquent",
+        15 => "Redelegate",
+        16 => "Move Stake",
+        17 => "Move Lamports",
+        _ => return None,
+    })
+}
+
+fn vote_ix(data: &[u8]) -> Option<&'static str> {
+    Some(match u32_tag(data)? {
+        0 => "Initialize Account",
+        1 => "Authorize",
+        2 => "Vote",
+        3 => "Withdraw",
+        4 => "Update Validator Identity",
+        5 => "Update Commission",
+        6 => "Vote Switch",
+        7 => "Authorize Checked",
+        8 => "Update Vote State",
+        9 => "Update Vote State Switch",
+        10 => "Authorize With Seed",
+        11 => "Authorize Checked With Seed",
+        12 => "Compact Update Vote State",
+        13 => "Compact Update Vote State Switch",
+        14 => "Tower Sync",
+        15 => "Tower Sync Switch",
+        _ => return None,
+    })
+}
+
+fn alt_ix(data: &[u8]) -> Option<&'static str> {
+    Some(match u32_tag(data)? {
+        0 => "Create Lookup Table",
+        1 => "Freeze Lookup Table",
+        2 => "Extend Lookup Table",
+        3 => "Deactivate Lookup Table",
+        4 => "Close Lookup Table",
+        _ => return None,
+    })
+}
+
+fn loader_ix(data: &[u8]) -> Option<&'static str> {
+    Some(match u32_tag(data)? {
+        0 => "Initialize Buffer",
+        1 => "Write",
+        2 => "Deploy With Max Data Len",
+        3 => "Upgrade",
+        4 => "Set Authority",
+        5 => "Close",
+        6 => "Extend Program",
+        7 => "Set Authority Checked",
+        8 => "Migrate",
+        _ => return None,
+    })
+}
+
+/// Raydium AMM v4 — native, single-byte tag, no IDL anywhere.
+fn raydium_amm_ix(data: &[u8]) -> Option<&'static str> {
+    Some(match data.first()? {
+        0 => "Initialize",
+        1 => "Initialize2",
+        2 => "Monitor Step",
+        3 => "Deposit",
+        4 => "Withdraw",
+        5 => "Migrate To OpenBook",
+        6 => "Set Params",
+        7 => "Withdraw Pnl",
+        8 => "Withdraw Srm",
+        9 => "Swap Base In",
+        10 => "Pre Initialize",
+        11 => "Swap Base Out",
+        12 => "Simulate Info",
+        13 => "Admin Cancel Orders",
+        14 => "Create Config Account",
+        15 => "Update Config Account",
+        _ => return None,
+    })
+}
+
+/// Serum DEX v3 / OpenBook v1 — a version byte then a u32 tag.
+fn serum_ix(data: &[u8]) -> Option<&'static str> {
+    Some(match u32_tag(data.get(1..)?)? {
+        0 => "Initialize Market",
+        1 => "New Order",
+        2 => "Match Orders",
+        3 => "Consume Events",
+        4 => "Cancel Order",
+        5 => "Settle Funds",
+        6 => "Cancel Order By Client Id",
+        7 => "Disable Market",
+        8 => "Sweep Fees",
+        9 => "New Order V2",
+        10 => "New Order V3",
+        11 => "Cancel Order V2",
+        12 => "Cancel Order By Client Id V2",
+        13 => "Send Take",
+        14 => "Close Open Orders",
+        15 => "Init Open Orders",
+        16 => "Prune",
+        17 => "Consume Events Permissioned",
+        18 => "Cancel Orders By Client Ids",
+        19 => "Replace Order By Client Id",
+        20 => "Replace Orders By Client Ids",
+        _ => return None,
+    })
+}
 
 /// Decode a Token-program instruction (Tokenkeg / Token-2022) by its leading tag.
 fn token_ix(data: &[u8]) -> Option<&'static str> {
@@ -45,6 +182,27 @@ fn token_ix(data: &[u8]) -> Option<&'static str> {
         22 => "Initialize Immutable Owner",
         23 => "Amount To Ui Amount",
         24 => "Ui Amount To Amount",
+        // Token-2022 only.
+        25 => "Initialize Mint Close Authority",
+        26 => "Transfer Fee Extension",
+        27 => "Confidential Transfer Extension",
+        28 => "Default Account State Extension",
+        29 => "Reallocate",
+        30 => "Memo Transfer Extension",
+        31 => "Create Native Mint",
+        32 => "Initialize Non Transferable Mint",
+        33 => "Interest Bearing Mint Extension",
+        34 => "Cpi Guard Extension",
+        35 => "Initialize Permanent Delegate",
+        36 => "Transfer Hook Extension",
+        37 => "Confidential Transfer Fee Extension",
+        38 => "Withdraw Excess Lamports",
+        39 => "Metadata Pointer Extension",
+        40 => "Group Pointer Extension",
+        41 => "Group Member Pointer Extension",
+        42 => "Confidential Mint Burn Extension",
+        43 => "Scaled Ui Amount Extension",
+        44 => "Pausable Extension",
         _ => return None,
     })
 }
@@ -260,7 +418,20 @@ fn enrich_with(
 
     let is_native = matches!(
         program,
-        TOKEN | TOKEN_2022 | SYSTEM | COMPUTE_BUDGET | ATA | MEMO | MEMO_V1
+        TOKEN
+            | TOKEN_2022
+            | SYSTEM
+            | COMPUTE_BUDGET
+            | ATA
+            | MEMO
+            | MEMO_V1
+            | STAKE
+            | VOTE
+            | ALT
+            | LOADER_UPGRADEABLE
+            | RAYDIUM_AMM
+            | SERUM_V3
+            | OPENBOOK_V1
     );
 
     // Anchor's `emit_cpi!` invokes the program itself with the event bytes,
@@ -295,6 +466,12 @@ fn enrich_with(
                 }
                 .into(),
             ),
+            STAKE => stake_ix(data).map(String::from),
+            VOTE => vote_ix(data).map(String::from),
+            ALT => alt_ix(data).map(String::from),
+            LOADER_UPGRADEABLE => loader_ix(data).map(String::from),
+            RAYDIUM_AMM => raydium_amm_ix(data).map(String::from),
+            SERUM_V3 | OPENBOOK_V1 => serum_ix(data).map(String::from),
             _ => Some("Memo".into()),
         };
         let names = native_account_names(program, data)

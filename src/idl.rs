@@ -30,8 +30,68 @@ const PROGRAM_METADATA_PROGRAM: &str = "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7n
 /// Explorer reads both, so we do too: the legacy Anchor IDL account
 /// (`anchor:idl` seed), then the newer Program Metadata program.
 pub(crate) fn fetch_idl_json(client: &RpcClient, program_id: Address) -> Option<Value> {
+    let id = program_id.to_string();
     fetch_idl_anchor_account(client, program_id)
         .or_else(|| fetch_idl_program_metadata(client, program_id))
+        // Programs that never published on-chain (native/Shank programs such as
+        // Phoenix and Metaplex) ship with svmscope.
+        .or_else(|| crate::bundled_idls::bundled_idl(&id))
+        // Last resort for an Anchor program with no IDL anywhere: its handler
+        // names are still inside the binary.
+        .or_else(|| {
+            crate::replay::fetch_program_elf(client, &id)
+                .and_then(|elf| synthesize_from_elf(&elf, &id))
+        })
+}
+
+/// Recover an Anchor program's instruction names from its compiled binary. The
+/// dispatcher of every Anchor program (unless built with `no-log-ix-name`)
+/// logs `Instruction: <Name>` on entry, so those literals sit in the ELF's
+/// read-only data. Rust packs adjacent string literals with no terminator, so
+/// each literal's true end is unknown; every identifier prefix is offered as a
+/// candidate and only the one whose `sha256("global:<snake>")` matches real
+/// instruction data ever surfaces. Produces a minimal IDL (names and
+/// discriminators only, no accounts or args).
+pub(crate) fn synthesize_from_elf(elf: &[u8], program: &str) -> Option<Value> {
+    use sha2::{Digest, Sha256};
+    const TAG: &[u8] = b"Instruction: ";
+    let mut names = std::collections::BTreeSet::new();
+    let mut at = 0;
+    while let Some(pos) = elf[at..].windows(TAG.len()).position(|w| w == TAG) {
+        let start = at + pos + TAG.len();
+        let ident: Vec<u8> = elf[start..]
+            .iter()
+            .take(48)
+            .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_')
+            .copied()
+            .collect();
+        for n in 1..=ident.len() {
+            if let Ok(s) = std::str::from_utf8(&ident[..n]) {
+                if s.as_bytes()[0].is_ascii_alphabetic() {
+                    names.insert(crate::program::camel_to_snake(s));
+                }
+            }
+        }
+        at = start;
+    }
+    if names.is_empty() {
+        return None;
+    }
+    let instructions: Vec<Value> = names
+        .into_iter()
+        .map(|name| {
+            let disc: Vec<u8> = Sha256::digest(format!("global:{name}").as_bytes())[..8].to_vec();
+            serde_json::json!({ "name": name, "discriminator": disc, "accounts": [], "args": [] })
+        })
+        .collect();
+    Some(serde_json::json!({
+        "address": program,
+        "metadata": { "name": "recovered", "origin": "svmscope-elf",
+                      "note": "instruction names recovered from the program binary; no accounts or args" },
+        "instructions": instructions,
+        "accounts": [],
+        "types": [],
+    }))
 }
 
 /// Legacy: the Anchor IDL account, a `create_with_seed(..,"anchor:idl",..)`
@@ -230,11 +290,22 @@ fn account_spec(node: &AccountNode) -> IdlAccountSpec {
 /// Find the IDL instruction whose 8-byte discriminator matches this instruction's
 /// data — the entry that names it and describes its args and accounts.
 pub(crate) fn find_ix(idl: &Value, data: &[u8]) -> Option<IxDef> {
-    let disc = data.get(0..8)?;
-    IdlModel::parse(idl)
-        .instructions
-        .into_iter()
-        .find(|ix| ix.discriminator.lossy_bytes().is_some_and(|b| b == disc))
+    IdlModel::parse(idl).instructions.into_iter().find(|ix| {
+        ix.discriminator
+            .lossy_bytes()
+            .is_some_and(|b| !b.is_empty() && data.get(..b.len()) == Some(b.as_slice()))
+    })
+}
+
+/// How many leading bytes of instruction data the discriminator occupies: 8
+/// for Anchor, 1/2/4/8 for a Shank `discriminant`.
+pub(crate) fn disc_len(idl_ix: &IxDef) -> usize {
+    idl_ix
+        .discriminator
+        .lossy_bytes()
+        .map(|b| b.len())
+        .filter(|n| *n > 0)
+        .unwrap_or(8)
 }
 
 /// Borsh-decode an Anchor instruction's arguments — the bytes after the 8-byte
@@ -243,7 +314,7 @@ pub(crate) fn find_ix(idl: &Value, data: &[u8]) -> Option<IxDef> {
 /// are no longer trustworthy), same rule as the account-field walker.
 pub(crate) fn decode_ix_args(idl_ix: &IxDef, data: &[u8]) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
-    let mut off = 8usize; // skip the discriminator
+    let mut off = disc_len(idl_ix); // skip the discriminator
     for arg in &idl_ix.args {
         let name = arg.name.clone().unwrap_or_default();
         match arg.ty.as_ref().and_then(resolve_fixed) {
@@ -667,7 +738,7 @@ pub(crate) fn decode_event(idl: &Value, data: &[u8]) -> Option<DecodedAccount> {
 /// fixed-size scalar; a `vec`/`string`/`option` before it makes the offset
 /// unknowable without a full decode.
 pub(crate) fn ix_arg_span(idl_ix: &IxDef, arg: &str) -> Option<(usize, usize, String)> {
-    let mut off = 8usize;
+    let mut off = disc_len(idl_ix);
     for a in &idl_ix.args {
         let kind = a.ty.as_ref().and_then(resolve_fixed)?;
         if a.name.as_deref() == Some(arg) {
@@ -830,5 +901,46 @@ mod tests {
         // resolve_fixed must not overflow computing element_size * count.
         let ty = json!({ "array": ["u64", u64::MAX] });
         assert!(resolve_fixed(&IdlType::parse(&ty)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn legacy_anchor_idl_matches_by_derived_discriminator() {
+        // Pre-0.30 IDL: camelCase names, no `discriminator` key.
+        let idl = serde_json::json!({ "instructions": [
+            { "name": "initializeV2", "accounts": [], "args": [] },
+            { "name": "swap", "accounts": [], "args": [] }
+        ]});
+        let mut data = Sha256::digest(b"global:initialize_v2")[..8].to_vec();
+        data.extend([9, 9, 9]);
+        let ix = find_ix(&idl, &data).expect("legacy discriminator derived");
+        assert_eq!(ix.name.as_deref(), Some("initializeV2"));
+        assert_eq!(disc_len(&ix), 8);
+        assert!(find_ix(&idl, &[0u8; 8]).is_none());
+    }
+
+    #[test]
+    fn instruction_names_recovered_from_packed_rodata() {
+        // Two Anchor log literals packed back to back, then unrelated text.
+        let elf = b"\x7fELF....Instruction: BuyInstruction: SellAnchorError occurred...".to_vec();
+        let idl = synthesize_from_elf(&elf, "Prog").expect("names found");
+        let disc = |n: &str| Sha256::digest(format!("global:{n}").as_bytes())[..8].to_vec();
+        assert_eq!(
+            find_ix(&idl, &disc("buy")).unwrap().name.as_deref(),
+            Some("buy")
+        );
+        assert_eq!(
+            find_ix(&idl, &disc("sell")).unwrap().name.as_deref(),
+            Some("sell")
+        );
+        // The over-long packed prefix is a candidate but never matches real data.
+        assert!(find_ix(&idl, &disc("sell_anchor_error")).is_some());
+        assert!(find_ix(&idl, &[0u8; 8]).is_none());
+        assert!(synthesize_from_elf(b"no log literals here", "Prog").is_none());
     }
 }
