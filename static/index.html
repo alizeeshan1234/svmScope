@@ -1425,6 +1425,8 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
    row must show: the instruction's name and the compute it consumed. */
 .simple .step .nchg { display: none; }
 .simple .step .prog .addr-pill { display: none; }
+/* …except when the pill is the program's only name (unknown program). */
+.simple .step .prog .nm .addr-pill { display: inline; }
 .dbg-plain { font-size: 15px; color: var(--text-1); line-height: 1.5; margin: 6px 0 10px; }
 details.tech > summary { cursor: pointer; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .09em; color: var(--text-3); padding: 8px 0; list-style: none; }
 details.tech > summary::-webkit-details-marker { display: none; }
@@ -2027,9 +2029,7 @@ function progChip(id) {
   const p = progInfo(id);
   const dot = `<span class="dot" style="color:${p.color};background:${p.color}"></span>`;
   if (p.known) return `<span class="prog">${dot}<span class="nm">${esc(p.name)}</span>${copyPill(id, short(id))}</span>`;
-  // Unknown program: the short id is the name, always visible (the copy pill
-  // is hidden inside debugger rows, so it must not be the only text).
-  return `<span class="prog">${dot}<span class="nm">${esc(short(id))}${copyPill(id, short(id))}</span></span>`;
+  return `<span class="prog">${dot}<span class="nm">${copyPill(id, short(id))}</span></span>`;
 }
 function progPill(id) {
   const p = progInfo(id);
