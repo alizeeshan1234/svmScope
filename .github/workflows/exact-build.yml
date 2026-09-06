@@ -1,0 +1,38 @@
+# Exact rebuilds of verified mainnet programs, with symbols. A build whose
+# stripped sha256 equals the on-chain executable hash is byte-identical to what
+# runs on mainnet, so its .debug symbol table names every function by address.
+name: exact-build
+on:
+  workflow_dispatch:
+jobs:
+  phoenix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        commit: [d66d2cddc7bcfd9fb3d89e5242e97f6928cd7361, e879f1c2b455a98f3cb72f9757ea73c836b3978c, master]
+    steps:
+      - name: Build Phoenix in the solana-verify image for its pinned solana-program 1.14.9
+        run: |
+          cat > Dockerfile <<'DOCKER'
+          FROM solanafoundation/solana-verifiable-build:1.14.9
+          RUN git clone https://github.com/Ellipsis-Labs/phoenix-v1.git /build
+          WORKDIR /build
+          RUN git checkout ${{ matrix.commit }}
+          RUN cargo build-sbf -- --locked --frozen && mkdir -p /out/release && cp target/deploy/*.so /out/release/
+          RUN rm -rf target && (cargo build-sbf --debug -- --locked --frozen || cargo build-sbf --debug) && mkdir -p /out/debug && cp target/deploy/*.so target/deploy/*.debug /out/debug/ 2>/dev/null || cp -r target/deploy/. /out/debug/
+          DOCKER
+          docker build -t phoenix-exact .
+          id=$(docker create phoenix-exact) && docker cp "$id:/out" ./out && docker rm "$id"
+          ls -la out/*
+          python3 - <<'PY'
+          import hashlib, glob
+          for f in sorted(glob.glob('out/*/*.so')):
+              d = open(f, 'rb').read()
+              print(f, len(d), 'stripped sha256', hashlib.sha256(d.rstrip(b'\0')).hexdigest())
+          print('on-chain PhoeNiX stripped sha256 = 6877a5b732b3494b...')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phoenix-${{ matrix.commit }}
+          path: out/
