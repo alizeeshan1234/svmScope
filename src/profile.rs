@@ -1655,3 +1655,30 @@ mod frame_name_tests {
         assert_eq!(names, ["Get Size", "Create", "Mint", "Route"]);
     }
 }
+
+#[cfg(test)]
+mod exact_bundle_tests {
+    #[test]
+    fn every_bundled_exact_map_parses_and_has_an_entrypoint() {
+        use std::io::Read;
+        let gz: &[u8] = include_bytes!("../symbols/exact.jsonl.gz");
+        let mut text = String::new();
+        flate2::read::GzDecoder::new(gz)
+            .read_to_string(&mut text)
+            .unwrap();
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            super::builtin_exact().len(),
+            lines.len(),
+            "a bundled map failed to parse"
+        );
+        for m in super::builtin_exact() {
+            assert_eq!(m.elf_sha256.len(), 64, "{}: bad hash", m.program);
+            assert!(
+                m.symbols.values().any(|n| n == "entrypoint"),
+                "{}: no entrypoint",
+                m.program
+            );
+        }
+    }
+}
