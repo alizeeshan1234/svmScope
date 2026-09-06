@@ -89,8 +89,9 @@ jobs:
           run() { docker run --rm -v "$PWD/src:/build" -w "/build/$mp" "${{ steps.img.outputs.image }}" sh -c "$1"; }
           run "cargo build-sbf -- --locked --frozen $extra || cargo build-sbf -- $extra"
           mkdir -p out/release && cp src/target/deploy/*.so out/release/ && ls -la out/release
-          run "rm -rf /build/target && (cargo build-sbf --debug -- --locked --frozen $extra || cargo build-sbf --debug -- $extra)"
-          mkdir -p out/debug && cp src/target/deploy/*.so src/target/deploy/*.debug out/debug/ 2>/dev/null; ls -la out/debug
+          # cargo-build-sbf strips the linker output into target/deploy; the
+          # unstripped original keeps the full symbol table for identical code.
+          mkdir -p out/symbols && cp src/target/sbf-solana-solana/release/*.so out/symbols/ 2>/dev/null; ls -la out/symbols
           cp record.json out/
       - name: Compare with the on-chain hash
         run: |
