@@ -12,13 +12,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev protobuf-compiler ca-certificates perl make \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy only what the server crate needs to compile. `include_str!` in
-# server/src/main.rs pulls in ../../static/index.html at compile time, so static/
-# must be present during the build.
+# Copy only what the server crate needs to compile. Everything embedded with
+# `include_str!`/`include_bytes!` must be present during the build:
+# static/index.html (server), symbols/corpus.jsonl.gz (profiler shape corpus)
+# and idls/*.json (bundled IDLs). A missing directory fails the build with
+# "couldn't read src/../<dir>/<file>".
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
 COPY server ./server
 COPY static ./static
+COPY symbols ./symbols
+COPY idls ./idls
 
 RUN cargo build --release -p svmscope-server
 
