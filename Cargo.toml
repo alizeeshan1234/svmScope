@@ -41,6 +41,11 @@ flate2 = "1.1.9"
 # `precompiles` loads the ed25519 / secp256k1 sig-verify precompiles; without it
 # any transaction that invokes one fails to replay with InvalidProgramForExecution.
 litesvm = { version = "0.16", features = ["precompiles"] }
+# Optional, `profiler` feature: per-function compute attribution from LiteSVM's
+# BPF register tracing. Pulled in only when profiling is enabled.
+solana-program-runtime = { version = "=4.2.1", optional = true }
+solana-transaction-context = { version = "=4.2.1", optional = true }
+rustc-demangle = { version = "0.1", optional = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 serde_json = "1"
@@ -61,6 +66,16 @@ solana-instruction = "=3.4.1"
 solana-message = "=4.4.1"
 solana-signer = "=3.0.1"
 sha2 = "0.10"
+
+[[example]]
+name = "profile_demo"
+required-features = ["profiler"]
+
+[features]
+default = []
+# Compute profiler: traces every BPF instruction a transaction executes and
+# attributes it to functions and syscalls. Turns on LiteSVM register tracing.
+profiler = ["litesvm/register-tracing", "dep:solana-program-runtime", "dep:solana-transaction-context", "dep:rustc-demangle"]
 
 [dev-dependencies]
 # Enables LiteSVM's feature-set accessors (get_feature_set) for tests only;

@@ -132,6 +132,8 @@ mod idl_model;
 mod invariant;
 pub(crate) mod ixname;
 mod preflight;
+#[cfg(feature = "profiler")]
+pub mod profile;
 mod program;
 pub mod reconstruct;
 mod replay;

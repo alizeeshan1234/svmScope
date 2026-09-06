@@ -1040,7 +1040,7 @@ impl PatchComparison {
 /// then replayed locally any number of times. Every run builds a pristine SVM,
 /// so runs are independent, repeatable, and free.
 pub struct Replay {
-    ctx: ReplayContext,
+    pub(crate) ctx: ReplayContext,
     /// What actually happened on-chain (`None` for pre-flight transactions and
     /// fixtures captured before outcomes were recorded).
     recorded: Option<OnchainRecord>,

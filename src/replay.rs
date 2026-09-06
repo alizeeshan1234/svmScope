@@ -323,10 +323,25 @@ pub struct FeatureToggle {
 /// `features` optionally overrides the runtime feature set: we start from the
 /// mainnet-active set (the replay baseline) and flip each requested gate, so a
 /// transaction can be re-executed as if a feature were (in)active.
-fn svm_from_loaded(loaded: &[(Address, Loaded)], features: &[FeatureToggle], slot: u64) -> LiteSVM {
+/// A fresh SVM holding `loaded`, with BPF register tracing on when `tracing`
+/// is set (the profiler's world). Tracing costs memory per executed
+/// instruction, so it is never on for ordinary replays.
+fn svm_from_loaded_with(
+    loaded: &[(Address, Loaded)],
+    features: &[FeatureToggle],
+    slot: u64,
+    tracing: bool,
+) -> LiteSVM {
     // Disable sigverify + blockhash check: we're replaying an already-signed
     // transaction, so its original blockhash won't be valid in a fresh SVM.
-    let mut svm = LiteSVM::new()
+    #[cfg(feature = "profiler")]
+    let base = LiteSVM::new_debuggable(tracing);
+    #[cfg(not(feature = "profiler"))]
+    let base = {
+        debug_assert!(!tracing, "profiler feature is off");
+        LiteSVM::new()
+    };
+    let mut svm = base
         .with_sigverify(false)
         .with_blockhash_check(false)
         // The debugger splits logs per step; LiteSVM's default 10 KB cap would
@@ -622,7 +637,17 @@ impl ReplayContext {
     /// A pristine SVM loaded with the reconstructed state, its clock advanced to
     /// the transaction's slot (and then by any requested time travel).
     fn fresh_svm(&self) -> LiteSVM {
-        let mut svm = svm_from_loaded(&self.loaded, &self.feature_toggles, self.slot.unwrap_or(0));
+        self.fresh_svm_with(false)
+    }
+
+    /// [`Self::fresh_svm`], optionally with BPF register tracing enabled.
+    pub(crate) fn fresh_svm_with(&self, tracing: bool) -> LiteSVM {
+        let mut svm = svm_from_loaded_with(
+            &self.loaded,
+            &self.feature_toggles,
+            self.slot.unwrap_or(0),
+            tracing,
+        );
         let mut clock = svm.get_sysvar::<Clock>();
         self.base_clock(&mut clock);
         if !self.time_travel.is_noop() {
@@ -1973,6 +1998,31 @@ impl ReplayContext {
         Ok(tx)
     }
 
+    /// The transaction with `mutations` applied to its instruction data, for
+    /// callers that drive the SVM themselves (the profiler).
+    #[cfg(feature = "profiler")]
+    pub(crate) fn tx_for(&self, mutations: &[Mutation]) -> Result<VersionedTransaction> {
+        let resolved: Vec<Mutation> = mutations
+            .iter()
+            .map(|m| self.resolve_mutation(m))
+            .collect::<Result<_>>()?;
+        self.tx_with_mutations(&resolved)
+    }
+
+    /// Apply `mutations` to `svm` (the profiler's copy of [`Self::run_full`]'s
+    /// setup without executing).
+    #[cfg(feature = "profiler")]
+    pub(crate) fn apply_mutations_to(
+        &self,
+        svm: &mut LiteSVM,
+        mutations: &[Mutation],
+    ) -> Result<()> {
+        for m in mutations {
+            apply_mutation(svm, &self.resolve_mutation(m)?)?;
+        }
+        Ok(())
+    }
+
     /// Run mutations and keep the post-replay SVM so state can be inspected.
     /// A mutation that can't be applied is a hard `Err`, never a failed replay.
     fn run_full(&self, mutations: &[Mutation]) -> Result<(ReplayResult, LiteSVM)> {
@@ -2336,7 +2386,7 @@ mod tests {
                 rent_epoch: 0,
             }),
         )];
-        let svm = svm_from_loaded(&loaded, &[], 0);
+        let svm = svm_from_loaded_with(&loaded, &[], 0, false);
         let stored = svm
             .get_account(&rent_addr)
             .expect("rent sysvar account in the world");
@@ -2344,7 +2394,7 @@ mod tests {
         // The runtime-side cache took it too, not just the account bytes.
         assert_eq!(svm.minimum_balance_for_rent_exemption(165), 1_855_569);
         // Without it, LiteSVM's default (3,480 × 2.0) applies.
-        let default = svm_from_loaded(&[], &[], 0);
+        let default = svm_from_loaded_with(&[], &[], 0, false);
         let default_rent = parse_rent(&default.get_account(&rent_addr).unwrap().data).unwrap();
         assert_eq!(default_rent.minimum_balance(165), 2_039_280);
 
@@ -2443,20 +2493,21 @@ mod tests {
         let pk = solana_pubkey::Pubkey::new_from_array(feat.to_bytes());
 
         // Baseline (no toggles) has it active…
-        let base = svm_from_loaded(&[], &[], 0);
+        let base = svm_from_loaded_with(&[], &[], 0, false);
         assert!(
             base.get_feature_set().is_active(&pk),
             "gate should be active by default"
         );
 
         // …and our deactivate toggle actually removes it from the runtime set.
-        let off = svm_from_loaded(
+        let off = svm_from_loaded_with(
             &[],
             &[FeatureToggle {
                 id: feat,
                 active: false,
             }],
             0,
+            false,
         );
         assert!(
             !off.get_feature_set().is_active(&pk),

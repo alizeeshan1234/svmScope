@@ -523,7 +523,7 @@ dependencies = [
  "asn1-rs-derive",
  "asn1-rs-impl",
  "displaydoc",
- "nom",
+ "nom 7.1.3",
  "num-traits",
  "rusticata-macros",
  "thiserror 2.0.20",
@@ -1414,7 +1414,7 @@ checksum = "07da5016415d5a3c4dd39b11ed26f915f52fc4e0dc197d87908bc916e51bc1a6"
 dependencies = [
  "asn1-rs",
  "displaydoc",
- "nom",
+ "nom 7.1.3",
  "num-bigint 0.4.8",
  "num-traits",
  "rusticata-macros",
@@ -2018,6 +2018,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "histogram"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2577,10 +2583,13 @@ dependencies = [
  "agave-precompiles",
  "agave-reserved-account-keys",
  "ansi_term",
+ "hex",
  "indexmap",
  "itertools 0.15.0",
  "log",
+ "nom 8.0.0",
  "serde",
+ "sha2 0.10.9",
  "solana-account 4.3.2",
  "solana-address 2.6.1",
  "solana-address-lookup-table-interface",
@@ -2743,6 +2752,15 @@ checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
 dependencies = [
  "memchr",
  "minimal-lexical",
+]
+
+[[package]]
+name = "nom"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -3547,7 +3565,7 @@ version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf0c4a6ece9950b9abdb62b1cfcf2a68b3b67a10ba445b3bb85be2a293d0632"
 dependencies = [
- "nom",
+ "nom 7.1.3",
 ]
 
 [[package]]
@@ -6362,6 +6380,7 @@ dependencies = [
  "bs58",
  "flate2",
  "litesvm",
+ "rustc-demangle",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6373,11 +6392,13 @@ dependencies = [
  "solana-instruction",
  "solana-keypair",
  "solana-message",
+ "solana-program-runtime",
  "solana-pubkey 4.2.1",
  "solana-reward-info",
  "solana-signer",
  "solana-system-interface 3.2.0",
  "solana-transaction",
+ "solana-transaction-context",
  "thiserror 2.0.20",
 ]
 
@@ -7190,7 +7211,7 @@ dependencies = [
  "data-encoding",
  "der-parser",
  "lazy_static",
- "nom",
+ "nom 7.1.3",
  "oid-registry",
  "rusticata-macros",
  "thiserror 2.0.20",
