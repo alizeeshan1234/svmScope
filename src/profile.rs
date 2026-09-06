@@ -335,46 +335,44 @@ impl Profile {
     /// spans are matched to frames in completion order. Builtins log no
     /// `consumed` line and leave no trace, so mismatched program ids are
     /// skipped.
-    /// Name every frame with the instruction it ran. The inspector records a
-    /// frame when an invocation *finishes*, so frames come in post-order
-    /// (children before their caller); builtins (System, Compute Budget, …)
-    /// run outside the VM and produce no frame; and instructions after the
-    /// failing one never run at all. So the tree is walked in post-order with
-    /// builtins dropped, and a tree node whose program is not the next frame's
-    /// program is one that did not execute — it is skipped, never guessed.
-    pub fn attach_names(&mut self, tree: &[crate::CpiEntry]) -> usize {
-        // Pre-order + stack_height → post-order indices.
-        let mut order = Vec::with_capacity(tree.len());
-        let mut stack: Vec<usize> = Vec::new();
-        for (i, e) in tree.iter().enumerate() {
-            while stack
-                .last()
-                .is_some_and(|&t| tree[t].stack_height >= e.stack_height)
-            {
-                order.push(stack.pop().unwrap());
-            }
-            stack.push(i);
-        }
-        while let Some(t) = stack.pop() {
-            order.push(t);
-        }
-        let mut named = 0;
-        let mut frames = self.frames.iter_mut();
-        let mut frame = frames.next();
+    /// Name every frame with the instruction it ran. The replay's logs give
+    /// one span per invocation in the on-chain order, so span *k* is tree
+    /// entry *k* for as long as the programs agree (the replay stops at its
+    /// failure; nothing after it ran). Frames are then paired with spans the
+    /// way [`Profile::attach_compute`] does: in completion order, skipping the
+    /// builtins that run outside the VM and produce no frame.
+    pub fn attach_names(&mut self, tree: &[crate::CpiEntry], logs: &[String]) -> usize {
+        let spans = crate::trace::spans_from_logs(logs, 0);
+        let mut aligned = true;
+        let names: Vec<Option<String>> = spans
+            .iter()
+            .enumerate()
+            .map(|(k, span)| {
+                let entry = tree.get(k).filter(|e| e.program == span.program);
+                aligned &= entry.is_some();
+                if aligned {
+                    entry.and_then(|e| e.name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut order: Vec<usize> = (0..spans.len()).collect();
+        order.sort_by_key(|&i| spans[i].end);
+        let (mut next, mut named) = (0usize, 0usize);
         for i in order {
-            let entry = &tree[i];
-            if is_builtin(&entry.program) {
-                continue;
+            if spans[i].cu_consumed.is_none() {
+                continue; // builtin: no frame
             }
-            let Some(f) = frame.as_deref_mut() else {
+            let Some(frame) = self.frames.get_mut(next) else {
                 break;
             };
-            if f.program != entry.program {
-                continue; // did not run in this replay
+            if frame.program != spans[i].program {
+                continue;
             }
-            f.name = entry.name.clone();
-            named += f.name.is_some() as usize;
-            frame = frames.next();
+            frame.name = names[i].clone();
+            named += frame.name.is_some() as usize;
+            next += 1;
         }
         named
     }
@@ -1514,48 +1512,51 @@ mod frame_name_tests {
     }
 
     #[test]
-    fn names_follow_completion_order_skipping_builtins_and_unrun_steps() {
+    fn names_follow_the_replay_logs_and_skip_builtins_and_unrun_steps() {
         const SYS: &str = "11111111111111111111111111111111";
+        const CB: &str = "ComputeBudget111111111111111111111111111111";
         let tree = vec![
-            entry(
-                "ComputeBudget111111111111111111111111111111",
-                "Set Limit",
-                1,
-            ),
+            entry(CB, "Set Limit", 1),
             entry("ATA", "Create", 1),
             entry("TOK", "Get Size", 2),
             entry(SYS, "Create Account", 2),
-            entry("TOK", "Init Account", 2),
             entry("JUP", "Route", 1),
-            entry("PHX", "Swap", 2),
-            entry("TOK", "Transfer", 3),
             entry("HYX", "Mint", 2),
             entry("TOK", "Transfer Checked", 3), // never ran: HYX failed first
             entry("TOK", "Close Account", 1),    // never ran: after the failure
         ];
+        let logs: Vec<String> = [
+            format!("Program {CB} invoke [1]"),
+            format!("Program {CB} success"),
+            "Program ATA invoke [1]".into(),
+            "Program TOK invoke [2]".into(),
+            "Program TOK consumed 5 of 100 compute units".into(),
+            "Program TOK success".into(),
+            format!("Program {SYS} invoke [2]"),
+            format!("Program {SYS} success"),
+            "Program ATA consumed 20 of 100 compute units".into(),
+            "Program ATA success".into(),
+            "Program JUP invoke [1]".into(),
+            "Program HYX invoke [2]".into(),
+            "Program HYX consumed 30 of 100 compute units".into(),
+            "Program HYX failed: custom program error: 0x1".into(),
+            "Program JUP consumed 40 of 100 compute units".into(),
+            "Program JUP failed: custom program error: 0x1".into(),
+        ]
+        .into_iter()
+        .collect();
         let mut p = Profile {
-            frames: ["TOK", "TOK", "ATA", "TOK", "PHX", "HYX", "JUP"]
+            frames: ["TOK", "ATA", "HYX", "JUP"]
                 .into_iter()
                 .map(frame)
                 .collect(),
         };
-        assert_eq!(p.attach_names(&tree), 7);
+        assert_eq!(p.attach_names(&tree, &logs), 4);
         let names: Vec<_> = p
             .frames
             .iter()
             .map(|f| f.name.as_deref().unwrap())
             .collect();
-        assert_eq!(
-            names,
-            [
-                "Get Size",
-                "Init Account",
-                "Create",
-                "Transfer",
-                "Swap",
-                "Mint",
-                "Route"
-            ]
-        );
+        assert_eq!(names, ["Get Size", "Create", "Mint", "Route"]);
     }
 }

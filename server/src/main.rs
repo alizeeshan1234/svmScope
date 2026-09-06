@@ -625,7 +625,7 @@ fn run_profile(
     let (result, mut profile) = replay.profile(&mutations)?;
     // Instruction names on every frame, decoded exactly as the Analyze tree does.
     if let Ok(analysis) = scope.analyze(&signature) {
-        profile.attach_names(&analysis.cpi_tree);
+        profile.attach_names(&analysis.cpi_tree, &result.logs);
     }
     let mut symbolized = Vec::new();
     for (program, debug, so) in symbols {

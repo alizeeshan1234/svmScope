@@ -93,8 +93,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             scope.replay_at_slot(sig)?
         };
         let (result, mut profile) = replay.profile(&[])?;
-        if let Ok(analysis) = scope.analyze(signature) {
-            profile.attach_names(&analysis.cpi_tree);
+        // `signature` is the subcommand word here; `sig` is the transaction.
+        match scope.analyze(sig) {
+            Ok(analysis) => {
+                profile.attach_names(&analysis.cpi_tree, &result.logs);
+            }
+            Err(e) => eprintln!("instruction names unavailable: {e}"),
         }
         let mut i = 3;
         while i < args.len() {
