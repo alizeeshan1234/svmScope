@@ -4697,7 +4697,7 @@ function renderProfile() {
     + '</tbody></table></div><div>';
   // Runtime fixed charges per syscall (solana-program-runtime defaults); a lower bound,
   // since memory ops, hashing, return data and CPI account bytes also charge per byte.
-  const sysBase = (n) => /^sol_invoke_signed/.test(n) ? 1000 : /program_address$/.test(n) ? 1500 : n === 'sol_secp256k1_recover' ? 25000
+  const sysBase = (n) => /^sol_invoke_signed/.test(n) ? 946 : /program_address$/.test(n) ? 1500 : n === 'sol_secp256k1_recover' ? 25000
     : /^sol_(sha256|keccak256|blake3|poseidon)$/.test(n) ? 85 : /^sol_mem(cpy|move|cmp|set)_$/.test(n) ? 10 : 100;
   const sysRows = f.syscalls.map(([n, c]) => [n, c, c * sysBase(n)]).sort((a, b) => b[2] - a[2]);
   const sysFloor = sysRows.reduce((a, r) => a + r[2], 0);

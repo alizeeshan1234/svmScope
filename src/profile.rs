@@ -74,7 +74,8 @@ pub struct FrameProfile {
 /// floored at their base, so an estimate built from these is a *lower bound*.
 fn syscall_base_cost(name: &str) -> u64 {
     match name {
-        "sol_invoke_signed_rust" | "sol_invoke_signed_c" => 1_000,
+        // `DEFAULT_INVOCATION_COST` in solana-program-runtime 4.2.
+        "sol_invoke_signed_rust" | "sol_invoke_signed_c" => 946,
         "sol_create_program_address" | "sol_try_find_program_address" => 1_500,
         "sol_secp256k1_recover" => 25_000,
         "sol_sha256" | "sol_keccak256" | "sol_blake3" | "sol_poseidon" => 85,
@@ -665,8 +666,8 @@ mod tests {
             ("sol_log_".into(), 4),
         ];
         let est = f.syscall_estimate();
-        assert_eq!(est[0], ("sol_invoke_signed_rust".into(), 3, 3_000));
-        assert_eq!(est[1], ("sol_try_find_program_address".into(), 2, 3_000));
+        assert_eq!(est[0], ("sol_try_find_program_address".into(), 2, 3_000));
+        assert_eq!(est[1], ("sol_invoke_signed_rust".into(), 3, 2_838));
         assert_eq!(est[2], ("sol_memcpy_".into(), 100, 1_000));
         assert_eq!(est[3], ("sol_log_".into(), 4, 400));
     }
