@@ -1292,7 +1292,8 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
   background: var(--bg-2); color: var(--text-2); cursor: pointer; }
 .prof-frames button.on { background: var(--brand-soft); border-color: var(--brand-border); color: var(--brand-strong); }
 .prof-flame { width: 100%; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-1); overflow: hidden; }
-.prof-flame svg { display: block; width: 100%; height: auto; font-family: var(--font-mono); }
+.prof-flame { max-height: 480px; overflow: auto; }
+.prof-flame svg { display: block; font-family: var(--font-mono); }
 .prof-flame rect { stroke: var(--bg-1); stroke-width: 1; cursor: pointer; }
 .prof-flame rect:hover { stroke: var(--text-1); }
 .prof-flame text { font-size: 10px; fill: #0b0b12; pointer-events: none; }
@@ -4658,7 +4659,9 @@ async function runProfile() {
     if (!res.ok) throw new Error(await res.text());
     prof = await res.json();
     profZoom = [];
-    if (profFrame >= prof.profile.frames.length) profFrame = 0;
+    // Open on the heaviest frame: that is the one worth looking at first.
+    const fr = prof.profile.frames;
+    if (profFrame >= fr.length || profFrame === 0) profFrame = fr.reduce((best, f, i) => (f.compute_units ?? f.instructions) > (fr[best].compute_units ?? fr[best].instructions) ? i : best, 0);
     renderProfile();
   } catch (e) {
     $('dbgProfile').innerHTML = `<div class="explain"><div class="ic">⚠️</div><div><div class="t">Profile failed</div><div class="d">${esc(e.message || e)}</div></div></div>`;
@@ -4666,10 +4669,12 @@ async function runProfile() {
 }
 function profName(n) { return /^function_\d+$/.test(n) ? n.replace('function_', 'fn@') : n; }
 function profColor(name, program) {
-  // Stable hue per program, shade per function, readable on dark and light.
-  let h = 0; for (const c of program) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  let v = 0; for (const c of name) v = (v * 17 + c.charCodeAt(0)) >>> 0;
-  return `hsl(${h % 360} 70% ${58 + (v % 5) * 5}%)`;
+  // Classic flame palette: warm hues, varied per function so neighbours
+  // separate, stable across renders (hash of the name), readable text on top.
+  let v = 0; for (const c of name) v = (v * 31 + c.charCodeAt(0)) >>> 0;
+  const hue = 8 + (v % 40);           // red → orange → amber
+  const light = 56 + ((v >> 8) % 4) * 6;
+  return `hsl(${hue} 88% ${light}%)`;
 }
 function renderProfile() {
   const p = prof.profile, frames = p.frames;
@@ -4722,7 +4727,8 @@ function renderFlame(f) {
   profZoom = path;
   $('profCrumb').innerHTML = '<a data-d="0">all</a>' + path.map((nm, i) => ' › <a data-d="' + (i + 1) + '">' + esc(profName(nm)) + '</a>').join('');
   $('profCrumb').querySelectorAll('a').forEach(a => a.addEventListener('click', () => { profZoom = profZoom.slice(0, +a.dataset.d); renderFlame(f); }));
-  const W = 1000, RH = 18, rows = []; // rows[depth] = [{x, w, name, v}]
+  // Draw in CSS pixels at the container's width so text is never scaled.
+  const W = Math.max(320, $('profFlame').clientWidth || 900), RH = 18, rows = []; // rows[depth] = [{x, w, name, v}]
   const walk = (node, depth, x0) => {
     if (!rows[depth]) rows[depth] = [];
     const w = W * node.v / view.v;
@@ -4733,14 +4739,14 @@ function renderFlame(f) {
   };
   walk(view, 0, 0);
   const H = rows.length * RH;
-  let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="height:${Math.min(420, H)}px">`;
+  let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="height:${H}px;max-height:480px">`;
   rows.forEach((row, d) => {
     const y = H - (d + 1) * RH; // root at the bottom, like a flamegraph
     for (const r of row) {
       const pct = (100 * r.v / view.v).toFixed(1);
       const label = profName(r.name);
       svg += `<g><rect x="${r.x.toFixed(2)}" y="${y}" width="${r.w.toFixed(2)}" height="${RH - 1}" fill="${profColor(r.name, f.program)}" data-path="${esc(r.node === view ? '' : r.name)}" data-d="${d}"><title>${esc(label)}\n${fmt(r.v)} instructions · ${pct}% of this view</title></rect>`
-        + (r.w > 40 ? `<text x="${(r.x + 3).toFixed(2)}" y="${y + 12.5}" textLength="${Math.max(0, r.w - 6).toFixed(0)}" lengthAdjust="spacingAndGlyphs">${esc(label.length > r.w / 6 ? label.slice(0, Math.max(3, Math.floor(r.w / 6)) - 1) + '…' : label)}</text>` : '');
+        + (r.w > 28 ? `<text x="${(r.x + 3).toFixed(2)}" y="${y + 12.5}">${esc(label.length > (r.w - 6) / 6.2 ? label.slice(0, Math.max(2, Math.floor((r.w - 6) / 6.2)) - 1) + '…' : label)}</text>` : '');
       svg += '</g>';
     }
   });
