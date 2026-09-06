@@ -1283,6 +1283,33 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 .dbg-keys kbd { font-family: var(--font-mono); border: 1px solid var(--border-strong); border-radius: 4px; padding: 0 5px; color: var(--text-2); }
 
 
+/* debugger: compute profile (flamegraph) */
+.prof-head { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+.prof-sum { font-size: 12px; color: var(--text-2); line-height: 1.6; margin: var(--s-2) 0 var(--s-3); }
+.prof-sum b { color: var(--text-1); font-family: var(--font-mono); font-weight: 500; }
+.prof-frames { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: var(--s-3); }
+.prof-frames button { font-family: var(--font-mono); font-size: 11px; padding: 3px 9px; border-radius: var(--r-full); border: 1px solid var(--border);
+  background: var(--bg-2); color: var(--text-2); cursor: pointer; }
+.prof-frames button.on { background: var(--brand-soft); border-color: var(--brand-border); color: var(--brand-strong); }
+.prof-flame { width: 100%; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-1); overflow: hidden; }
+.prof-flame svg { display: block; width: 100%; height: auto; font-family: var(--font-mono); }
+.prof-flame rect { stroke: var(--bg-1); stroke-width: 1; cursor: pointer; }
+.prof-flame rect:hover { stroke: var(--text-1); }
+.prof-flame text { font-size: 10px; fill: #0b0b12; pointer-events: none; }
+.prof-crumb { font-size: 11px; color: var(--text-3); margin: var(--s-2) 0; font-family: var(--font-mono); }
+.prof-crumb a { color: var(--brand-strong); cursor: pointer; }
+.prof-cols { display: grid; grid-template-columns: 1.6fr 1fr; gap: var(--s-4); margin-top: var(--s-3); }
+@media (max-width: 980px) { .prof-cols { grid-template-columns: 1fr; } }
+.prof-tbl { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.prof-tbl th { text-align: left; color: var(--text-3); font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; padding: 4px 6px; border-bottom: 1px solid var(--border); }
+.prof-tbl td { padding: 4px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.prof-tbl td.n { font-family: var(--font-mono); color: var(--text-2); text-align: right; white-space: nowrap; }
+.prof-tbl td.fn { font-family: var(--font-mono); color: var(--text-1); word-break: break-all; }
+.prof-tbl td.fn.anon { color: var(--text-3); }
+.prof-sym { font-size: 11.5px; color: var(--text-2); margin-top: var(--s-3); line-height: 1.6; }
+.prof-sym input[type=file] { font-size: 11px; }
+.prof-note { font-size: 11.5px; color: var(--text-3); margin-top: var(--s-2); line-height: 1.5; }
+
 /* debugger: edit & re-run */
 .dbg-stage { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; margin-bottom: var(--s-4);
   background: var(--bg-1); border: 1px solid var(--brand-border); border-radius: var(--r-md); padding: var(--s-3) var(--s-4); }
@@ -1781,6 +1808,11 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
         <div class="cu-roll" id="dbgCu"></div>
       </div>
       <div class="dbg-detail" id="dbgDetail"><div class="dbg-empty">select a step</div></div>
+    </div>
+    <div class="card" style="margin-top:14px" id="dbgProfileCard">
+      <div class="prof-head"><h2 style="margin:0">Where the compute went</h2><span class="spacer"></span>
+        <button class="btn sm" id="profGo" title="Trace every BPF instruction this transaction executes and attribute it to functions">⚡ Profile compute</button></div>
+      <div id="dbgProfile"><div class="prof-note">Traces every BPF instruction the transaction executes, per program and per function, and draws where the compute units went. Takes a few seconds.</div></div>
     </div>
     <div class="card tech-card" style="margin-top:14px"><h2>Program logs</h2><div class="logs" id="dbgLogs"></div></div>
     </div>
@@ -4273,6 +4305,7 @@ async function showDebug(sig, push) {
   renderTrace(trace);
   renderStage();
   setDbgMode(dbgMode);
+  profReset();
   window.scrollTo(0, 0);
 }
 
@@ -4610,6 +4643,119 @@ window.addEventListener('popstate', e => {
   if (e.state && e.state.debug) showDebug(e.state.debug, false);
   else if (!$('debug').classList.contains('hidden')) $('dbgBack').click();
 });
+// ---------------- compute profiler ----------------
+let prof = null, profFrame = 0, profZoom = [], profSymbols = {};   // program → base64 .debug
+function profReset() { prof = null; profFrame = 0; profZoom = []; profSymbols = {}; $('dbgProfile').innerHTML = '<div class="prof-note">Traces every BPF instruction the transaction executes, per program and per function, and draws where the compute units went. Takes a few seconds.</div>'; }
+$('profGo').addEventListener('click', () => runProfile());
+async function runProfile() {
+  if (!dbgSigCur) return;
+  $('profGo').disabled = true;
+  $('dbgProfile').innerHTML = '<div class="dbg-progress"><span class="spinner"></span><span>tracing every instruction…</span></div>';
+  try {
+    const symbols = Object.entries(profSymbols).map(([program, elf_b64]) => ({ program, elf_b64 }));
+    const body = { signature: dbgSigCur, mutations: [], time_travel: timeTravel, features: activeFeatures, symbols, ...clusterParams() };
+    const res = await api('/profile', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) throw new Error(await res.text());
+    prof = await res.json();
+    profZoom = [];
+    if (profFrame >= prof.profile.frames.length) profFrame = 0;
+    renderProfile();
+  } catch (e) {
+    $('dbgProfile').innerHTML = `<div class="explain"><div class="ic">⚠️</div><div><div class="t">Profile failed</div><div class="d">${esc(e.message || e)}</div></div></div>`;
+  } finally { $('profGo').disabled = false; }
+}
+function profName(n) { return /^function_\d+$/.test(n) ? n.replace('function_', 'fn@') : n; }
+function profColor(name, program) {
+  // Stable hue per program, shade per function, readable on dark and light.
+  let h = 0; for (const c of program) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  let v = 0; for (const c of name) v = (v * 17 + c.charCodeAt(0)) >>> 0;
+  return `hsl(${h % 360} 70% ${58 + (v % 5) * 5}%)`;
+}
+function renderProfile() {
+  const p = prof.profile, frames = p.frames;
+  if (!frames.length) { $('dbgProfile').innerHTML = '<div class="prof-note">No BPF frames were traced (a transaction of builtins only).</div>'; return; }
+  const totalInsns = frames.reduce((a, f) => a + f.instructions, 0);
+  const byProg = {};
+  for (const f of frames) byProg[f.program] = (byProg[f.program] || 0) + (f.compute_units ?? f.instructions);
+  const progRows = Object.entries(byProg).sort((a, b) => b[1] - a[1]);
+  const maxProg = progRows[0][1];
+  let html = `<div class="prof-sum">${prof.result.success ? '✓ replay succeeded' : '✗ replay failed'} · <b>${fmt(prof.result.compute_units)}</b> CU charged · <b>${fmt(totalInsns)}</b> BPF instructions across <b>${frames.length}</b> program frames`
+    + (prof.symbolized.length ? ' · symbols: ' + prof.symbolized.map(([pg, n]) => `${esc(short(pg))} (${n} named)`).join(', ') : '') + '</div>';
+  html += '<div class="cu-roll">' + progRows.map(([pg, n]) => `<div class="r"><span title="${esc(pg)}">${esc(short(pg))}</span><div class="bar" style="width:${Math.max(2, 100 * n / maxProg)}%"></div><span class="n">${fmt(n)}</span></div>`).join('') + '</div>';
+  html += '<div class="prof-frames" style="margin-top:12px">' + frames.map((f, i) => `<button class="${i === profFrame ? 'on' : ''}" data-i="${i}" title="${esc(f.program)}">#${i + 1} ${esc(short(f.program))} · ${fmt(f.compute_units ?? f.instructions)}${f.compute_units != null ? ' CU' : ' insns'}</button>`).join('') + '</div>';
+  const f = frames[profFrame];
+  html += `<div class="prof-sum"><b>${esc(f.program)}</b> · ${fmt(f.instructions)} instructions` + (f.compute_units != null ? ` · ${fmt(f.compute_units)} CU charged · ${fmt(f.syscall_overhead)} CU beyond instructions (syscalls, CPI, serialization)` : '') + '</div>';
+  html += '<div class="prof-crumb" id="profCrumb"></div><div class="prof-flame" id="profFlame"></div>';
+  const anon = f.functions.filter(x => /^function_\d+$/.test(x.name)).length;
+  html += '<div class="prof-cols"><div><table class="prof-tbl"><thead><tr><th>function</th><th style="text-align:right">self</th><th style="text-align:right">total</th><th style="text-align:right">calls</th><th style="text-align:right">~CU</th></tr></thead><tbody>'
+    + f.functions.slice(0, 25).map(x => `<tr><td class="fn ${/^function_\d+$/.test(x.name) ? 'anon' : ''}">${esc(profName(x.name))}</td><td class="n">${fmt(x.self_insns)}</td><td class="n">${fmt(x.total_insns)}</td><td class="n">${fmt(x.calls)}</td><td class="n">${x.compute_units != null ? fmt(x.compute_units) : '–'}</td></tr>`).join('')
+    + '</tbody></table></div><div>';
+  html += '<table class="prof-tbl"><thead><tr><th>syscall</th><th style="text-align:right">calls</th></tr></thead><tbody>'
+    + (f.syscalls.length ? f.syscalls.map(([n, c]) => `<tr><td class="fn">${esc(n)}</td><td class="n">${fmt(c)}</td></tr>`).join('') : '<tr><td class="fn anon" colspan="2">none</td></tr>') + '</tbody></table>';
+  html += `<div class="prof-sym">${anon ? `<b>${anon}</b> of ${f.functions.length} functions are unnamed: this program is stripped (every mainnet program is). ` : 'All functions named. '}`
+    + `Built it yourself? Add the <code>.debug</code> file <code>cargo build-sbf --debug</code> writes next to the .so, and every function gets its Rust name.<br>`
+    + `<input type="file" id="profSymFile" accept=".debug,.so,application/octet-stream" /> <span id="profSymStatus"></span></div>`;
+  html += '<div class="prof-note">Counts are executed BPF instructions (one CU each); per-function CU splits the frame\'s charged compute in proportion. The flamegraph is exact in shape; click a box to zoom, click the crumb to zoom out.</div>';
+  html += '</div></div>';
+  $('dbgProfile').innerHTML = html;
+  $('dbgProfile').querySelectorAll('.prof-frames button').forEach(b => b.addEventListener('click', () => { profFrame = +b.dataset.i; profZoom = []; renderProfile(); }));
+  $('profSymFile').addEventListener('change', async (ev) => {
+    const file = ev.target.files[0]; if (!file) return;
+    const buf = new Uint8Array(await file.arrayBuffer());
+    let bin = ''; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+    profSymbols[f.program] = btoa(bin);
+    $('profSymStatus').textContent = `${file.name} attached to ${short(f.program)} · re-profiling…`;
+    await runProfile();
+  });
+  renderFlame(f);
+}
+function renderFlame(f) {
+  // Fold stacks into a tree: root → function → callee …, weights = instructions.
+  const root = { name: 'all', v: 0, kids: {} };
+  for (const [key, n] of f.stacks) {
+    let node = root; node.v += n;
+    for (const part of key.split(';')) { node = node.kids[part] || (node.kids[part] = { name: part, v: 0, kids: {} }); node.v += n; }
+  }
+  // Zoom: descend along the chosen path.
+  let view = root; const path = [];
+  for (const nm of profZoom) { if (view.kids[nm]) { view = view.kids[nm]; path.push(nm); } else break; }
+  profZoom = path;
+  $('profCrumb').innerHTML = '<a data-d="0">all</a>' + path.map((nm, i) => ' › <a data-d="' + (i + 1) + '">' + esc(profName(nm)) + '</a>').join('');
+  $('profCrumb').querySelectorAll('a').forEach(a => a.addEventListener('click', () => { profZoom = profZoom.slice(0, +a.dataset.d); renderFlame(f); }));
+  const W = 1000, RH = 18, rows = []; // rows[depth] = [{x, w, name, v}]
+  const walk = (node, depth, x0) => {
+    if (!rows[depth]) rows[depth] = [];
+    const w = W * node.v / view.v;
+    if (w < 0.6) return;
+    rows[depth].push({ x: x0, w, name: node.name, v: node.v, node });
+    let x = x0;
+    for (const k of Object.values(node.kids).sort((a, b) => b.v - a.v)) { walk(k, depth + 1, x); x += W * k.v / view.v; }
+  };
+  walk(view, 0, 0);
+  const H = rows.length * RH;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="height:${Math.min(420, H)}px">`;
+  rows.forEach((row, d) => {
+    const y = H - (d + 1) * RH; // root at the bottom, like a flamegraph
+    for (const r of row) {
+      const pct = (100 * r.v / view.v).toFixed(1);
+      const label = profName(r.name);
+      svg += `<g><rect x="${r.x.toFixed(2)}" y="${y}" width="${r.w.toFixed(2)}" height="${RH - 1}" fill="${profColor(r.name, f.program)}" data-path="${esc(r.node === view ? '' : r.name)}" data-d="${d}"><title>${esc(label)}\n${fmt(r.v)} instructions · ${pct}% of this view</title></rect>`
+        + (r.w > 40 ? `<text x="${(r.x + 3).toFixed(2)}" y="${y + 12.5}" textLength="${Math.max(0, r.w - 6).toFixed(0)}" lengthAdjust="spacingAndGlyphs">${esc(label.length > r.w / 6 ? label.slice(0, Math.max(3, Math.floor(r.w / 6)) - 1) + '…' : label)}</text>` : '');
+      svg += '</g>';
+    }
+  });
+  svg += '</svg>';
+  $('profFlame').innerHTML = svg;
+  // Click to zoom: resolve the clicked box to its path from the current view.
+  const boxes = []; rows.forEach((row, d) => row.forEach(r => boxes.push({ d, r })));
+  $('profFlame').querySelectorAll('rect').forEach((el, i) => el.addEventListener('click', () => {
+    const { d, r } = boxes[i]; if (d === 0) return;
+    // Rebuild the path by walking down from `view` following the biggest-weight chain that contains r.node.
+    const chain = []; const find = (node, depth) => { if (node === r.node) return true; for (const k of Object.values(node.kids)) { chain.push(k.name); if (find(k, depth + 1)) return true; chain.pop(); } return false; };
+    if (find(view, 0)) { profZoom = profZoom.concat(chain); renderFlame(f); }
+  }));
+}
+
 // Deep link: /debug/<signature> opens the debugger directly.
 if (location.pathname.startsWith('/debug/')) {
   const sig = decodeURIComponent(location.pathname.slice('/debug/'.length)).replace(/\/$/, '');

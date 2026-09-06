@@ -557,6 +557,155 @@ async fn replay_report_handler(
 
 /// POST /trace — unroll a transaction into steps: every instruction and CPI with
 /// what it changed, and the failing step pinpointed. Mutations apply first.
+/// POST body for /profile — the compute profiler. `symbols` names a program's
+/// functions from the unstripped ELF of the same build (base64 of the
+/// `.debug` file `cargo build-sbf --debug` writes).
+#[derive(Deserialize)]
+struct ProfileRequest {
+    signature: String,
+    #[serde(default)]
+    mutations: Vec<MutationInput>,
+    #[serde(default)]
+    time_travel: TimeTravel,
+    #[serde(default)]
+    features: Vec<svmscope::spec::FeatureInput>,
+    #[serde(default)]
+    symbols: Vec<SymbolInput>,
+    #[serde(default)]
+    cluster: Option<String>,
+    #[serde(default)]
+    rpc: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SymbolInput {
+    program: String,
+    /// base64 of the ELF that carries the symbol table.
+    elf_b64: String,
+}
+
+#[derive(Serialize)]
+struct ProfileResponse {
+    result: svmscope::ReplayResult,
+    profile: svmscope::profile::Profile,
+    /// Per program: how many functions the uploaded symbols named.
+    symbolized: Vec<(String, usize)>,
+}
+
+const MAX_SYMBOL_FILES: usize = 8;
+const MAX_SYMBOL_BYTES: usize = 32 * 1024 * 1024;
+/// Folded stacks kept per frame in the response (largest first). A 300k-CU
+/// swap can produce tens of thousands of distinct stacks; the top slice is
+/// what a flamegraph can show.
+const MAX_STACKS_PER_FRAME: usize = 1500;
+
+fn trim_profile(profile: &mut svmscope::profile::Profile) {
+    for f in &mut profile.frames {
+        f.stacks.truncate(MAX_STACKS_PER_FRAME);
+        f.functions.truncate(400);
+    }
+}
+
+fn run_profile(
+    url: String,
+    signature: String,
+    mutations: Vec<Mutation>,
+    tt: TimeTravel,
+    features: Vec<svmscope::FeatureToggle>,
+    symbols: Vec<(String, Vec<u8>)>,
+) -> Result<ProfileResponse, svmscope::Error> {
+    let scope = Scope::new(url);
+    let mut replay = scope.replay_at_slot(&signature)?;
+    replay.set_time_travel(tt);
+    replay.set_features(features);
+    let (result, mut profile) = replay.profile(&mutations)?;
+    let mut symbolized = Vec::new();
+    for (program, elf) in symbols {
+        let n = profile.symbolize(&program, &elf)?;
+        symbolized.push((program, n));
+    }
+    trim_profile(&mut profile);
+    Ok(ProfileResponse {
+        result,
+        profile,
+        symbolized,
+    })
+}
+
+async fn profile_handler(
+    Json(req): Json<ProfileRequest>,
+) -> Result<Json<ProfileResponse>, (StatusCode, String)> {
+    use base64::Engine;
+    cap(req.mutations.len(), MAX_MUTATIONS_PER_REQUEST, "mutations")?;
+    cap(req.symbols.len(), MAX_SYMBOL_FILES, "symbols")?;
+    let mutations: Vec<Mutation> = req
+        .mutations
+        .into_iter()
+        .map(MutationInput::into_mutation)
+        .collect::<Result<_, _>>()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let features = svmscope::spec::feature_toggles(req.features)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let mut symbols = Vec::new();
+    for s in req.symbols {
+        let elf = base64::engine::general_purpose::STANDARD
+            .decode(s.elf_b64.as_bytes())
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("symbols for {}: {e}", s.program),
+                )
+            })?;
+        if elf.len() > MAX_SYMBOL_BYTES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "symbol file too large".into(),
+            ));
+        }
+        symbols.push((s.program, elf));
+    }
+    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let tt = req.time_travel.clone();
+    let sig = req.signature;
+    tokio::task::spawn_blocking(move || run_profile(url, sig, mutations, tt, features, symbols))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?
+        .map(Json)
+        .map_err(lib_err)
+}
+
+/// GET /profile/{signature} — the as-it-happened profile, no symbols, cacheable.
+async fn profile_get_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<ClusterQuery>,
+) -> Result<Json<ProfileResponse>, (StatusCode, String)> {
+    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    tokio::task::spawn_blocking(move || {
+        run_profile(
+            url,
+            signature,
+            vec![],
+            TimeTravel::default(),
+            vec![],
+            vec![],
+        )
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?
+    .map(Json)
+    .map_err(lib_err)
+}
+
 async fn trace_handler(
     Json(req): Json<TraceRequest>,
 ) -> Result<Json<svmscope::Trace>, (StatusCode, String)> {
@@ -1060,6 +1209,8 @@ fn endpoint_label(path: &str) -> Option<&'static str> {
         Some("preflight")
     } else if path.starts_with("/freeze") {
         Some("freeze")
+    } else if path.starts_with("/profile") {
+        Some("profile")
     } else if path.starts_with("/trace") {
         Some("trace")
     } else if path.starts_with("/account") {
@@ -1078,6 +1229,7 @@ async fn cache_layer(req: Request, next: Next) -> Response {
     let cacheable = req.method() == axum::http::Method::GET
         && (path.starts_with("/analyze")
             || path.starts_with("/trace")
+            || path.starts_with("/profile")
             || path.starts_with("/account")
             || path.starts_with("/signatures")
             || path.starts_with("/replay"));
@@ -1175,6 +1327,8 @@ async fn main() {
         .route("/replay_report", post(replay_report_handler))
         .route("/trace", post(trace_handler))
         .route("/trace/{signature}", get(trace_get_handler))
+        .route("/profile", post(profile_handler))
+        .route("/profile/{signature}", get(profile_get_handler))
         .route("/debug/{signature}", get(index))
         .route("/instructions/{program}", get(instructions_handler))
         .route("/idl_instructions", post(idl_instructions_handler))

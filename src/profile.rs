@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use litesvm::{InvocationInspectCallback, LiteSVM};
 use serde::Serialize;
 use solana_program_runtime::invoke_context::{Executable, InvokeContext, RegisterTrace};
-use solana_program_runtime::solana_sbpf::{ebpf, static_analysis::Analysis};
+use solana_program_runtime::solana_sbpf::ebpf;
 use solana_transaction::sanitized::SanitizedTransaction;
 use solana_transaction_context::instruction::InstructionContext;
 use solana_transaction_context::IndexOfAccount;
@@ -54,8 +54,8 @@ pub struct FrameProfile {
     pub program: String,
     /// Total BPF instructions the frame executed.
     pub instructions: u64,
-    /// Compute units the runtime charged this frame (its `consumed` log line).
-    /// `None` when the logs did not report it.
+    /// Compute units the runtime charged this frame itself: its `consumed`
+    /// log line minus the CPIs it made. `None` when the logs did not report it.
     pub compute_units: Option<u64>,
     /// `compute_units - instructions`: what syscalls, CPI overhead and
     /// account serialization cost beyond one CU per BPF instruction.
@@ -78,26 +78,44 @@ pub struct Profile {
 
 impl Profile {
     /// Attach the runtime's measured compute to each frame from the
-    /// transaction's logs. Frames and `Program X consumed` spans are both in
-    /// invocation order; builtins (System, precompiles) leave no trace, so
-    /// spans are matched to frames by program id and skipped otherwise.
+    /// transaction's logs, *exclusive* of the CPIs the frame made: a
+    /// `Program X consumed N` line counts the whole subtree, so each direct
+    /// child's figure is subtracted. The runtime records a frame's trace when
+    /// the frame finishes and logs its `consumed` line at the same moment, so
+    /// spans are matched to frames in completion order. Builtins log no
+    /// `consumed` line and leave no trace, so mismatched program ids are
+    /// skipped.
     pub(crate) fn attach_compute(&mut self, logs: &[String]) {
         let spans = crate::trace::spans_from_logs(logs, 0);
+        let mut exclusive: Vec<Option<u64>> = spans.iter().map(|s| s.cu_consumed).collect();
+        let mut stack: Vec<usize> = Vec::new();
+        for (i, span) in spans.iter().enumerate() {
+            while stack.last().is_some_and(|&p| spans[p].depth >= span.depth) {
+                stack.pop();
+            }
+            if let (Some(&parent), Some(cu)) = (stack.last(), span.cu_consumed) {
+                if let Some(pcu) = exclusive[parent].as_mut() {
+                    *pcu = pcu.saturating_sub(cu);
+                }
+            }
+            stack.push(i);
+        }
+        let mut order: Vec<usize> = (0..spans.len()).collect();
+        order.sort_by_key(|&i| spans[i].end);
         let mut next = 0usize;
-        for span in &spans {
+        for i in order {
+            let Some(cu) = exclusive[i] else { continue };
             let Some(frame) = self.frames.get_mut(next) else {
                 break;
             };
-            if frame.program != span.program {
-                continue; // a builtin or precompile: no BPF trace for it
+            if frame.program != spans[i].program {
+                continue;
             }
-            if let Some(cu) = span.cu_consumed {
-                frame.compute_units = Some(cu);
-                frame.syscall_overhead = Some(cu.saturating_sub(frame.instructions));
-                let insns = frame.instructions.max(1);
-                for f in &mut frame.functions {
-                    f.compute_units = Some(cu * f.self_insns / insns);
-                }
+            frame.compute_units = Some(cu);
+            frame.syscall_overhead = Some(cu.saturating_sub(frame.instructions));
+            let insns = frame.instructions.max(1);
+            for f in &mut frame.functions {
+                f.compute_units = Some(cu * f.self_insns / insns);
             }
             next += 1;
         }
@@ -292,13 +310,61 @@ impl InvocationInspectCallback for Collector {
     }
 }
 
+/// Function boundaries of a program: every internal call target plus the
+/// registered (named) functions, keyed by first pc. One linear pass over the
+/// text, cached per program: the sBPF static analysis computes the same set
+/// but also builds a full control-flow graph, which on a 10 MB program costs
+/// more than the trace it serves.
+type FunctionMap = Arc<BTreeMap<usize, String>>;
+
+fn function_map(exe: &Executable) -> FunctionMap {
+    static CACHE: std::sync::LazyLock<Mutex<std::collections::HashMap<u64, FunctionMap>>> =
+        std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+    let (_, text) = exe.get_text_bytes();
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.len().hash(&mut h);
+        // Length plus 64 evenly spaced words tells programs apart without
+        // hashing 10 MB per frame.
+        let step = (text.len() / 64).max(1);
+        for i in 0..64 {
+            text.get(i * step..i * step + 8).hash(&mut h);
+        }
+        h.finish()
+    };
+    if let Some(m) = CACHE.lock().unwrap().get(&key) {
+        return Arc::clone(m);
+    }
+    let mut functions: BTreeMap<usize, String> = BTreeMap::new();
+    for (_, (name, pc)) in exe.get_function_registry().iter() {
+        functions.insert(pc, String::from_utf8_lossy(name).to_string());
+    }
+    if exe.get_sbpf_version().static_syscalls() {
+        let n = text.len() / ebpf::INSN_SIZE;
+        for pc in 0..n {
+            let insn = ebpf::get_insn_unchecked(text, pc);
+            if insn.opc == ebpf::CALL_IMM && insn.src == 1 {
+                let target = pc as i64 + 1 + insn.imm;
+                if target >= 0 && (target as usize) < n {
+                    functions
+                        .entry(target as usize)
+                        .or_insert_with(|| format!("function_{target}"));
+                }
+            }
+        }
+    }
+    let map = Arc::new(functions);
+    CACHE.lock().unwrap().insert(key, Arc::clone(&map));
+    map
+}
+
 /// Attribute one frame's trace to functions, syscalls and folded stacks.
 fn profile_frame(program: String, exe: &Executable, trace: &RegisterTrace) -> Option<FrameProfile> {
     if trace.is_empty() {
         return None;
     }
-    let analysis = Analysis::from_executable(exe).ok()?;
-    let functions: &BTreeMap<usize, (u32, String)> = &analysis.functions;
+    let functions = function_map(exe);
     let (_, text) = exe.get_text_bytes();
     let static_syscalls = exe.get_sbpf_version().static_syscalls();
     let loader = exe.get_loader();
@@ -315,7 +381,7 @@ fn profile_frame(program: String, exe: &Executable, trace: &RegisterTrace) -> Op
     let name_of = |start: usize| -> String {
         functions
             .get(&start)
-            .map(|(_, n)| n.clone())
+            .cloned()
             .unwrap_or_else(|| format!("function_{start}"))
     };
 
@@ -564,13 +630,15 @@ mod tests {
                 frame("Amm", &[(0, "entrypoint", 300), (9, "function_9", 700)]),
             ],
         };
+        // Amm calls Tok: the runtime logs Tok's `consumed` first (it finishes
+        // first) and records Tok's trace first for the same reason.
         let logs: Vec<String> = [
             "Program 11111111111111111111111111111111 invoke [1]",
             "Program 11111111111111111111111111111111 success",
-            "Program Tok invoke [1]",
+            "Program Amm invoke [1]",
+            "Program Tok invoke [2]",
             "Program Tok consumed 150 of 200 compute units",
             "Program Tok success",
-            "Program Amm invoke [1]",
             "Program Amm consumed 2000 of 10000 compute units",
             "Program Amm success",
         ]
@@ -580,11 +648,12 @@ mod tests {
         p.attach_compute(&logs);
         assert_eq!(p.frames[0].compute_units, Some(150));
         assert_eq!(p.frames[0].syscall_overhead, Some(50));
-        assert_eq!(p.frames[1].compute_units, Some(2000));
+        // Amm's 2000 includes Tok's 150: its own share is 1850.
+        assert_eq!(p.frames[1].compute_units, Some(1850));
         assert_eq!(
             p.frames[1].functions[1].compute_units,
-            Some(1400),
-            "700 of 1000 insns → 70% of 2000 CU"
+            Some(1295),
+            "700 of 1000 insns → 70% of 1850 CU"
         );
     }
 }

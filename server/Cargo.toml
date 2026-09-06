@@ -13,9 +13,10 @@ name = "server"
 path = "src/main.rs"
 
 [dependencies]
-svmscope = { path = ".." }
+svmscope = { path = "..", features = ["profiler"] }
 axum = "0.8.9"
 tower-http = { version = "0.6", features = ["cors"] }
 tokio = { version = "1.53.1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
