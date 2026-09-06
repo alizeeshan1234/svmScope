@@ -623,7 +623,9 @@ body::after {
 .tnode:hover { background: var(--bg-2); }
 .tnode .rail { color: var(--border-strong); font-family: var(--font-mono); font-size: 12px; white-space: pre; flex: 0 0 auto; }
 .tnode .ix { color: var(--brand-strong); font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; flex: 0 0 auto; width: 24px; }
-.tnode .depth { font-size: 10.5px; color: var(--text-3); font-family: var(--font-mono); margin-left: auto; }
+.tnode .tail { margin-left: auto; display: flex; gap: var(--s-3); align-items: center; flex: 0 0 auto; }
+.tnode .depth { font-size: 10.5px; color: var(--text-3); font-family: var(--font-mono); }
+.tnode .cu { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3); white-space: nowrap; min-width: 72px; text-align: right; }
 .tnode .ixname {
   font-size: 11.5px; font-weight: 600; color: var(--brand-strong);
   background: var(--brand-soft); border: 1px solid var(--brand-border);
@@ -1419,8 +1421,9 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 .mode button.on { background: var(--brand-soft); color: var(--brand-strong); }
 .step .plain { flex-basis: 100%; font-size: 11.5px; color: var(--text-2); padding-left: 60px; margin-top: -2px; }
 .step { flex-wrap: wrap; }
-.simple .step .cu, .simple .step .nchg { display: none; }
-.simple .step .ixname { display: none; }
+/* Simple mode keeps the plain sentence but never hides the two facts every
+   row must show: the instruction's name and the compute it consumed. */
+.simple .step .nchg { display: none; }
 .simple .step .prog .addr-pill { display: none; }
 .dbg-plain { font-size: 15px; color: var(--text-1); line-height: 1.5; margin: 6px 0 10px; }
 details.tech > summary { cursor: pointer; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .09em; color: var(--text-3); padding: 8px 0; list-style: none; }
@@ -2024,7 +2027,9 @@ function progChip(id) {
   const p = progInfo(id);
   const dot = `<span class="dot" style="color:${p.color};background:${p.color}"></span>`;
   if (p.known) return `<span class="prog">${dot}<span class="nm">${esc(p.name)}</span>${copyPill(id, short(id))}</span>`;
-  return `<span class="prog">${dot}<span class="nm">${copyPill(id, short(id))}</span></span>`;
+  // Unknown program: the short id is the name, always visible (the copy pill
+  // is hidden inside debugger rows, so it must not be the only text).
+  return `<span class="prog">${dot}<span class="nm">${esc(short(id))}${copyPill(id, short(id))}</span></span>`;
 }
 function progPill(id) {
   const p = progInfo(id);
@@ -2124,9 +2129,10 @@ function renderTree(entries) {
     const nm = e.name ? `<span class="ixname">${esc(e.name)}</span>` : '';
     const hasDetail = (e.args && e.args.length) || (e.accounts && e.accounts.length);
     const caret = hasDetail ? `<span class="ix-caret">▸</span>` : '';
+    const cu = e.compute_units != null ? `<span class="cu">${fmt(e.compute_units)} CU</span>` : '';
     const head = `<div class="tnode${hasDetail ? ' expandable' : ''}"${hasDetail ? ` data-ix="${i}"` : ''}>` +
       `${ix}<span class="rail">${rail}</span>${caret}${progChip(e.program)}${nm}` +
-      (depth > 1 ? `<span class="depth">depth ${depth}</span>` : '') + `</div>`;
+      `<span class="tail">${depth > 1 ? `<span class="depth">depth ${depth}</span>` : ''}${cu}</span></div>`;
     return head + (hasDetail ? renderIxDetail(e, i) : '');
   }).join('');
   // Toggle a detail panel on click.

@@ -219,6 +219,15 @@ impl Scope {
         let account_keys = utils::resolve_account_keys(&tx);
 
         let mut cpi_tree = cpi_tree::build_cpi_tree(&tx);
+        let logs: Vec<String> = tx["meta"]["logMessages"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|l| l.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        cpi_tree::attach_compute(&mut cpi_tree, &logs);
         // Decode each instruction — name, arguments, and named accounts — from
         // native layouts (always) or the program's on-chain Anchor IDL (cached).
         {

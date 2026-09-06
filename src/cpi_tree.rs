@@ -44,6 +44,11 @@ pub struct CpiEntry {
     /// Decoded instruction arguments (name/type/value).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<IxArg>,
+    /// Compute units this invocation consumed, from the `Program X consumed N of
+    /// M compute units` log line. `None` for programs that log no such line
+    /// (the builtins) or when the logs were truncated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute_units: Option<u64>,
     /// Raw instruction data, kept only so `analyze` can decode it; never serialized.
     #[serde(skip)]
     pub(crate) data: Vec<u8>,
@@ -51,6 +56,20 @@ pub struct CpiEntry {
     /// `analyze` to resolve addresses, never serialized.
     #[serde(skip)]
     pub(crate) account_indexes: Vec<usize>,
+}
+
+/// Attach per-invocation compute from the transaction logs. The `invoke`
+/// lines appear in exactly the order the tree lists instructions, so the two
+/// are walked together; pairing stops at the first program mismatch (truncated
+/// logs) rather than guessing.
+pub(crate) fn attach_compute(tree: &mut [CpiEntry], logs: &[String]) {
+    let spans = crate::trace::spans_from_logs(logs, 0);
+    for (entry, span) in tree.iter_mut().zip(spans.iter()) {
+        if span.program != entry.program {
+            break;
+        }
+        entry.compute_units = span.cu_consumed;
+    }
 }
 
 /// Build the CPI call tree as a flat list; nesting is carried by `stack_height`
@@ -87,6 +106,7 @@ pub(crate) fn build_cpi_tree(tx: &Value) -> Vec<CpiEntry> {
             .unwrap_or_default()
     };
     let entry = |index, program, stack_height, ix: &Value| CpiEntry {
+        compute_units: None,
         index,
         program,
         stack_height,
