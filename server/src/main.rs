@@ -1143,6 +1143,8 @@ async fn api_index() -> Json<serde_json::Value> {
             "POST /preflight":            "{ transaction, mutations[] } — simulate an UNSIGNED transaction against current state before sending.",
             "POST /trace":                "{ signature | transaction, mutations[], time_travel?, features? } — step debugger: every instruction and CPI with decoded args, per-step account diffs, and the failing step.",
             "GET  /trace/{signature}":    "The same trace with no mutations, cacheable.",
+            "POST /profile":              "{ signature, mutations[]?, time_travel?, features?, symbols[{program, elf_b64}]? } — compute profiler: every BPF instruction attributed to functions, syscalls and call stacks per program frame; symbols name a program's functions from its .debug file.",
+            "GET  /profile/{signature}":  "The as-it-happened compute profile, no symbols, cacheable.",
             "GET  /freeze/{signature}":   "Capture a self-contained fixture for deterministic, offline replay."
         }
     }))
