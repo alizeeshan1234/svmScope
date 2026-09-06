@@ -623,6 +623,10 @@ fn run_profile(
     replay.set_time_travel(tt);
     replay.set_features(features);
     let (result, mut profile) = replay.profile(&mutations)?;
+    // Instruction names on every frame, decoded exactly as the Analyze tree does.
+    if let Ok(analysis) = scope.analyze(&signature) {
+        profile.attach_names(&analysis.cpi_tree);
+    }
     let mut symbolized = Vec::new();
     for (program, debug, so) in symbols {
         let n = match so {

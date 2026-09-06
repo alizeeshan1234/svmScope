@@ -93,6 +93,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             scope.replay_at_slot(sig)?
         };
         let (result, mut profile) = replay.profile(&[])?;
+        if let Ok(analysis) = scope.analyze(signature) {
+            profile.attach_names(&analysis.cpi_tree);
+        }
         let mut i = 3;
         while i < args.len() {
             if args[i] == "--corpus" {

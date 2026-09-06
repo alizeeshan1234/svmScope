@@ -236,6 +236,11 @@ pub struct SymbolizeReport {
 /// One program frame (a top-level instruction or a CPI) of the transaction.
 #[derive(Debug, Clone, Serialize)]
 pub struct FrameProfile {
+    /// The instruction this frame ran, decoded the same way the Analyze tree
+    /// names it ("Swap", "Mint Levercoin Lst"); `None` when it could not be
+    /// decoded. Attached by [`Profile::attach_names`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The program that ran.
     pub program: String,
     /// Total BPF instructions the frame executed.
@@ -307,6 +312,22 @@ impl Profile {
     /// spans are matched to frames in completion order. Builtins log no
     /// `consumed` line and leave no trace, so mismatched program ids are
     /// skipped.
+    /// Name every frame with the instruction it ran. Frames are recorded in
+    /// invocation order, exactly the order of the transaction's decoded CPI
+    /// tree, so the two are walked together; pairing stops at the first
+    /// program mismatch rather than guessing.
+    pub fn attach_names(&mut self, tree: &[crate::CpiEntry]) -> usize {
+        let mut named = 0;
+        for (frame, entry) in self.frames.iter_mut().zip(tree.iter()) {
+            if frame.program != entry.program {
+                break;
+            }
+            frame.name = entry.name.clone();
+            named += frame.name.is_some() as usize;
+        }
+        named
+    }
+
     pub(crate) fn attach_compute(&mut self, logs: &[String]) {
         let spans = crate::trace::spans_from_logs(logs, 0);
         let mut exclusive: Vec<Option<u64>> = spans.iter().map(|s| s.cu_consumed).collect();
@@ -926,6 +947,7 @@ fn profile_frame(program: String, exe: &Executable, trace: &RegisterTrace) -> Op
     let mut folded: Vec<_> = stacks.into_iter().collect();
     folded.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     Some(FrameProfile {
+        name: None,
         program,
         instructions: trace.len() as u64,
         compute_units: None,
@@ -1168,6 +1190,7 @@ mod tests {
 
     fn frame(program: &str, fns: &[(usize, &str, u64)]) -> FrameProfile {
         FrameProfile {
+            name: None,
             program: program.into(),
             instructions: fns.iter().map(|f| f.2).sum(),
             compute_units: None,
