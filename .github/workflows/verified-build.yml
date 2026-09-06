@@ -1,0 +1,111 @@
+# Rebuild verified mainnet programs byte-for-byte, with symbols, from their
+# on-chain OtterVerify record (git url, commit, build args). A build whose
+# stripped sha256 equals the on-chain hash yields a .debug whose symbol table
+# names every function of that program by address (svmscope symbols exact).
+name: verified-build
+on:
+  workflow_dispatch:
+    inputs:
+      programs:
+        description: space-separated program ids
+        required: true
+        default: PhoeNiXZ8ByJGLkxNfZRnkUfjvmuYqLR89jjFHGqdXY
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: echo "matrix=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1].split()))' "${{ inputs.programs }}")" >> "$GITHUB_OUTPUT"
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        program: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Read the on-chain build record
+        id: rec
+        run: |
+          pip install -q solders requests
+          python3 - "${{ matrix.program }}" <<'PY'
+          import json, sys, base64, os, re, requests
+          from solders.pubkey import Pubkey
+          program = sys.argv[1]
+          VERIFY = Pubkey.from_string("verifycLy8mB96wd9wqq3WDXQwM4oU6r42Th37Db9fC")
+          st = requests.get(f"https://verify.osec.io/status-all/{program}", timeout=30).json()
+          signers = [s["signer"] for s in st if s.get("is_verified")] if isinstance(st, list) else []
+          rpc = "https://api.mainnet-beta.solana.com"
+          rec = None
+          for signer in signers:
+              pda, _ = Pubkey.find_program_address([b"otter_verify", bytes(Pubkey.from_string(signer)), bytes(Pubkey.from_string(program))], VERIFY)
+              r = requests.post(rpc, json={"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":[str(pda),{"encoding":"base64"}]}, timeout=30).json()
+              v = r.get("result", {}).get("value")
+              if not v: continue
+              raw = base64.b64decode(v["data"][0]); off = 8 + 32 + 32
+              def s():
+                  global off
+                  n = int.from_bytes(raw[off:off+4], "little"); off += 4
+                  out = raw[off:off+n].decode(); off += n; return out
+              version = s(); git = s(); commit = s()
+              n = int.from_bytes(raw[off:off+4], "little"); off += 4
+              args = [s() for _ in range(n)]
+              rec = {"program": program, "signer": signer, "git_url": git, "commit": commit, "args": args}
+              break
+          if not rec:
+              print("no verified on-chain record"); sys.exit(1)
+          on_chain = requests.get(f"https://verify.osec.io/status/{program}", timeout=30).json().get("on_chain_hash", "")
+          rec["on_chain_hash"] = on_chain
+          a = rec["args"]
+          def opt(flag, default=""):
+              return a[a.index(flag)+1] if flag in a and a.index(flag)+1 < len(a) else default
+          rec["library_name"] = opt("--library-name")
+          rec["mount_path"] = opt("--mount-path", ".")
+          rec["base_image"] = opt("--base-image") or opt("-b")
+          rec["cargo_args"] = a[a.index("--")+1:] if "--" in a else []
+          print(json.dumps(rec, indent=1))
+          json.dump(rec, open("record.json", "w"))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              for k in ("git_url", "commit", "library_name", "mount_path", "base_image", "on_chain_hash"):
+                  f.write(f"{k}={rec[k]}\n")
+              f.write("cargo_args=" + " ".join(rec["cargo_args"]) + "\n")
+          PY
+      - name: Clone at the recorded commit and pick the toolchain image
+        id: img
+        run: |
+          git clone --quiet "${{ steps.rec.outputs.git_url }}" src && cd src && git checkout --quiet "${{ steps.rec.outputs.commit }}"
+          lock=$(ls "${{ steps.rec.outputs.mount_path }}/Cargo.lock" Cargo.lock 2>/dev/null | head -1)
+          ver=$(grep -A1 '^name = "solana-program"$' "$lock" | tail -1 | sed 's/.*"\(.*\)"/\1/')
+          image="${{ steps.rec.outputs.base_image }}"
+          [ -z "$image" ] && image="solanafoundation/solana-verifiable-build:${ver}"
+          echo "solana-program $ver → image $image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Build release and debug in that image
+        run: |
+          lib="${{ steps.rec.outputs.library_name }}"; mp="${{ steps.rec.outputs.mount_path }}"; extra="${{ steps.rec.outputs.cargo_args }}"
+          run() { docker run --rm -v "$PWD/src:/build" -w "/build/$mp" "${{ steps.img.outputs.image }}" sh -c "$1"; }
+          run "cargo build-sbf -- --locked --frozen $extra || cargo build-sbf -- $extra"
+          mkdir -p out/release && cp src/target/deploy/*.so out/release/ && ls -la out/release
+          run "rm -rf /build/target && (cargo build-sbf --debug -- --locked --frozen $extra || cargo build-sbf --debug -- $extra)"
+          mkdir -p out/debug && cp src/target/deploy/*.so src/target/deploy/*.debug out/debug/ 2>/dev/null; ls -la out/debug
+          cp record.json out/
+      - name: Compare with the on-chain hash
+        run: |
+          python3 - <<'PY'
+          import hashlib, glob, json, sys
+          rec = json.load(open("out/record.json")); lib = rec["library_name"]
+          ok = False
+          for f in sorted(glob.glob("out/release/*.so")):
+              d = open(f, "rb").read(); h = hashlib.sha256(d.rstrip(b"\0")).hexdigest()
+              match = h == rec["on_chain_hash"]; ok |= match
+              print(f, len(d), h, "MATCH" if match else "no match")
+          print("on-chain", rec["on_chain_hash"])
+          open("out/MATCH" if ok else "out/NOMATCH", "w").write("")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-${{ matrix.program }}
+          path: out/
