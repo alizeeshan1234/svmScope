@@ -36,3 +36,31 @@ jobs:
         with:
           name: phoenix-${{ matrix.commit }}
           path: out/
+
+  token-2022:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build Token-2022 at its recorded commit in the solana-verify image for solana-program 2.2.1
+        run: |
+          cat > Dockerfile <<'DOCKER'
+          FROM solanafoundation/solana-verifiable-build:2.2.1
+          RUN git clone https://github.com/solana-program/token-2022.git /build
+          WORKDIR /build
+          RUN git checkout 6237d77104209023361c935e94492a08b6a1523f
+          RUN cd program && cargo build-sbf -- --locked --frozen && mkdir -p /out/release && cp /build/target/deploy/*.so /out/release/
+          RUN rm -rf target && cd program && (cargo build-sbf --debug -- --locked --frozen || cargo build-sbf --debug) && mkdir -p /out/debug && cp -r /build/target/deploy/. /out/debug/
+          DOCKER
+          docker build -t t22-exact .
+          id=$(docker create t22-exact) && docker cp "$id:/out" ./out && docker rm "$id"
+          ls -la out/*
+          python3 - <<'PY'
+          import hashlib, glob
+          for f in sorted(glob.glob('out/*/*.so')):
+              d = open(f, 'rb').read()
+              print(f, len(d), 'stripped sha256', hashlib.sha256(d.rstrip(b'\0')).hexdigest())
+          print('on-chain Token-2022 stripped sha256 = 7ea94a027005b39196fa08e6d0ddcd55ec32eb43266179921a834a1ba2eb1947')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: token-2022-6237d771
+          path: out/
