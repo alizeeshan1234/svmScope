@@ -4664,7 +4664,11 @@ async function runProfile() {
     if (profFrame >= fr.length || profFrame === 0) profFrame = fr.reduce((best, f, i) => (f.compute_units ?? f.instructions) > (fr[best].compute_units ?? fr[best].instructions) ? i : best, 0);
     renderProfile();
   } catch (e) {
-    $('dbgProfile').innerHTML = `<div class="explain"><div class="ic">⚠️</div><div><div class="t">Profile failed</div><div class="d">${esc(e.message || e)}</div></div></div>`;
+    const msg = String(e.message || e);
+    const skew = /404|not found/i.test(msg) && !/transaction/i.test(msg);
+    $('dbgProfile').innerHTML = skew
+      ? `<div class="explain"><div class="ic">⏳</div><div><div class="t">The engine is updating</div><div class="d">The profiler shipped in the page before the engine behind it finished redeploying. Try again in a few minutes.</div></div></div>`
+      : `<div class="explain"><div class="ic">⚠️</div><div><div class="t">Profile failed</div><div class="d">${esc(msg)}</div></div></div>`;
   } finally { $('profGo').disabled = false; }
 }
 function profName(n) { return /^function_\d+$/.test(n) ? n.replace('function_', 'fn@') : n; }
