@@ -234,7 +234,7 @@ pub struct SymbolizeReport {
 }
 
 /// One program frame (a top-level instruction or a CPI) of the transaction.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct FrameProfile {
     /// The instruction this frame ran, decoded the same way the Analyze tree
     /// names it ("Swap", "Mint Levercoin Lst"); `None` when it could not be
@@ -279,6 +279,29 @@ fn syscall_base_cost(name: &str) -> u64 {
     }
 }
 
+/// Programs the runtime executes natively — they never enter the VM, so the
+/// profiler records no frame for them.
+fn is_builtin(program: &str) -> bool {
+    matches!(
+        program,
+        "11111111111111111111111111111111"
+            | "ComputeBudget111111111111111111111111111111"
+            | "Vote111111111111111111111111111111111111111"
+            | "Stake11111111111111111111111111111111111111"
+            | "AddressLookupTab1e1111111111111111111111111"
+            | "BPFLoaderUpgradeab1e11111111111111111111111"
+            | "BPFLoader2111111111111111111111111111111111"
+            | "BPFLoader1111111111111111111111111111111111"
+            | "Config1111111111111111111111111111111111111"
+            | "Ed25519SigVerify111111111111111111111111111"
+            | "KeccakSecp256k11111111111111111111111111111"
+            | "Secp256r1SigVerify1111111111111111111111111"
+            | "ZkE1Gama1Proof11111111111111111111111111111"
+            | "ZkTokenProof1111111111111111111111111111111"
+            | "NativeLoader1111111111111111111111111111111"
+    )
+}
+
 impl FrameProfile {
     /// A lower-bound itemisation of `syscall_overhead`: each syscall's calls
     /// times its fixed charge. The gap between the sum and the measured
@@ -312,18 +335,46 @@ impl Profile {
     /// spans are matched to frames in completion order. Builtins log no
     /// `consumed` line and leave no trace, so mismatched program ids are
     /// skipped.
-    /// Name every frame with the instruction it ran. Frames are recorded in
-    /// invocation order, exactly the order of the transaction's decoded CPI
-    /// tree, so the two are walked together; pairing stops at the first
-    /// program mismatch rather than guessing.
+    /// Name every frame with the instruction it ran. The inspector records a
+    /// frame when an invocation *finishes*, so frames come in post-order
+    /// (children before their caller); builtins (System, Compute Budget, …)
+    /// run outside the VM and produce no frame; and instructions after the
+    /// failing one never run at all. So the tree is walked in post-order with
+    /// builtins dropped, and a tree node whose program is not the next frame's
+    /// program is one that did not execute — it is skipped, never guessed.
     pub fn attach_names(&mut self, tree: &[crate::CpiEntry]) -> usize {
-        let mut named = 0;
-        for (frame, entry) in self.frames.iter_mut().zip(tree.iter()) {
-            if frame.program != entry.program {
-                break;
+        // Pre-order + stack_height → post-order indices.
+        let mut order = Vec::with_capacity(tree.len());
+        let mut stack: Vec<usize> = Vec::new();
+        for (i, e) in tree.iter().enumerate() {
+            while stack
+                .last()
+                .is_some_and(|&t| tree[t].stack_height >= e.stack_height)
+            {
+                order.push(stack.pop().unwrap());
             }
-            frame.name = entry.name.clone();
-            named += frame.name.is_some() as usize;
+            stack.push(i);
+        }
+        while let Some(t) = stack.pop() {
+            order.push(t);
+        }
+        let mut named = 0;
+        let mut frames = self.frames.iter_mut();
+        let mut frame = frames.next();
+        for i in order {
+            let entry = &tree[i];
+            if is_builtin(&entry.program) {
+                continue;
+            }
+            let Some(f) = frame.as_deref_mut() else {
+                break;
+            };
+            if f.program != entry.program {
+                continue; // did not run in this replay
+            }
+            f.name = entry.name.clone();
+            named += f.name.is_some() as usize;
+            frame = frames.next();
         }
         named
     }
@@ -1426,6 +1477,85 @@ mod tests {
             p.frames[1].functions[1].compute_units,
             Some(1295),
             "700 of 1000 insns → 70% of 1850 CU"
+        );
+    }
+}
+
+#[cfg(test)]
+mod frame_name_tests {
+    use super::*;
+
+    fn entry(program: &str, name: &str, h: u64) -> crate::CpiEntry {
+        crate::CpiEntry {
+            compute_units: None,
+            index: 0,
+            program: program.into(),
+            stack_height: h,
+            name: Some(name.into()),
+            accounts: vec![],
+            args: vec![],
+            data: vec![],
+            account_indexes: vec![],
+        }
+    }
+
+    fn frame(program: &str) -> FrameProfile {
+        FrameProfile {
+            name: None,
+            program: program.into(),
+            instructions: 1,
+            compute_units: None,
+            syscall_overhead: None,
+            functions: vec![],
+            syscalls: vec![],
+            stacks: vec![],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn names_follow_completion_order_skipping_builtins_and_unrun_steps() {
+        const SYS: &str = "11111111111111111111111111111111";
+        let tree = vec![
+            entry(
+                "ComputeBudget111111111111111111111111111111",
+                "Set Limit",
+                1,
+            ),
+            entry("ATA", "Create", 1),
+            entry("TOK", "Get Size", 2),
+            entry(SYS, "Create Account", 2),
+            entry("TOK", "Init Account", 2),
+            entry("JUP", "Route", 1),
+            entry("PHX", "Swap", 2),
+            entry("TOK", "Transfer", 3),
+            entry("HYX", "Mint", 2),
+            entry("TOK", "Transfer Checked", 3), // never ran: HYX failed first
+            entry("TOK", "Close Account", 1),    // never ran: after the failure
+        ];
+        let mut p = Profile {
+            frames: ["TOK", "TOK", "ATA", "TOK", "PHX", "HYX", "JUP"]
+                .into_iter()
+                .map(frame)
+                .collect(),
+        };
+        assert_eq!(p.attach_names(&tree), 7);
+        let names: Vec<_> = p
+            .frames
+            .iter()
+            .map(|f| f.name.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Get Size",
+                "Init Account",
+                "Create",
+                "Transfer",
+                "Swap",
+                "Mint",
+                "Route"
+            ]
         );
     }
 }
