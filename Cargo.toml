@@ -21,6 +21,7 @@ categories = [
 include = [
     "/src/**",
     "/examples/**",
+    "/symbols/corpus.jsonl.gz",
     "/tests/**",
     "/README.md",
     "/CHANGELOG.md",

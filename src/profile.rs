@@ -192,6 +192,31 @@ pub fn corpus_from_build(so: &[u8], debug: &[u8]) -> crate::Result<Vec<CorpusEnt
     Ok(by_full.into_values().flatten().collect())
 }
 
+/// The corpus shipped with the crate (`symbols/corpus.jsonl.gz`): shapes of
+/// library and open-source program functions across platform-tools
+/// versions. Decoded once per process.
+pub fn builtin_corpus() -> &'static [CorpusEntry] {
+    static CORPUS: std::sync::LazyLock<Vec<CorpusEntry>> = std::sync::LazyLock::new(|| {
+        use std::io::Read;
+        const GZ: &[u8] = include_bytes!("../symbols/corpus.jsonl.gz");
+        if GZ.is_empty() {
+            return Vec::new();
+        }
+        let mut text = String::new();
+        if flate2::read::GzDecoder::new(GZ)
+            .read_to_string(&mut text)
+            .is_err()
+        {
+            return Vec::new();
+        }
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    });
+    &CORPUS
+}
+
 /// What [`Profile::symbolize_from_build`] managed to name.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct SymbolizeReport {
@@ -1062,6 +1087,9 @@ impl crate::Replay {
         let frames = std::mem::take(&mut *frames.lock().unwrap());
         let mut profile = Profile { frames };
         profile.attach_compute(&result.logs);
+        // Names for free: the bundled corpus names every library function
+        // whose shape it knows, in any program, before anyone uploads anything.
+        profile.symbolize_from_corpus(builtin_corpus());
         Ok((result, profile))
     }
 }
@@ -1284,6 +1312,47 @@ mod tests {
         assert_ne!(a.full, c.full, "a real constant is part of the shape");
         assert_eq!(a.opcodes, c.opcodes, "opcode-only shape still agrees");
         assert_eq!(a.len, 4);
+    }
+
+    #[test]
+    fn corpus_names_exact_shapes_only() {
+        let mut p = Profile {
+            frames: vec![frame(
+                "P",
+                &[
+                    (0, "entrypoint", 10),
+                    (7, "function_7", 30),
+                    (9, "function_9", 30),
+                ],
+            )],
+        };
+        p.frames[0].functions[1].shape = Shape {
+            full: 42,
+            opcodes: 1,
+            len: 30,
+            histogram: [0; 256],
+        };
+        p.frames[0].functions[2].shape = Shape {
+            full: 42,
+            opcodes: 1,
+            len: 31,
+            histogram: [0; 256],
+        };
+        let corpus = vec![CorpusEntry {
+            full: 42,
+            len: 30,
+            name: "core::fmt::write".into(),
+        }];
+        assert_eq!(p.symbolize_from_corpus(&corpus), 1);
+        assert_eq!(p.frames[0].functions[1].name, "core::fmt::write");
+        assert_eq!(
+            p.frames[0].functions[2].name, "function_9",
+            "same hash, different length: not renamed"
+        );
+        assert!(!builtin_corpus().is_empty(), "the bundled corpus decodes");
+        assert!(builtin_corpus()
+            .iter()
+            .any(|e| e.name.starts_with("core::") || e.name.starts_with("alloc::")));
     }
 
     #[test]
