@@ -32,6 +32,11 @@ use solana_transaction_context::IndexOfAccount;
 pub struct FunctionProfile {
     /// `entrypoint`, a symbol name, or `function_<pc>` for a stripped program.
     pub name: String,
+    /// What the function *does*, derived from the trace when its name is
+    /// anonymous: `Buy handler` (it logged `Instruction: Buy`), `CPI → Token
+    /// Program: Transfer`, `PDA derivation`, `emits event`, `hashing`,
+    /// `error: SlippageExceeded`, … `None` when nothing in the trace says.
+    pub label: Option<String>,
     /// The function's first instruction.
     pub pc: usize,
     /// Instructions executed inside this function itself.
@@ -175,6 +180,10 @@ pub struct FrameProfile {
     pub syscalls: Vec<(String, u64)>,
     /// Folded stacks (`a;b;c`) → instructions, the flamegraph input.
     pub stacks: Vec<(String, u64)>,
+    /// Every syscall in trace order with the function (start pc) that made
+    /// it — the evidence the frame's behavioural labels are derived from.
+    #[serde(skip)]
+    pub events: Vec<(usize, String)>,
 }
 
 /// Where a syscall's price comes from: the runtime's fixed per-call charge
@@ -241,6 +250,39 @@ impl Profile {
             }
             stack.push(i);
         }
+        // Each span's own log lines (not its children's), and its direct
+        // children as (program, instruction name from the child's logs).
+        let own_lines = |i: usize| -> Vec<String> {
+            let s = &spans[i];
+            let mut out = Vec::new();
+            for (li, line) in logs.iter().enumerate().take(s.end).skip(s.start) {
+                let inside_child = spans
+                    .iter()
+                    .any(|c| c.depth > s.depth && c.start > s.start && c.start <= li && li < c.end);
+                if inside_child {
+                    continue;
+                }
+                if let Some(text) = line.strip_prefix("Program log: ") {
+                    out.push(text.to_string());
+                }
+            }
+            out
+        };
+        let children = |i: usize| -> Vec<(String, Option<String>)> {
+            let s = &spans[i];
+            spans
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.depth == s.depth + 1 && c.start > s.start && c.start < s.end)
+                .map(|(ci, c)| {
+                    let name = own_lines(ci).iter().find_map(|l| {
+                        l.strip_prefix("Instruction: ")
+                            .map(|n| n.trim().to_string())
+                    });
+                    (c.program.clone(), name)
+                })
+                .collect()
+        };
         let mut order: Vec<usize> = (0..spans.len()).collect();
         order.sort_by_key(|&i| spans[i].end);
         let mut next = 0usize;
@@ -252,6 +294,7 @@ impl Profile {
             if frame.program != spans[i].program {
                 continue;
             }
+            frame.derive_labels(&own_lines(i), &children(i));
             frame.compute_units = Some(cu);
             frame.syscall_overhead = Some(cu.saturating_sub(frame.instructions));
             let insns = frame.instructions.max(1);
@@ -688,6 +731,7 @@ fn profile_frame(program: String, exe: &Executable, trace: &RegisterTrace) -> Op
     let mut calls: BTreeMap<usize, u64> = BTreeMap::new();
     let mut syscalls: BTreeMap<String, u64> = BTreeMap::new();
     let mut stacks: BTreeMap<String, u64> = BTreeMap::new();
+    let mut events: Vec<(usize, String)> = Vec::new();
 
     let first_pc = trace[0][11] as usize;
     let mut stack: Vec<usize> = vec![enclosing(first_pc)];
@@ -723,7 +767,8 @@ fn profile_frame(program: String, exe: &Executable, trace: &RegisterTrace) -> Op
                 if !static_syscalls || insn.src == 0 {
                     if let Some((name, _)) = syscall_registry.lookup_by_key(insn.imm as u32) {
                         let name = String::from_utf8_lossy(name).to_string();
-                        *syscalls.entry(name).or_default() += 1;
+                        *syscalls.entry(name.clone()).or_default() += 1;
+                        events.push((here, name));
                         continue;
                     }
                 }
@@ -764,6 +809,7 @@ fn profile_frame(program: String, exe: &Executable, trace: &RegisterTrace) -> Op
             calls: *calls.get(&pc).unwrap_or(&0),
             compute_units: None,
             shape: Shape::of(text, pc, end_of(pc)),
+            label: None,
         })
         .collect();
     fns.sort_by_key(|f| std::cmp::Reverse(f.self_insns));
@@ -779,7 +825,139 @@ fn profile_frame(program: String, exe: &Executable, trace: &RegisterTrace) -> Op
         functions: fns,
         syscalls: sys,
         stacks: folded,
+        events,
     })
+}
+
+/// A readable name for a program id: the well-known natives by name, anything
+/// else shortened.
+fn program_label(id: &str) -> String {
+    match id {
+        "11111111111111111111111111111111" => "System Program".into(),
+        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" => "Token Program".into(),
+        "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" => "Token-2022".into(),
+        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" => "Associated Token".into(),
+        "ComputeBudget111111111111111111111111111111" => "Compute Budget".into(),
+        "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr" => "Memo".into(),
+        other if other.len() > 12 => format!("{}…{}", &other[..4], &other[other.len() - 4..]),
+        other => other.to_string(),
+    }
+}
+
+/// Label priority: a stronger piece of evidence overrides a weaker one.
+fn label_rank(label: &str) -> u8 {
+    if label.ends_with(" handler") {
+        6
+    } else if label.starts_with("error: ") {
+        5
+    } else if label.starts_with("CPI → ") {
+        4
+    } else if label == "PDA derivation" {
+        3
+    } else if label == "emits event" || label == "hashing" || label == "sets return data" {
+        2
+    } else {
+        1
+    }
+}
+
+impl FrameProfile {
+    /// Derive [`FunctionProfile::label`]s from the frame's syscall events and
+    /// its own log lines (`own_logs`, in order) and its child invocations
+    /// (`children`: `(program id, instruction name)` in order). The k-th
+    /// logging syscall wrote the k-th log line; the k-th `sol_invoke_signed`
+    /// made the k-th child call.
+    fn derive_labels(&mut self, own_logs: &[String], children: &[(String, Option<String>)]) {
+        let mut labels: BTreeMap<usize, String> = BTreeMap::new();
+        let mut propose = |pc: usize, label: String| {
+            let better = labels
+                .get(&pc)
+                .map(|cur| label_rank(&label) > label_rank(cur))
+                .unwrap_or(true);
+            if better {
+                labels.insert(pc, label);
+            }
+        };
+        let (mut log_i, mut cpi_i) = (0usize, 0usize);
+        for (pc, sys) in &self.events {
+            match sys.as_str() {
+                "sol_log_" | "sol_log_64_" | "sol_log_pubkey" => {
+                    if let Some(line) = own_logs.get(log_i) {
+                        if let Some(name) = line.strip_prefix("Instruction: ") {
+                            propose(*pc, format!("{} handler", name.trim()));
+                        } else if line.contains("AnchorError") {
+                            let name = line
+                                .split("Error Code: ")
+                                .nth(1)
+                                .and_then(|r| r.split('.').next())
+                                .unwrap_or("AnchorError");
+                            propose(*pc, format!("error: {name}"));
+                        } else {
+                            propose(*pc, "logging".into());
+                        }
+                    }
+                    log_i += 1;
+                }
+                "sol_invoke_signed_rust" | "sol_invoke_signed_c" => {
+                    let target = match children.get(cpi_i) {
+                        Some((program, Some(ix))) => {
+                            format!("CPI → {}: {ix}", program_label(program))
+                        }
+                        Some((program, None)) => format!("CPI → {}", program_label(program)),
+                        None => "CPI".into(),
+                    };
+                    propose(*pc, target);
+                    cpi_i += 1;
+                }
+                "sol_try_find_program_address" | "sol_create_program_address" => {
+                    propose(*pc, "PDA derivation".into())
+                }
+                "sol_log_data" => propose(*pc, "emits event".into()),
+                "sol_sha256" | "sol_keccak256" | "sol_blake3" | "sol_poseidon" => {
+                    propose(*pc, "hashing".into())
+                }
+                "sol_set_return_data" => propose(*pc, "sets return data".into()),
+                "sol_get_return_data" => propose(*pc, "reads return data".into()),
+                s if s.starts_with("sol_get_") && s.ends_with("_sysvar") => {
+                    propose(*pc, "reads sysvar".into())
+                }
+                "sol_memcpy_" | "sol_memmove_" | "sol_memset_" => {
+                    propose(*pc, "memory copy".into())
+                }
+                "sol_memcmp_" => propose(*pc, "memory compare".into()),
+                _ => {}
+            }
+        }
+        // Structure: on any stack that reaches a handler, the functions between
+        // the entrypoint and the handler are the instruction dispatch.
+        let handler_names: Vec<String> = self
+            .functions
+            .iter()
+            .filter(|f| labels.get(&f.pc).is_some_and(|l| l.ends_with(" handler")))
+            .map(|f| f.name.clone())
+            .collect();
+        let mut dispatch: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (stack, _) in &self.stacks {
+            let parts: Vec<&str> = stack.split(';').collect();
+            if let Some(h) = parts
+                .iter()
+                .position(|p| handler_names.iter().any(|n| n == p))
+            {
+                for p in parts.iter().take(h).skip(1) {
+                    dispatch.insert((*p).to_string());
+                }
+            }
+        }
+        for f in &mut self.functions {
+            if f.name == "entrypoint" {
+                f.label = Some("entrypoint".into());
+            } else if let Some(l) = labels.get(&f.pc) {
+                f.label = Some(l.clone());
+            } else if dispatch.contains(&f.name) {
+                f.label = Some("instruction dispatch".into());
+            }
+        }
+    }
 }
 
 impl crate::Replay {
@@ -893,11 +1071,76 @@ mod tests {
                     calls: 1,
                     compute_units: None,
                     shape: Shape::default(),
+                    label: None,
                 })
                 .collect(),
             syscalls: vec![],
             stacks: vec![(fns.iter().map(|f| f.1).collect::<Vec<_>>().join(";"), 1)],
+            events: vec![],
         }
+    }
+
+    #[test]
+    fn labels_come_from_logs_and_syscalls_in_trace_order() {
+        let mut f = frame(
+            "Amm",
+            &[
+                (0, "entrypoint", 10),
+                (50, "function_50", 5),
+                (100, "function_100", 50),
+                (200, "function_200", 30),
+                (300, "function_300", 20),
+            ],
+        );
+        f.stacks = vec![
+            (
+                "entrypoint;function_50;function_100;function_200".into(),
+                10,
+            ),
+            ("entrypoint;function_300".into(), 1),
+        ];
+        f.events = vec![
+            (100, "sol_log_".into()), // "Instruction: Buy"
+            (200, "sol_try_find_program_address".into()),
+            (200, "sol_invoke_signed_rust".into()), // → Token Program: Transfer
+            (300, "sol_log_".into()),               // AnchorError …
+            (300, "sol_memcpy_".into()),
+        ];
+        let logs = vec![
+            "Instruction: Buy".to_string(),
+            "AnchorError thrown in x. Error Code: SlippageExceeded. Error Number: 6001."
+                .to_string(),
+        ];
+        let children = vec![(
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string(),
+            Some("Transfer".to_string()),
+        )];
+        f.derive_labels(&logs, &children);
+        let label = |pc: usize| {
+            f.functions
+                .iter()
+                .find(|x| x.pc == pc)
+                .unwrap()
+                .label
+                .clone()
+        };
+        assert_eq!(label(0).as_deref(), Some("entrypoint"));
+        assert_eq!(label(100).as_deref(), Some("Buy handler"));
+        assert_eq!(
+            label(200).as_deref(),
+            Some("CPI → Token Program: Transfer"),
+            "CPI outranks PDA derivation"
+        );
+        assert_eq!(
+            label(300).as_deref(),
+            Some("error: SlippageExceeded"),
+            "error outranks memory copy"
+        );
+        assert_eq!(
+            label(50).as_deref(),
+            Some("instruction dispatch"),
+            "between entrypoint and the handler"
+        );
     }
 
     #[test]

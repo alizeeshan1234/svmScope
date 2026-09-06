@@ -1311,6 +1311,7 @@ input.derived { border-color: rgba(52,211,153,.45); color: var(--green); }
 .prof-tbl td.n { font-family: var(--font-mono); color: var(--text-2); text-align: right; white-space: nowrap; }
 .prof-tbl td.fn { font-family: var(--font-mono); color: var(--text-1); word-break: break-all; }
 .prof-tbl td.fn.anon { color: var(--text-3); }
+.prof-tbl td.fn .anon { color: var(--text-3); font-size: 10px; }
 .prof-sym { font-size: 11.5px; color: var(--text-2); margin-top: var(--s-3); line-height: 1.6; }
 .prof-sym input[type=file] { font-size: 11px; }
 .prof-note { font-size: 11.5px; color: var(--text-3); margin-top: var(--s-2); line-height: 1.5; }
@@ -4705,7 +4706,8 @@ async function runProfile() {
       : `<div class="explain"><div class="ic">⚠️</div><div><div class="t">Profile failed</div><div class="d">${esc(msg)}</div></div></div>`;
   } finally { $('profGo').disabled = false; }
 }
-function profName(n) { return /^function_\d+$/.test(n) ? n.replace('function_', 'fn@') : n; }
+let profLabels = {};   // function name → behavioural label for the frame being drawn
+function profName(n) { return (/^function_\d+$/.test(n) && profLabels[n]) ? profLabels[n] : (/^function_\d+$/.test(n) ? n.replace('function_', 'fn@') : n); }
 function profColor(name, program) {
   // Classic flame palette: warm hues, varied per function so neighbours
   // separate, stable across renders (hash of the name), readable text on top.
@@ -4727,11 +4729,12 @@ function renderProfile() {
   html += '<div class="cu-roll">' + progRows.map(([pg, n]) => `<div class="r"><span title="${esc(pg)}">${esc(short(pg))}</span><div class="bar" style="width:${Math.max(2, 100 * n / maxProg)}%"></div><span class="n">${fmt(n)}</span></div>`).join('') + '</div>';
   html += '<div class="prof-frames" style="margin-top:12px">' + frames.map((f, i) => `<button class="${i === profFrame ? 'on' : ''}" data-i="${i}" title="${esc(f.program)}">#${i + 1} ${esc(short(f.program))} · ${fmt(f.compute_units ?? f.instructions)}${f.compute_units != null ? ' CU' : ' insns'}</button>`).join('') + '</div>';
   const f = frames[profFrame];
+  profLabels = Object.fromEntries(f.functions.filter(x => x.label && x.label !== 'entrypoint').map(x => [x.name, x.label]));
   html += `<div class="prof-sum"><b>${esc(f.program)}</b> · ${fmt(f.instructions)} instructions` + (f.compute_units != null ? ` · ${fmt(f.compute_units)} CU charged · ${fmt(f.syscall_overhead)} CU beyond instructions (syscalls, CPI, serialization)` : '') + '</div>';
   html += '<div class="prof-crumb" id="profCrumb"></div><div class="prof-flame" id="profFlame"></div>';
   const anon = f.functions.filter(x => /^function_\d+$/.test(x.name)).length;
   html += '<div class="prof-cols"><div><table class="prof-tbl"><thead><tr><th>function</th><th style="text-align:right">self</th><th style="text-align:right">total</th><th style="text-align:right">calls</th><th style="text-align:right">~CU</th></tr></thead><tbody>'
-    + f.functions.slice(0, 25).map(x => `<tr><td class="fn ${/^function_\d+$/.test(x.name) ? 'anon' : ''}">${esc(profName(x.name))}</td><td class="n">${fmt(x.self_insns)}</td><td class="n">${fmt(x.total_insns)}</td><td class="n">${fmt(x.calls)}</td><td class="n">${x.compute_units != null ? fmt(x.compute_units) : '–'}</td></tr>`).join('')
+    + f.functions.slice(0, 25).map(x => `<tr><td class="fn ${/^function_\d+$/.test(x.name) && !x.label ? 'anon' : ''}">${esc(profName(x.name))}${/^function_\d+$/.test(x.name) && x.label ? ` <span class="anon">${esc(x.name.replace('function_', 'fn@'))}</span>` : ''}</td><td class="n">${fmt(x.self_insns)}</td><td class="n">${fmt(x.total_insns)}</td><td class="n">${fmt(x.calls)}</td><td class="n">${x.compute_units != null ? fmt(x.compute_units) : '–'}</td></tr>`).join('')
     + '</tbody></table></div><div>';
   // Runtime fixed charges per syscall (solana-program-runtime defaults); a lower bound,
   // since memory ops, hashing, return data and CPI account bytes also charge per byte.
@@ -4742,7 +4745,8 @@ function renderProfile() {
   html += '<table class="prof-tbl"><thead><tr><th>syscall</th><th style="text-align:right">calls</th><th style="text-align:right">≥ CU</th></tr></thead><tbody>'
     + (sysRows.length ? sysRows.map(([n, c, cu]) => `<tr><td class="fn">${esc(n)}</td><td class="n">${fmt(c)}</td><td class="n">${fmt(cu)}</td></tr>`).join('') : '<tr><td class="fn anon" colspan="3">none</td></tr>') + '</tbody></table>'
     + (f.syscall_overhead != null && sysRows.length ? `<div class="prof-note">Fixed charges explain at least <b>${fmt(sysFloor)}</b> of the <b>${fmt(f.syscall_overhead)}</b> CU beyond instructions; the rest scales with bytes copied, hashed, or passed to CPIs.</div>` : '');
-  html += `<div class="prof-sym">${anon ? `<b>${anon}</b> of ${f.functions.length} functions are unnamed: this program is stripped (every mainnet program is). ` : 'All functions named. '}`
+  const labeled = f.functions.filter(x => /^function_\d+$/.test(x.name) && x.label).length;
+  html += `<div class="prof-sym">${anon ? `This program is stripped (every mainnet program is): <b>${anon}</b> of ${f.functions.length} functions have no symbol name, so <b>${labeled}</b> of them are labelled by what they did — handlers, CPIs, PDA derivation, events, errors. ` : 'All functions named. '}`
     + `Have a build of it? Add the <code>.debug</code> file <code>cargo build-sbf --debug</code> writes, and functions get their Rust names. If that build is not the one on chain, add its <code>.so</code> too and functions are matched by code shape.<br>`
     + `<label>.debug <input type="file" id="profSymFile" accept=".debug,application/octet-stream" /></label> `
     + `<label>.so (optional) <input type="file" id="profSoFile" accept=".so,application/octet-stream" /></label> <span id="profSymStatus"></span></div>`;

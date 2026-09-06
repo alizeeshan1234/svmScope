@@ -414,6 +414,16 @@ fn print_profile(result: &ReplayResult, profile: &svmscope::profile::Profile) {
             "self", "total", "calls", "~CU"
         );
         for func in f.functions.iter().take(12) {
+            // A real name wins; an anonymous function shows what it did, with
+            // its id beside it.
+            let anon = func.name.starts_with("function_");
+            let shown = match (&func.label, anon) {
+                (Some(label), true) => {
+                    format!("{label}  ({})", func.name.replace("function_", "fn@"))
+                }
+                (_, true) => func.name.replace("function_", "fn@"),
+                _ => func.name.clone(),
+            };
             println!(
                 "   {:>9} {:>9} {:>6} {:>8}  {}",
                 func.self_insns,
@@ -422,7 +432,7 @@ fn print_profile(result: &ReplayResult, profile: &svmscope::profile::Profile) {
                 func.compute_units
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "-".into()),
-                func.name
+                shown
             );
         }
         if !f.syscalls.is_empty() {

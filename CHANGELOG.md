@@ -4,6 +4,30 @@ All notable changes to svmscope are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] — 2026-09-06
+
+### Added
+
+- **Behavioural labels for stripped programs.** Every mainnet program is
+  stripped, so its functions have no names — but the trace says what they
+  did. Each anonymous function is now labelled from evidence in the trace
+  and the logs: `Buy handler` (it logged `Instruction: Buy`), `instruction
+  dispatch` (between the entrypoint and a handler), `CPI → Token Program:
+  Transfer` (the k-th `sol_invoke_signed` made the k-th child call), `PDA
+  derivation`, `emits event`, `hashing`, `reads sysvar`, `sets return data`,
+  `memory copy` / `memory compare`, `error: SlippageExceeded` (it logged the
+  Anchor error). `FunctionProfile::label`; the CLI, the flamegraph and the
+  table show the label with the raw id beside it. Functions that only compute
+  stay `fn@<pc>`.
+- **Names from another build of the same source.** `Profile::symbolize_from_build(program, so, debug)`
+  matches functions by code shape (instruction stream with jump offsets,
+  call targets and data addresses normalised; opcode histogram; length) in
+  three tiers — exact, opcode-only, unique near-miss — so a plain release
+  deployment can be named from a `--debug` build. CLI:
+  `--symbols <program>=<path.debug>[,<path.so>]`; server: `symbols[].so_b64`;
+  UI: an optional `.so` upload next to the `.debug`. Measured on the Anchor
+  test program: 32 of 43 executed functions named across builds.
+
 ## [0.5.0] — 2026-09-06
 
 ### Added
