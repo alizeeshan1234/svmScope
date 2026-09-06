@@ -166,7 +166,9 @@ pub struct CorpusEntry {
 pub fn corpus_from_build(so: &[u8], debug: &[u8]) -> crate::Result<Vec<CorpusEntry>> {
     let (text, symbols) = elf_parse(so)
         .and_then(|(text, _)| elf_parse(debug).map(|(_, syms)| (text, syms)))
-        .ok_or_else(|| crate::Error::InvalidSpec("expected an ELF .so and a .debug with a symbol table".into()))?;
+        .ok_or_else(|| {
+            crate::Error::InvalidSpec("expected an ELF .so and a .debug with a symbol table".into())
+        })?;
     let mut by_full: BTreeMap<u64, Option<CorpusEntry>> = BTreeMap::new();
     for (&pc, (name, size)) in &symbols {
         if *size < 2 {
@@ -543,7 +545,8 @@ impl Profile {
     /// named. Real symbols and behavioural labels are left alone; a corpus
     /// name lands in `name`, so it shows everywhere a symbol would.
     pub fn symbolize_from_corpus(&mut self, corpus: &[CorpusEntry]) -> usize {
-        let index: std::collections::HashMap<u64, &CorpusEntry> = corpus.iter().map(|e| (e.full, e)).collect();
+        let index: std::collections::HashMap<u64, &CorpusEntry> =
+            corpus.iter().map(|e| (e.full, e)).collect();
         let mut renamed = 0usize;
         for frame in &mut self.frames {
             let mut rename: BTreeMap<String, String> = BTreeMap::new();

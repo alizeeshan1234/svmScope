@@ -104,7 +104,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .map(serde_json::from_str)
                     .collect::<Result<_, _>>()?;
                 let n = profile.symbolize_from_corpus(&corpus);
-                eprintln!("corpus {path}: {} shapes, named {n} functions", corpus.len());
+                eprintln!(
+                    "corpus {path}: {} shapes, named {n} functions",
+                    corpus.len()
+                );
                 i += 2;
                 continue;
             }
