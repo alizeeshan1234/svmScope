@@ -279,29 +279,6 @@ fn syscall_base_cost(name: &str) -> u64 {
     }
 }
 
-/// Programs the runtime executes natively — they never enter the VM, so the
-/// profiler records no frame for them.
-fn is_builtin(program: &str) -> bool {
-    matches!(
-        program,
-        "11111111111111111111111111111111"
-            | "ComputeBudget111111111111111111111111111111"
-            | "Vote111111111111111111111111111111111111111"
-            | "Stake11111111111111111111111111111111111111"
-            | "AddressLookupTab1e1111111111111111111111111"
-            | "BPFLoaderUpgradeab1e11111111111111111111111"
-            | "BPFLoader2111111111111111111111111111111111"
-            | "BPFLoader1111111111111111111111111111111111"
-            | "Config1111111111111111111111111111111111111"
-            | "Ed25519SigVerify111111111111111111111111111"
-            | "KeccakSecp256k11111111111111111111111111111"
-            | "Secp256r1SigVerify1111111111111111111111111"
-            | "ZkE1Gama1Proof11111111111111111111111111111"
-            | "ZkTokenProof1111111111111111111111111111111"
-            | "NativeLoader1111111111111111111111111111111"
-    )
-}
-
 impl FrameProfile {
     /// A lower-bound itemisation of `syscall_overhead`: each syscall's calls
     /// times its fixed charge. The gap between the sum and the measured
