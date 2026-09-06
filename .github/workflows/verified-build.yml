@@ -91,7 +91,10 @@ jobs:
           mkdir -p out/release && cp src/target/deploy/*.so out/release/ && ls -la out/release
           # cargo-build-sbf strips the linker output into target/deploy; the
           # unstripped original keeps the full symbol table for identical code.
-          mkdir -p out/symbols && cp src/target/sbf-solana-solana/release/*.so out/symbols/ 2>/dev/null; ls -la out/symbols
+          # (target/sbf-solana-solana on older toolchains, target/sbpf-solana-solana on newer)
+          mkdir -p out/symbols
+          find src/target -path '*solana-solana/release/*.so' -not -path '*/deps/*' -exec cp {} out/symbols/ \;
+          ls -la out/symbols
           cp record.json out/
       - name: Compare with the on-chain hash
         run: |
