@@ -60,7 +60,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     // functions inside stripped programs.
     #[cfg(feature = "profiler")]
     if signature == "symbols" {
-        let usage = "usage: svmscope symbols dump <path.so> <path.debug> [-o corpus.jsonl]";
+        let usage = "usage: svmscope symbols dump <path.so> <path.debug> [-o corpus.jsonl]\n       svmscope symbols exact <program> <path.so> <path.debug> [-o symbols/exact/<program>.json]";
+        if args.get(2).map(String::as_str) == Some("exact") {
+            let program = args.get(3).ok_or(usage)?;
+            let so = std::fs::read(args.get(4).ok_or(usage)?)?;
+            let debug = std::fs::read(args.get(5).ok_or(usage)?)?;
+            let exact = svmscope::profile::exact_from_build(program, &so, &debug)?;
+            let text = serde_json::to_string(&exact)?;
+            match args.iter().position(|a| a == "-o") {
+                Some(i) => std::fs::write(args.get(i + 1).ok_or(usage)?, &text)?,
+                None => println!("{text}"),
+            }
+            eprintln!(
+                "{} symbols, elf sha256 {}",
+                exact.symbols.len(),
+                exact.elf_sha256
+            );
+            return Ok(());
+        }
         if args.get(2).map(String::as_str) != Some("dump") {
             return Err(usage.into());
         }

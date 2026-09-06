@@ -192,6 +192,76 @@ pub fn corpus_from_build(so: &[u8], debug: &[u8]) -> crate::Result<Vec<CorpusEnt
     Ok(by_full.into_values().flatten().collect())
 }
 
+/// A program's complete symbol table from a build byte-identical to what is
+/// on chain: `pc → demangled name`, guarded by the stripped sha256 of the ELF
+/// (the same "executable hash" `solana-verify` compares).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExactSymbols {
+    /// Program id the map belongs to.
+    pub program: String,
+    /// [`stripped_sha256`] of the build's `.so`; must equal the on-chain ELF's.
+    pub elf_sha256: String,
+    /// `pc → demangled function name` from the build's `.debug`.
+    pub symbols: BTreeMap<usize, String>,
+}
+
+/// sha256 of an ELF with its zero padding removed — how on-chain program data
+/// (padded to the account size) is compared with a local build.
+pub fn stripped_sha256(elf: &[u8]) -> String {
+    use sha2::Digest;
+    let end = elf.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+    format!("{:x}", sha2::Sha256::digest(&elf[..end]))
+}
+
+/// Build an [`ExactSymbols`] from a build's `.so` (hashed) and its `.debug`
+/// (symbol table). Fails when the two are not the same build.
+pub fn exact_from_build(program: &str, so: &[u8], debug: &[u8]) -> crate::Result<ExactSymbols> {
+    let symbols = elf_function_symbols(debug)
+        .ok_or_else(|| crate::Error::InvalidSpec("not an ELF with a symbol table".into()))?;
+    if !symbols.values().any(|n| n == "entrypoint") {
+        return Err(crate::Error::InvalidSpec(
+            "the .debug ELF has no entrypoint symbol".into(),
+        ));
+    }
+    let (_, so_syms) =
+        elf_parse(so).ok_or_else(|| crate::Error::InvalidSpec("not an ELF".into()))?;
+    // The stripped .so keeps `entrypoint`; it must sit at the same address.
+    let so_entry = so_syms
+        .iter()
+        .find(|(_, (n, _))| n == "entrypoint")
+        .map(|(pc, _)| *pc);
+    let dbg_entry = symbols
+        .iter()
+        .find(|(_, n)| *n == "entrypoint")
+        .map(|(pc, _)| *pc);
+    if so_entry.is_some() && so_entry != dbg_entry {
+        return Err(crate::Error::InvalidSpec(
+            ".so and .debug are not the same build".into(),
+        ));
+    }
+    Ok(ExactSymbols {
+        program: program.to_string(),
+        elf_sha256: stripped_sha256(so),
+        symbols: symbols
+            .into_iter()
+            .map(|(pc, sym)| (pc, strip_hash(&rustc_demangle::demangle(&sym).to_string())))
+            .collect(),
+    })
+}
+
+/// Exact symbol maps shipped with the crate (`symbols/exact/*.json`), one per
+/// verified mainnet program rebuilt byte-for-byte with symbols.
+pub fn builtin_exact() -> &'static [ExactSymbols] {
+    static EXACT: std::sync::LazyLock<Vec<ExactSymbols>> = std::sync::LazyLock::new(|| {
+        const FILES: &[&str] = &[];
+        FILES
+            .iter()
+            .filter_map(|t| serde_json::from_str(t).ok())
+            .collect()
+    });
+    &EXACT
+}
+
 /// The corpus shipped with the crate (`symbols/corpus.jsonl.gz`): shapes of
 /// library and open-source program functions across platform-tools
 /// versions. Decoded once per process.
@@ -434,6 +504,43 @@ impl Profile {
     pub fn symbolize(&mut self, program: &str, elf_with_symbols: &[u8]) -> crate::Result<usize> {
         let symbols = elf_function_symbols(elf_with_symbols)
             .ok_or_else(|| crate::Error::InvalidSpec("not an ELF with a symbol table".into()))?;
+        let symbols = symbols
+            .into_iter()
+            .map(|(pc, sym)| (pc, strip_hash(&rustc_demangle::demangle(&sym).to_string())))
+            .collect();
+        self.symbolize_map(program, &symbols)
+    }
+
+    /// Apply every bundled exact symbol map whose ELF hash equals the program
+    /// loaded in this replay — byte-identical builds, so names map by address
+    /// with nothing inferred. Returns the number of functions renamed.
+    pub fn apply_exact<'a>(&mut self, program_elf: impl Fn(&str) -> Option<&'a [u8]>) -> usize {
+        let programs: std::collections::BTreeSet<String> =
+            self.frames.iter().map(|f| f.program.clone()).collect();
+        let mut renamed = 0;
+        for program in programs {
+            let Some(exact) = builtin_exact().iter().find(|e| e.program == program) else {
+                continue;
+            };
+            let Some(elf) = program_elf(&program) else {
+                continue;
+            };
+            if stripped_sha256(elf) != exact.elf_sha256 {
+                continue;
+            }
+            renamed += self.symbolize_map(&program, &exact.symbols).unwrap_or(0);
+        }
+        renamed
+    }
+
+    /// Rename `function_<pc>` entries of `program`'s frames from a `pc → name`
+    /// map (names already demangled). The map's `entrypoint` must sit where the
+    /// program's entrypoint actually ran, or the map is refused.
+    fn symbolize_map(
+        &mut self,
+        program: &str,
+        symbols: &BTreeMap<usize, String>,
+    ) -> crate::Result<usize> {
         let mut renamed = 0usize;
         for frame in self.frames.iter_mut().filter(|f| f.program == program) {
             // Self-check: the ELF's `entrypoint` must sit where this program's
@@ -451,9 +558,7 @@ impl Profile {
             }
             let mut rename: BTreeMap<String, String> = BTreeMap::new();
             for f in &mut frame.functions {
-                if let Some(sym) = symbols.get(&f.pc) {
-                    let pretty = rustc_demangle::demangle(sym).to_string();
-                    let pretty = strip_hash(&pretty);
+                if let Some(pretty) = symbols.get(&f.pc).cloned() {
                     if pretty != f.name {
                         rename.insert(f.name.clone(), pretty.clone());
                         f.name = pretty;
@@ -1135,6 +1240,9 @@ impl crate::Replay {
         let frames = std::mem::take(&mut *frames.lock().unwrap());
         let mut profile = Profile { frames };
         profile.attach_compute(&result.logs);
+        // Exact names first: a bundled symbol map for a program whose on-chain
+        // ELF hash matches names every function by address.
+        profile.apply_exact(|p| self.ctx.program_elf(p));
         // Names for free: the bundled corpus names every library function
         // whose shape it knows, in any program, before anyone uploads anything.
         profile.symbolize_from_corpus(builtin_corpus());

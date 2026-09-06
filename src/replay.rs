@@ -573,6 +573,15 @@ fn chrono_like(ts: i64) -> String {
 
 impl ReplayContext {
     /// Warp the clock for subsequent runs (see [`TimeTravel`]).
+    /// The ELF loaded for `program` in this replay's world (the on-chain
+    /// bytes, or a replacement), if it is a program.
+    pub(crate) fn program_elf(&self, program: &str) -> Option<&[u8]> {
+        self.loaded.iter().find_map(|(addr, l)| match l {
+            Loaded::Program(elf) if addr.to_string() == program => Some(elf.as_slice()),
+            _ => None,
+        })
+    }
+
     pub(crate) fn set_time_travel(&mut self, tt: TimeTravel) {
         self.time_travel = tt;
     }
