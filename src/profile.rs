@@ -158,6 +158,11 @@ pub struct CorpusEntry {
     pub len: usize,
     /// Demangled, hash-stripped symbol name.
     pub name: String,
+    /// [`Shape::opcodes`]: the opcode-only hash, for the approximate tier
+    /// (same instruction kinds in the same order, registers and constants
+    /// ignored). Absent in entries from older corpus dumps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opcodes: Option<u64>,
 }
 
 /// Dump every named function of a build (its `.so` for code, its `.debug` for
@@ -187,6 +192,7 @@ pub fn corpus_from_build(so: &[u8], debug: &[u8]) -> crate::Result<Vec<CorpusEnt
                 full: sh.full,
                 len: sh.len,
                 name: pretty,
+                opcodes: Some(sh.opcodes),
             }));
     }
     Ok(by_full.into_values().flatten().collect())
@@ -734,6 +740,22 @@ impl Profile {
     pub fn symbolize_from_corpus(&mut self, corpus: &[CorpusEntry]) -> usize {
         let index: std::collections::HashMap<u64, &CorpusEntry> =
             corpus.iter().map(|e| (e.full, e)).collect();
+        // Approximate tier: opcode sequence + length. A hash shared by two
+        // different names is ambiguous and never used.
+        let mut by_opcodes: std::collections::HashMap<(u64, usize), Option<&str>> =
+            std::collections::HashMap::new();
+        for e in corpus {
+            if let Some(op) = e.opcodes {
+                by_opcodes
+                    .entry((op, e.len))
+                    .and_modify(|v| {
+                        if v.is_some_and(|n| n != e.name) {
+                            *v = None;
+                        }
+                    })
+                    .or_insert(Some(e.name.as_str()));
+            }
+        }
         let mut renamed = 0usize;
         for frame in &mut self.frames {
             let mut rename: BTreeMap<String, String> = BTreeMap::new();
@@ -741,12 +763,19 @@ impl Profile {
                 if !f.name.starts_with("function_") {
                     continue;
                 }
-                if let Some(e) = index.get(&f.shape.full) {
-                    if e.len == f.shape.len {
-                        rename.insert(f.name.clone(), e.name.clone());
-                        f.name = e.name.clone();
-                        renamed += 1;
-                    }
+                let exact = index.get(&f.shape.full).filter(|e| e.len == f.shape.len);
+                let new_name = match exact {
+                    Some(e) => Some(e.name.clone()),
+                    None => by_opcodes
+                        .get(&(f.shape.opcodes, f.shape.len))
+                        .copied()
+                        .flatten()
+                        .map(|n| format!("≈ {n}")),
+                };
+                if let Some(n) = new_name {
+                    rename.insert(f.name.clone(), n.clone());
+                    f.name = n;
+                    renamed += 1;
                 }
             }
             if rename.is_empty() {
@@ -1506,6 +1535,7 @@ mod tests {
             histogram: [0; 256],
         };
         let corpus = vec![CorpusEntry {
+            opcodes: None,
             full: 42,
             len: 30,
             name: "core::fmt::write".into(),
