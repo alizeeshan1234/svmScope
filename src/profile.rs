@@ -45,6 +45,115 @@ pub struct FunctionProfile {
     /// syscalls (one CU per instruction); otherwise the syscall overhead is
     /// spread proportionally. `None` until [`Profile`] has frame compute.
     pub compute_units: Option<u64>,
+    /// The function's code shape (see [`Shape`]), for matching it to the same
+    /// function in another build of the same source. Not serialized.
+    #[serde(skip)]
+    pub shape: Shape,
+}
+
+/// A build-independent fingerprint of one function's code: its instruction
+/// sequence with everything that moves between builds normalised away —
+/// jump offsets, call targets, 64-bit immediates (addresses of data) — and
+/// its length. Two builds of the same source produce the same shape for the
+/// same function far more often than they produce the same address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Shape {
+    /// FNV-1a over the normalised instruction stream.
+    pub full: u64,
+    /// FNV-1a over opcodes only — the fallback when `full` finds no match.
+    pub opcodes: u64,
+    /// Instruction count.
+    pub len: usize,
+    /// Opcode histogram (indexed by opcode byte), for the near-miss tier:
+    /// two builds of one function differ in a few instructions, not in what
+    /// kinds of instructions they are made of.
+    pub histogram: [u16; 256],
+}
+
+impl Shape {
+    /// Similarity of two opcode histograms in `[0, 1]`: shared opcode mass
+    /// over total mass. 1.0 means identical multisets of opcodes.
+    pub fn similarity(&self, other: &Shape) -> f64 {
+        let (mut shared, mut total) = (0u32, 0u32);
+        for i in 0..256 {
+            let (a, b) = (self.histogram[i] as u32, other.histogram[i] as u32);
+            shared += a.min(b);
+            total += a.max(b);
+        }
+        if total == 0 {
+            1.0
+        } else {
+            shared as f64 / total as f64
+        }
+    }
+}
+
+impl Shape {
+    /// Shape of the instructions `[start, end)` in `text` (sBPF, 8-byte slots).
+    pub fn of(text: &[u8], start: usize, end: usize) -> Shape {
+        const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const FNV_PRIME: u64 = 0x0100_0000_01b3;
+        let mut full = FNV_OFFSET;
+        let mut opcodes = FNV_OFFSET;
+        let mix = |h: &mut u64, bytes: &[u8]| {
+            for &b in bytes {
+                *h ^= b as u64;
+                *h = h.wrapping_mul(FNV_PRIME);
+            }
+        };
+        let end = end.min(text.len() / ebpf::INSN_SIZE);
+        let mut histogram = [0u16; 256];
+        let mut pc = start;
+        while pc < end {
+            let insn = ebpf::get_insn_unchecked(text, pc);
+            histogram[insn.opc as usize] = histogram[insn.opc as usize].saturating_add(1);
+            let is_lddw = insn.opc == ebpf::LD_DW_IMM;
+            let is_jump = insn.opc & 0x07 == 0x05 || insn.opc & 0x07 == 0x06;
+            let is_call = insn.opc == ebpf::CALL_IMM || insn.opc == ebpf::CALL_REG;
+            mix(&mut opcodes, &[insn.opc]);
+            mix(&mut full, &[insn.opc, insn.dst, insn.src]);
+            if !is_jump {
+                mix(&mut full, &insn.off.to_le_bytes());
+            }
+            if !is_lddw && !is_call {
+                mix(&mut full, &(insn.imm as i32).to_le_bytes());
+            }
+            pc += if is_lddw { 2 } else { 1 };
+        }
+        Shape {
+            full,
+            opcodes,
+            len: end.saturating_sub(start),
+            histogram,
+        }
+    }
+}
+
+impl Default for Shape {
+    fn default() -> Self {
+        Shape {
+            full: 0,
+            opcodes: 0,
+            len: 0,
+            histogram: [0; 256],
+        }
+    }
+}
+
+/// What [`Profile::symbolize_from_build`] managed to name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct SymbolizeReport {
+    /// Functions named by an exact code-shape match.
+    pub exact: usize,
+    /// Functions named by an opcode-only shape match (unique on both sides).
+    pub by_opcodes: usize,
+    /// Functions named as the unique near-miss: same length within 10% and
+    /// an opcode histogram at least 90% similar, with no runner-up close by.
+    pub by_similarity: usize,
+    /// Functions in the profiled frames left unnamed.
+    pub unmatched: usize,
+    /// True when the build turned out to be the very same one (mapped by address).
+    pub same_build: bool,
 }
 
 /// One program frame (a top-level instruction or a CPI) of the transaction.
@@ -201,6 +310,146 @@ impl Profile {
         Ok(renamed)
     }
 
+    /// Name a program's functions from *another build of the same source*:
+    /// `debug` is that build's `.debug` file (symbols and function sizes),
+    /// `so` is the `.so` from the same build (the code those symbols describe).
+    /// Functions are matched by code shape, so a plain release deployment can
+    /// be named from a `--debug` build, and a verified build rebuilt with
+    /// symbols can name what is on chain. When the two turn out to be the same
+    /// build, names map by address instead.
+    pub fn symbolize_from_build(
+        &mut self,
+        program: &str,
+        so: &[u8],
+        debug: &[u8],
+    ) -> crate::Result<SymbolizeReport> {
+        let (text, symbols) = elf_parse(so)
+            .and_then(|(text, _)| elf_parse(debug).map(|(_, syms)| (text, syms)))
+            .ok_or_else(|| {
+                crate::Error::InvalidSpec(
+                    "expected an ELF .so and a .debug with a symbol table".into(),
+                )
+            })?;
+        // Same build? Then the entrypoint sits at the same pc with the same shape.
+        let same_build = self
+            .frames
+            .iter()
+            .filter(|f| f.program == program)
+            .flat_map(|f| f.functions.iter())
+            .find(|f| f.name == "entrypoint")
+            .and_then(|entry| {
+                let (name, size) = symbols.get(&entry.pc)?;
+                Some(
+                    name == "entrypoint"
+                        && Shape::of(&text, entry.pc, entry.pc + size) == entry.shape,
+                )
+            })
+            .unwrap_or(false);
+        if same_build {
+            let renamed = self.symbolize(program, debug)?;
+            return Ok(SymbolizeReport {
+                exact: renamed,
+                by_opcodes: 0,
+                by_similarity: 0,
+                unmatched: 0,
+                same_build: true,
+            });
+        }
+        // Shapes of the build's symbols; drop shapes shared by several symbols
+        // (identical bodies) as ambiguous.
+        let mut by_full: std::collections::HashMap<u64, Option<String>> =
+            std::collections::HashMap::new();
+        let mut by_ops: std::collections::HashMap<(u64, usize), Option<String>> =
+            std::collections::HashMap::new();
+        let mut candidates: Vec<(Shape, String)> = Vec::new();
+        for (&pc, (name, size)) in &symbols {
+            if *size == 0 {
+                continue;
+            }
+            let sh = Shape::of(&text, pc, pc + size);
+            let pretty = strip_hash(&rustc_demangle::demangle(name).to_string());
+            by_full
+                .entry(sh.full)
+                .and_modify(|v| *v = None)
+                .or_insert(Some(pretty.clone()));
+            by_ops
+                .entry((sh.opcodes, sh.len))
+                .and_modify(|v| *v = None)
+                .or_insert(Some(pretty.clone()));
+            candidates.push((sh, pretty));
+        }
+        // Near-miss tier: for a function nothing matched exactly, the unique
+        // symbol of about the same length whose opcode histogram is ≥ 90%
+        // similar — and clearly better than the next candidate.
+        let near_miss = |shape: &Shape| -> Option<String> {
+            let (mut best, mut second): (Option<(f64, &String)>, f64) = (None, 0.0);
+            for (sh, name) in &candidates {
+                let len_ok =
+                    (sh.len as f64 - shape.len as f64).abs() <= (shape.len as f64 * 0.10).max(2.0);
+                if !len_ok {
+                    continue;
+                }
+                let sim = shape.similarity(sh);
+                match best {
+                    Some((b, _)) if sim <= b => second = second.max(sim),
+                    Some((b, _)) => {
+                        second = b;
+                        best = Some((sim, name));
+                    }
+                    None => best = Some((sim, name)),
+                }
+            }
+            match best {
+                Some((sim, name)) if sim >= 0.90 && sim - second >= 0.05 => Some(name.clone()),
+                _ => None,
+            }
+        };
+        let mut report = SymbolizeReport::default();
+        for frame in self.frames.iter_mut().filter(|f| f.program == program) {
+            let mut rename: BTreeMap<String, String> = BTreeMap::new();
+            for f in &mut frame.functions {
+                if !f.name.starts_with("function_") && f.name != "entrypoint" {
+                    continue;
+                }
+                let hit = match by_full.get(&f.shape.full) {
+                    Some(Some(n)) => {
+                        report.exact += 1;
+                        Some(n.clone())
+                    }
+                    _ => match by_ops.get(&(f.shape.opcodes, f.shape.len)) {
+                        Some(Some(n)) => {
+                            report.by_opcodes += 1;
+                            Some(n.clone())
+                        }
+                        _ => match near_miss(&f.shape) {
+                            Some(n) => {
+                                report.by_similarity += 1;
+                                Some(n)
+                            }
+                            None => None,
+                        },
+                    },
+                };
+                match hit {
+                    Some(n) if n != f.name => {
+                        rename.insert(f.name.clone(), n.clone());
+                        f.name = n;
+                    }
+                    Some(_) => {}
+                    None => report.unmatched += 1,
+                }
+            }
+            for (stack, _) in &mut frame.stacks {
+                *stack = stack
+                    .split(';')
+                    .map(|s| rename.get(s).cloned().unwrap_or_else(|| s.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(";");
+            }
+        }
+        Ok(report)
+    }
+
     /// Total BPF instructions across every frame.
     pub fn instructions(&self) -> u64 {
         self.frames.iter().map(|f| f.instructions).sum()
@@ -223,6 +472,14 @@ impl Profile {
 /// `FUNC` symbols of an ELF64 (its `.symtab`, falling back to `.dynsym`),
 /// keyed by sBPF program counter: `(st_value - .text address) / 8`.
 fn elf_function_symbols(elf: &[u8]) -> Option<BTreeMap<usize, String>> {
+    elf_parse(elf).map(|(_, syms)| syms.into_iter().map(|(pc, (name, _))| (pc, name)).collect())
+}
+
+/// `pc → (symbol name, instruction count)` for an ELF's `FUNC` symbols.
+type FunctionSymbols = BTreeMap<usize, (String, usize)>;
+
+/// The `.text` bytes of an ELF64 and its `FUNC` symbols.
+fn elf_parse(elf: &[u8]) -> Option<(Vec<u8>, FunctionSymbols)> {
     if elf.get(0..4)? != b"\x7fELF" {
         return None;
     }
@@ -255,14 +512,19 @@ fn elf_function_symbols(elf: &[u8]) -> Option<BTreeMap<usize, String>> {
         Some(String::from_utf8_lossy(&elf[start..end]).to_string())
     };
     let (_, _, _, shstr_off, _, _, _) = section(shstrndx)?;
-    let mut text_addr = None;
+    let mut text = None;
     for i in 0..shnum {
-        let (name, _, addr, _, _, _, _) = section(i)?;
+        let (name, _, addr, off, size, _, _) = section(i)?;
         if cstr(shstr_off, name as usize)? == ".text" {
-            text_addr = Some(addr);
+            text = Some((
+                addr,
+                elf.get(off..off + size)
+                    .map(|b| b.to_vec())
+                    .unwrap_or_default(),
+            ));
         }
     }
-    let text_addr = text_addr?;
+    let (text_addr, text_bytes) = text?;
     const SHT_SYMTAB: u32 = 2;
     const SHT_DYNSYM: u32 = 11;
     const STT_FUNC: u8 = 2;
@@ -279,18 +541,20 @@ fn elf_function_symbols(elf: &[u8]) -> Option<BTreeMap<usize, String>> {
                 let st_name = u32_at(e)? as usize;
                 let st_info = *elf.get(e + 4)?;
                 let st_value = u64_at(e + 8)?;
+                let st_size = u64_at(e + 16)? as usize;
                 if st_info & 0xf != STT_FUNC || st_name == 0 || st_value < text_addr {
                     continue;
                 }
                 let pc = ((st_value - text_addr) / 8) as usize;
-                out.entry(pc).or_insert(cstr(str_off, st_name)?);
+                out.entry(pc)
+                    .or_insert((cstr(str_off, st_name)?, st_size / 8));
             }
         }
         if !out.is_empty() {
             break;
         }
     }
-    Some(out)
+    Some((text_bytes, out))
 }
 
 /// `foo::bar::h9a99872dbe52d553` → `foo::bar`.
@@ -482,6 +746,14 @@ fn profile_frame(program: String, exe: &Executable, trace: &RegisterTrace) -> Op
         }
     }
 
+    let n_insns = text.len() / ebpf::INSN_SIZE;
+    let end_of = |start: usize| -> usize {
+        functions
+            .range(start + 1..)
+            .next()
+            .map(|(s, _)| *s)
+            .unwrap_or(n_insns)
+    };
     let mut fns: Vec<FunctionProfile> = self_insns
         .iter()
         .map(|(&pc, &s)| FunctionProfile {
@@ -491,6 +763,7 @@ fn profile_frame(program: String, exe: &Executable, trace: &RegisterTrace) -> Op
             total_insns: *total_insns.get(&pc).unwrap_or(&s),
             calls: *calls.get(&pc).unwrap_or(&0),
             compute_units: None,
+            shape: Shape::of(text, pc, end_of(pc)),
         })
         .collect();
     fns.sort_by_key(|f| std::cmp::Reverse(f.self_insns));
@@ -619,6 +892,7 @@ mod tests {
                     total_insns: n,
                     calls: 1,
                     compute_units: None,
+                    shape: Shape::default(),
                 })
                 .collect(),
             syscalls: vec![],
@@ -654,6 +928,36 @@ mod tests {
         assert_eq!(q.frames[0].functions[1].name, "function_3");
         assert_eq!(strip_hash("a::b::h0123456789abcdef"), "a::b");
         assert_eq!(strip_hash("a::b::hxyz"), "a::b::hxyz");
+    }
+
+    /// One sBPF instruction: opc, dst/src nibbles, off, imm.
+    fn insn(opc: u8, dst: u8, src: u8, off: i16, imm: i32) -> [u8; 8] {
+        let mut b = [0u8; 8];
+        b[0] = opc;
+        b[1] = (src << 4) | dst;
+        b[2..4].copy_from_slice(&off.to_le_bytes());
+        b[4..8].copy_from_slice(&imm.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn shape_ignores_what_moves_between_builds_and_keeps_what_does_not() {
+        // add64 r1 += 5 ; jeq r1, 0, +off ; call +target ; exit
+        let body = |off: i16, target: i32, imm: i32| -> Vec<u8> {
+            let mut t = Vec::new();
+            t.extend_from_slice(&insn(0x07, 1, 0, 0, imm));
+            t.extend_from_slice(&insn(0x15, 1, 0, off, 0));
+            t.extend_from_slice(&insn(ebpf::CALL_IMM, 0, 1, 0, target));
+            t.extend_from_slice(&insn(ebpf::EXIT, 0, 0, 0, 0));
+            t
+        };
+        let a = Shape::of(&body(3, 100, 5), 0, 4);
+        let b = Shape::of(&body(-7, 2_000, 5), 0, 4); // different jump offset and call target
+        let c = Shape::of(&body(3, 100, 6), 0, 4); // different constant
+        assert_eq!(a, b, "offsets and call targets are normalised away");
+        assert_ne!(a.full, c.full, "a real constant is part of the shape");
+        assert_eq!(a.opcodes, c.opcodes, "opcode-only shape still agrees");
+        assert_eq!(a.len, 4);
     }
 
     #[test]

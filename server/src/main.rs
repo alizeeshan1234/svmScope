@@ -580,8 +580,12 @@ struct ProfileRequest {
 #[derive(Deserialize)]
 struct SymbolInput {
     program: String,
-    /// base64 of the ELF that carries the symbol table.
+    /// base64 of the `.debug` file (symbol table) of a build of the program.
     elf_b64: String,
+    /// base64 of that build's `.so`. With it, functions are matched to the
+    /// on-chain code by shape, so the build need not be the deployed one.
+    #[serde(default)]
+    so_b64: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -612,7 +616,7 @@ fn run_profile(
     mutations: Vec<Mutation>,
     tt: TimeTravel,
     features: Vec<svmscope::FeatureToggle>,
-    symbols: Vec<(String, Vec<u8>)>,
+    symbols: Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
 ) -> Result<ProfileResponse, svmscope::Error> {
     let scope = Scope::new(url);
     let mut replay = scope.replay_at_slot(&signature)?;
@@ -620,8 +624,14 @@ fn run_profile(
     replay.set_features(features);
     let (result, mut profile) = replay.profile(&mutations)?;
     let mut symbolized = Vec::new();
-    for (program, elf) in symbols {
-        let n = profile.symbolize(&program, &elf)?;
+    for (program, debug, so) in symbols {
+        let n = match so {
+            Some(so) => {
+                let r = profile.symbolize_from_build(&program, &so, &debug)?;
+                r.exact + r.by_opcodes + r.by_similarity
+            }
+            None => profile.symbolize(&program, &debug)?,
+        };
         symbolized.push((program, n));
     }
     trim_profile(&mut profile);
@@ -648,21 +658,32 @@ async fn profile_handler(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let mut symbols = Vec::new();
     for s in req.symbols {
-        let elf = base64::engine::general_purpose::STANDARD
-            .decode(s.elf_b64.as_bytes())
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("symbols for {}: {e}", s.program),
-                )
-            })?;
-        if elf.len() > MAX_SYMBOL_BYTES {
-            return Err((
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "symbol file too large".into(),
-            ));
-        }
-        symbols.push((s.program, elf));
+        let decode = |b64: &str| {
+            base64::engine::general_purpose::STANDARD
+                .decode(b64.as_bytes())
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("symbols for {}: {e}", s.program),
+                    )
+                })
+                .and_then(|bytes| {
+                    if bytes.len() > MAX_SYMBOL_BYTES {
+                        Err((
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "symbol file too large".into(),
+                        ))
+                    } else {
+                        Ok(bytes)
+                    }
+                })
+        };
+        let debug = decode(&s.elf_b64)?;
+        let so = match &s.so_b64 {
+            Some(b) => Some(decode(b)?),
+            None => None,
+        };
+        symbols.push((s.program, debug, so));
     }
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();

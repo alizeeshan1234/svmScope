@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(feature = "profiler")]
     if signature == "profile" {
         let sig = args.get(2).ok_or(
-            "usage: svmscope profile <signature> [--now] [--json] [--symbols <program>=<path.debug>]...",
+            "usage: svmscope profile <signature> [--now] [--json] [--symbols <program>=<path.debug>[,<path.so>]]...",
         )?;
         let replay = if args.iter().any(|a| a == "--now") {
             scope.replay(sig)?
@@ -72,12 +72,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         while i < args.len() {
             if args[i] == "--symbols" {
                 let spec = args.get(i + 1).ok_or("--symbols needs <program>=<path>")?;
-                let (program, path) = spec
+                let (program, paths) = spec
                     .split_once('=')
-                    .ok_or("--symbols needs <program>=<path>")?;
-                let elf = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-                let n = profile.symbolize(program, &elf)?;
-                eprintln!("symbolized {n} functions of {program} from {path}");
+                    .ok_or("--symbols needs <program>=<path.debug>[,<path.so>]")?;
+                let (debug_path, so_path) = match paths.split_once(',') {
+                    Some((d, so)) => (d, Some(so)),
+                    None => (paths, None),
+                };
+                let debug = std::fs::read(debug_path).map_err(|e| format!("{debug_path}: {e}"))?;
+                match so_path {
+                    // A .debug alone: the same build as what ran — names map by address.
+                    None => {
+                        let n = profile.symbolize(program, &debug)?;
+                        eprintln!("symbolized {n} functions of {program} from {debug_path}");
+                    }
+                    // .debug plus its .so: another build of the same source — names map by code shape.
+                    Some(so_path) => {
+                        let so = std::fs::read(so_path).map_err(|e| format!("{so_path}: {e}"))?;
+                        let r = profile.symbolize_from_build(program, &so, &debug)?;
+                        eprintln!(
+                            "symbolized {program} from {so_path} + {debug_path}: {} exact, {} by opcode shape, {} by similarity, {} unmatched{}",
+                            r.exact,
+                            r.by_opcodes,
+                            r.by_similarity,
+                            r.unmatched,
+                            if r.same_build { " (same build, mapped by address)" } else { "" }
+                        );
+                    }
+                }
                 i += 2;
             } else {
                 i += 1;

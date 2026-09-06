@@ -4678,7 +4678,7 @@ window.addEventListener('popstate', e => {
   else if (!$('profile').classList.contains('hidden')) showProfLanding();
 });
 // ---------------- compute profiler ----------------
-let prof = null, profFrame = 0, profZoom = [], profSymbols = {};   // program → base64 .debug
+let prof = null, profFrame = 0, profZoom = [], profSymbols = {};   // program → { elf_b64: .debug, so_b64?: .so of the same build }
 let profSigCur = '', profContainer = 'dbgProfile';                  // which signature, and which panel draws it
 function profReset() { prof = null; profFrame = 0; profZoom = []; profSymbols = {}; $('dbgProfile').innerHTML = '<div class="prof-note">Traces every BPF instruction the transaction executes, per program and per function, and draws where the compute units went. Takes a few seconds.</div>'; }
 $('profGo').addEventListener('click', () => { profSigCur = dbgSigCur; profContainer = 'dbgProfile'; runProfile(); });
@@ -4687,7 +4687,7 @@ async function runProfile() {
   $('profGo').disabled = true;
   $(profContainer).innerHTML = '<div class="dbg-progress"><span class="spinner"></span><span>tracing every instruction…</span></div>';
   try {
-    const symbols = Object.entries(profSymbols).map(([program, elf_b64]) => ({ program, elf_b64 }));
+    const symbols = Object.entries(profSymbols).map(([program, f]) => ({ program, elf_b64: f.elf_b64, so_b64: f.so_b64 || null }));
     const body = { signature: profSigCur, mutations: [], time_travel: timeTravel, features: activeFeatures, symbols, ...clusterParams() };
     const res = await api('/profile', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     if (!res.ok) throw new Error(await res.text());
@@ -4743,17 +4743,24 @@ function renderProfile() {
     + (sysRows.length ? sysRows.map(([n, c, cu]) => `<tr><td class="fn">${esc(n)}</td><td class="n">${fmt(c)}</td><td class="n">${fmt(cu)}</td></tr>`).join('') : '<tr><td class="fn anon" colspan="3">none</td></tr>') + '</tbody></table>'
     + (f.syscall_overhead != null && sysRows.length ? `<div class="prof-note">Fixed charges explain at least <b>${fmt(sysFloor)}</b> of the <b>${fmt(f.syscall_overhead)}</b> CU beyond instructions; the rest scales with bytes copied, hashed, or passed to CPIs.</div>` : '');
   html += `<div class="prof-sym">${anon ? `<b>${anon}</b> of ${f.functions.length} functions are unnamed: this program is stripped (every mainnet program is). ` : 'All functions named. '}`
-    + `Built it yourself? Add the <code>.debug</code> file <code>cargo build-sbf --debug</code> writes next to the .so, and every function gets its Rust name.<br>`
-    + `<input type="file" id="profSymFile" accept=".debug,.so,application/octet-stream" /> <span id="profSymStatus"></span></div>`;
+    + `Have a build of it? Add the <code>.debug</code> file <code>cargo build-sbf --debug</code> writes, and functions get their Rust names. If that build is not the one on chain, add its <code>.so</code> too and functions are matched by code shape.<br>`
+    + `<label>.debug <input type="file" id="profSymFile" accept=".debug,application/octet-stream" /></label> `
+    + `<label>.so (optional) <input type="file" id="profSoFile" accept=".so,application/octet-stream" /></label> <span id="profSymStatus"></span></div>`;
   html += '<div class="prof-note">Counts are executed BPF instructions (one CU each); per-function CU splits the frame\'s charged compute in proportion. The flamegraph is exact in shape; click a box to zoom, click the crumb to zoom out.</div>';
   html += '</div></div>';
   $(profContainer).innerHTML = html;
   $(profContainer).querySelectorAll('.prof-frames button').forEach(b => b.addEventListener('click', () => { profFrame = +b.dataset.i; profZoom = []; renderProfile(); }));
+  const readB64 = async (file) => { const buf = new Uint8Array(await file.arrayBuffer()); let bin = ''; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000)); return btoa(bin); };
   $('profSymFile').addEventListener('change', async (ev) => {
     const file = ev.target.files[0]; if (!file) return;
-    const buf = new Uint8Array(await file.arrayBuffer());
-    let bin = ''; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
-    profSymbols[f.program] = btoa(bin);
+    profSymbols[f.program] = { ...(profSymbols[f.program] || {}), elf_b64: await readB64(file) };
+    $('profSymStatus').textContent = `${file.name} attached to ${short(f.program)} · re-profiling…`;
+    await runProfile();
+  });
+  $('profSoFile').addEventListener('change', async (ev) => {
+    const file = ev.target.files[0]; if (!file) return;
+    profSymbols[f.program] = { ...(profSymbols[f.program] || {}), so_b64: await readB64(file) };
+    if (!profSymbols[f.program].elf_b64) { $('profSymStatus').textContent = `${file.name} attached; now add the .debug from the same build.`; return; }
     $('profSymStatus').textContent = `${file.name} attached to ${short(f.program)} · re-profiling…`;
     await runProfile();
   });
