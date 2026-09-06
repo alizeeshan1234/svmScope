@@ -7,7 +7,9 @@
 //! ELF of the same build (`cargo build-sbf --debug` writes it next to the .so).
 #[cfg(not(feature = "profiler"))]
 fn main() {
-    eprintln!("build with the `profiler` feature (on by default): cargo run --example profile_demo");
+    eprintln!(
+        "build with the `profiler` feature (on by default): cargo run --example profile_demo"
+    );
 }
 
 #[cfg(feature = "profiler")]
