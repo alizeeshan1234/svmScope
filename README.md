@@ -291,6 +291,8 @@ assert!(outcomes.iter().all(|outcome| outcome.pass));
 
 **3. Regression-test it in CI, offline.** `scope.capture(sig)` freezes everything — transaction, accounts, program binaries, IDLs, and the actual on-chain outcome — into one portable JSON fixture. `Replay::from_fixture` rebuilds the world with **zero RPC**: deterministic suites in CI with no key, no drift, no flakes, and `Check::matches_onchain()` as the "does it still behave like mainnet" primitive.
 
+**4. Profile the compute.** `replay.profile(&[])` traces every BPF instruction the transaction executes — every program frame, every CPI — and attributes them to functions, syscalls and call stacks: a flamegraph of where the compute units went. Nothing else on Solana shows this. Mainnet programs are stripped, so their functions read as `function_<pc>` with exact boundaries and shape; pass the `.debug` file `cargo build-sbf --debug` writes next to your own `.so` and every function gets its Rust name.
+
 Errors are typed and self-explanatory: a typo'd mutation address is a hard `Error::MutationTargetMissing`, never a fake "revert" your test happily accepts; an unknown field name errors *listing the available fields*.
 
 Run the [examples](./examples) against any transaction:
@@ -318,6 +320,9 @@ cargo run -- freeze <SIGNATURE> -o fixture.json   # capture a fixture
 cargo run -- test suite.json                      # run a scenario suite (CI-ready)
 cargo run -- report suite.json -o report.html     # shareable HTML report
 cargo run -- upgrade fixture.json                 # re-capture an old fixture as v2
+cargo run -- debug <SIGNATURE>                    # step debugger: every instruction and CPI, state diffs, failing step
+cargo run -- profile <SIGNATURE>                  # compute profiler: instructions per function, per frame, per syscall
+cargo run -- profile <SIGNATURE> --symbols <PROGRAM>=target/deploy/my_program.debug   # …with Rust function names
 ```
 
 Every command takes `--cluster <mainnet|devnet|testnet|localnet>` or `--rpc <url>`.
@@ -337,6 +342,37 @@ REPLAY: failed ❌  error: InstructionError(4, Custom(6024))
 ```
 
 That's the *real* Jupiter program executing locally. Swaps often fail on replay with a slippage error — not a bug, but the honest consequence of **state drift**: replays run against current reconstructed state, and pool prices have moved since the original slot. That's exactly why fixtures exist: freeze once, and the replay is pinned forever.
+
+## Profile the compute
+
+Every Solana developer has stared at `consumed 187,342 of 200,000 compute units` with no idea which function ate it. The profiler answers that for any transaction, mainnet or local:
+
+```text
+$ cargo run -- profile <SIGNATURE>
+
+replay: ok ✅ · 58,501 CU charged · 34,556 BPF instructions across 9 program frames
+
+-- compute per program --
+     37487  pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA
+     12968  ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL
+      5660  pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ
+       ...
+
+== frame 9 · pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA · 22051 instructions · 37487 CU · 15436 CU beyond instructions ==
+        self     total  calls      ~CU  function
+        4492      5525      1     7636  function_105164
+        2612      2612      2     4440  function_7339
+        1319      1319     60     2242  function_93342
+   syscalls:
+          86  sol_memcmp_
+          75  sol_memcpy_
+```
+
+How it works: LiteSVM records every BPF instruction each program frame executes; the profiler folds that trace into call stacks (function boundaries come from the program's own call graph, so they are exact), counts syscalls by name, and attaches the runtime's measured compute per frame — exclusive of the CPIs it made — from the `consumed` log lines. The folded stacks are flamegraph input; the hosted debugger draws them.
+
+Names: every mainnet program is stripped, so functions read as `function_<pc>`. For your own program, build with `cargo build-sbf --debug`, deploy that `.so`, keep the `.debug` beside it, and pass `--symbols <program>=<path>.debug` (or upload it in the debugger UI): every function gets its Rust name. A plain release build has different code from a `--debug` build, so the `.debug` must come from the same build as the deployed `.so`; the profiler checks the entrypoint and refuses a mismatch.
+
+Library: `let (result, mut profile) = replay.profile(&[])?; profile.symbolize(program, &std::fs::read("my.debug")?)?;` — `Profile` is `frames: Vec<FrameProfile>` with `functions`, `syscalls`, `stacks` (folded, `a;b;c → count`) and `compute_units` per frame. The `profiler` feature is on by default; `default-features = false` drops it.
 
 ## Scenario suites (JSON)
 

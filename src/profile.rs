@@ -174,11 +174,13 @@ impl Profile {
         self.frames.iter().map(|f| f.instructions).sum()
     }
 
-    /// Instructions per program, summed across that program's frames.
+    /// Compute per program, summed across that program's frames: the measured
+    /// (CPI-exclusive) compute units where the logs reported them, else the
+    /// frame's instruction count.
     pub fn by_program(&self) -> Vec<(String, u64)> {
         let mut m: BTreeMap<String, u64> = BTreeMap::new();
         for f in &self.frames {
-            *m.entry(f.program.clone()).or_default() += f.instructions;
+            *m.entry(f.program.clone()).or_default() += f.compute_units.unwrap_or(f.instructions);
         }
         let mut v: Vec<_> = m.into_iter().collect();
         v.sort_by_key(|(_, n)| std::cmp::Reverse(*n));

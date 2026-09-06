@@ -53,6 +53,49 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    // Profiler: `svmscope profile <signature> [--now] [--json]
+    // [--symbols <program>=<path/to/program.debug>]...` traces every BPF
+    // instruction the transaction executes and attributes it to functions,
+    // syscalls and call stacks, per program frame.
+    #[cfg(feature = "profiler")]
+    if signature == "profile" {
+        let sig = args.get(2).ok_or(
+            "usage: svmscope profile <signature> [--now] [--json] [--symbols <program>=<path.debug>]...",
+        )?;
+        let replay = if args.iter().any(|a| a == "--now") {
+            scope.replay(sig)?
+        } else {
+            scope.replay_at_slot(sig)?
+        };
+        let (result, mut profile) = replay.profile(&[])?;
+        let mut i = 3;
+        while i < args.len() {
+            if args[i] == "--symbols" {
+                let spec = args.get(i + 1).ok_or("--symbols needs <program>=<path>")?;
+                let (program, path) = spec
+                    .split_once('=')
+                    .ok_or("--symbols needs <program>=<path>")?;
+                let elf = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+                let n = profile.symbolize(program, &elf)?;
+                eprintln!("symbolized {n} functions of {program} from {path}");
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        if args.iter().any(|a| a == "--json") {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({ "result": result, "profile": profile })
+                )?
+            );
+        } else {
+            print_profile(&result, &profile);
+        }
+        return Ok(());
+    }
+
     // Test-runner mode: `svmscope test <scenarios.json>` runs a scenario suite
     // and exits non-zero if any assertion fails — drop it straight into CI.
     if signature == "test" {
@@ -308,6 +351,78 @@ fn run_tests(scope: &Scope, path: &str) -> Result<(), Box<dyn Error>> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Display a compute profile: per program, then per frame with its top
+/// functions and syscalls.
+#[cfg(feature = "profiler")]
+fn print_profile(result: &ReplayResult, profile: &svmscope::profile::Profile) {
+    println!(
+        "replay: {} · {} CU charged · {} BPF instructions across {} program frames",
+        if result.success {
+            "ok ✅"
+        } else {
+            "failed ❌"
+        },
+        result.compute_units,
+        profile.instructions(),
+        profile.frames.len()
+    );
+    println!("\n-- compute per program --");
+    for (program, n) in profile.by_program() {
+        println!("{n:>10}  {program}");
+    }
+    for (i, f) in profile.frames.iter().enumerate() {
+        let cu = f
+            .compute_units
+            .map(|c| format!("{c} CU"))
+            .unwrap_or_else(|| "CU unknown".into());
+        let overhead = f
+            .syscall_overhead
+            .map(|c| format!(" · {c} CU beyond instructions"))
+            .unwrap_or_default();
+        println!(
+            "\n== frame {} · {} · {} instructions · {cu}{overhead} ==",
+            i + 1,
+            f.program,
+            f.instructions
+        );
+        println!(
+            "   {:>9} {:>9} {:>6} {:>8}  function",
+            "self", "total", "calls", "~CU"
+        );
+        for func in f.functions.iter().take(12) {
+            println!(
+                "   {:>9} {:>9} {:>6} {:>8}  {}",
+                func.self_insns,
+                func.total_insns,
+                func.calls,
+                func.compute_units
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                func.name
+            );
+        }
+        if !f.syscalls.is_empty() {
+            println!("   syscalls:");
+            for (name, n) in f.syscalls.iter().take(10) {
+                println!("   {n:>9}  {name}");
+            }
+        }
+    }
+    let anon = profile
+        .frames
+        .iter()
+        .flat_map(|f| f.functions.iter())
+        .filter(|f| f.name.starts_with("function_"))
+        .count();
+    if anon > 0 {
+        println!(
+            "\n{anon} functions are unnamed: those programs are stripped (every mainnet program is). \
+             Built one yourself? Pass --symbols <program>=<path/to/program.debug> (the file \
+             `cargo build-sbf --debug` writes next to the .so) and every function gets its Rust name."
+        );
+    }
 }
 
 /// Display a replay result (the CLI's job — the module returns data, `main` prints it).

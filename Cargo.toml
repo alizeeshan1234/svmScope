@@ -1,6 +1,6 @@
 [package]
 name = "svmscope"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 # Verified: the full test suite and all targets compile on 1.91, and the
 # dependency tree requires nothing newer.
@@ -72,7 +72,9 @@ name = "profile_demo"
 required-features = ["profiler"]
 
 [features]
-default = []
+# The profiler is on by default so `cargo install svmscope` profiles out of the
+# box; `default-features = false` drops it and LiteSVM's register tracing.
+default = ["profiler"]
 # Compute profiler: traces every BPF instruction a transaction executes and
 # attributes it to functions and syscalls. Turns on LiteSVM register tracing.
 profiler = ["litesvm/register-tracing", "dep:solana-program-runtime", "dep:solana-transaction-context", "dep:rustc-demangle"]

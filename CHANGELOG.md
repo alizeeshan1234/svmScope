@@ -4,6 +4,33 @@ All notable changes to svmscope are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-09-06
+
+### Added
+
+- **Compute profiler.** `Replay::profile(&mutations)` traces every BPF
+  instruction a transaction executes — every program frame, every CPI — and
+  attributes them to functions (boundaries from the program's own call graph),
+  syscalls by name, and folded call stacks (flamegraph input), with the
+  runtime's measured compute per frame exclusive of the CPIs it made.
+  `Profile::symbolize(program, elf)` names functions from the unstripped
+  `.debug` file `cargo build-sbf --debug` writes, with an entrypoint check that
+  refuses a mismatched build. CLI: `svmscope profile <signature> [--now]
+  [--json] [--symbols <program>=<path.debug>]...`. Behind the `profiler`
+  cargo feature, **on by default**; `default-features = false` drops it and
+  LiteSVM's register tracing.
+- Server: `POST /profile` (mutations, time travel, feature toggles, optional
+  per-program symbol uploads) and cacheable `GET /profile/{signature}`.
+- Hosted debugger: a "Where the compute went" card — per-program bars, one
+  tab per frame, an inline zoomable flamegraph, top functions, syscalls, and
+  a `.debug` upload that re-profiles with names.
+
+### Changed
+
+- The `profiler` feature pulls in `solana-program-runtime`,
+  `solana-transaction-context` and `rustc-demangle`, and enables LiteSVM's
+  `register-tracing`. Nothing changes at runtime unless `profile` is called.
+
 ## [0.4.1] — 2026-09-05
 
 ### Fixed
