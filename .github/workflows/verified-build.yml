@@ -98,7 +98,10 @@ jobs:
         run: |
           lib="${{ steps.rec.outputs.library_name }}"; mp="${{ steps.rec.outputs.mount_path }}"; extra="${{ steps.rec.outputs.cargo_args }}"; sbf="${{ steps.rec.outputs.sbf_args }}"
           run() { docker run --rm -v "$PWD/src:/build" -w "/build/$mp" "${{ steps.img.outputs.image }}" sh -c "$1"; }
-          run "cargo build-sbf $sbf -- --locked --frozen $extra || cargo build-sbf $sbf -- $extra"
+          crate=$(echo "$lib" | tr '_' '-')
+          # Whole workspace first (what solana-verify does); if a non-program
+          # member breaks the BPF build, build just the library crate.
+          run "cargo build-sbf $sbf -- --locked --frozen $extra || cargo build-sbf $sbf -- $extra || cargo build-sbf $sbf -- -p $crate $extra || cargo build-sbf $sbf -- -p $lib $extra"
           mkdir -p out/release && cp src/target/deploy/*.so out/release/ && ls -la out/release
           # cargo-build-sbf strips the linker output into target/deploy; the
           # unstripped original keeps the full symbol table for identical code.
