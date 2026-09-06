@@ -37,7 +37,10 @@ jobs:
           program = sys.argv[1]
           VERIFY = Pubkey.from_string("verifycLy8mB96wd9wqq3WDXQwM4oU6r42Th37Db9fC")
           st = requests.get(f"https://verify.osec.io/status-all/{program}", timeout=30).json()
-          signers = [s["signer"] for s in st if s.get("is_verified")] if isinstance(st, list) else []
+          # Verified signers first; then any signer with a record (a program
+          # redeployed since its last verification still has the right recipe
+          # if the hash check below passes).
+          signers = ([s["signer"] for s in st if s.get("is_verified")] + [s["signer"] for s in st if not s.get("is_verified")]) if isinstance(st, list) else []
           rpc = "https://api.mainnet-beta.solana.com"
           rec = None
           for signer in signers:
