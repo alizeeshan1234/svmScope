@@ -3205,8 +3205,7 @@ mod single_run_parity_tests {
                 .steps
                 .iter()
                 .flat_map(|st| st.diffs.iter())
-                .filter(|d| d.address == pd.address)
-                .next_back();
+                .rfind(|d| d.address == pd.address);
             if let Some(td) = last {
                 assert_eq!(
                     td.lamports_after, pd.lamports_after,
