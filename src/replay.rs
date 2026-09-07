@@ -2428,6 +2428,71 @@ impl ReplayContext {
     /// each. ComputeBudget instructions are kept in every prefix because the
     /// runtime derives the transaction's limits from the whole message.
     pub(crate) fn trace_raw(&self, mutations: &[Mutation]) -> Result<Vec<RawStepRun>> {
+        #[cfg(feature = "single-run-trace")]
+        {
+            return self.trace_raw_single_run(mutations);
+        }
+        #[allow(unreachable_code)]
+        self.trace_raw_prefixes(mutations)
+    }
+
+    /// One execution of the whole transaction. LiteSVM's `after_instruction`
+    /// hook hands over the transaction context after each top-level
+    /// instruction, so every step's post-state comes from the same run the
+    /// chain would have done: the Instructions sysvar is complete, a failure
+    /// is the real one, and no step's changes are folded into another's.
+    #[cfg(feature = "single-run-trace")]
+    fn trace_raw_single_run(&self, mutations: &[Mutation]) -> Result<Vec<RawStepRun>> {
+        use std::sync::{Arc, Mutex};
+        let mut svm = self.fresh_svm();
+        let resolved: Vec<Mutation> = mutations
+            .iter()
+            .map(|m| self.resolve_mutation(m))
+            .collect::<Result<_>>()?;
+        for m in &resolved {
+            apply_mutation(&mut svm, m)?;
+        }
+        let tx = self.tx_with_mutations(&resolved)?;
+        let n = tx.message.instructions().len();
+        let snaps: Arc<Mutex<Vec<InstructionSnapshot>>> = Arc::new(Mutex::new(Vec::new()));
+        svm.set_invocation_inspect_callback(StateCollector {
+            snaps: Arc::clone(&snaps),
+        });
+        let result = svm.simulate_transaction(tx);
+        let snaps = std::mem::take(&mut *snaps.lock().unwrap());
+        let failed_at: Option<usize> = snaps.iter().find(|s| !s.ok).map(|s| s.index);
+        let keep: Vec<usize> = (0..n).collect();
+        let mut runs = Vec::with_capacity(n);
+        for k in 0..n {
+            let ran_ok = failed_at.is_none_or(|f| k < f);
+            let post = if ran_ok {
+                snaps
+                    .iter()
+                    .find(|s| s.index == k && s.ok)
+                    .map(|s| s.accounts.clone())
+            } else {
+                None
+            };
+            // A step that ran before the failure succeeded in its own right:
+            // it gets the run's metadata as a success, so it is never mistaken
+            // for a prefix artifact. The failing step and everything after
+            // carry the failure.
+            let step_result = match (&result, ran_ok) {
+                (Ok(info), _) => Ok(info.meta.clone()),
+                (Err(failed), true) => Ok(failed.meta.clone()),
+                (Err(failed), false) => Err(failed.clone()),
+            };
+            runs.push(RawStepRun {
+                keep: keep.clone(),
+                result: step_result,
+                post,
+            });
+        }
+        Ok(runs)
+    }
+
+    #[cfg_attr(feature = "single-run-trace", allow(dead_code))]
+    fn trace_raw_prefixes(&self, mutations: &[Mutation]) -> Result<Vec<RawStepRun>> {
         let mut svm = self.fresh_svm();
         let resolved: Vec<Mutation> = mutations
             .iter()
@@ -2472,6 +2537,80 @@ impl ReplayContext {
 }
 
 /// The `ReplayResult` view of a raw runtime result (shared with the debugger).
+/// Account state after one top-level instruction, from the single-run hook.
+#[cfg(feature = "single-run-trace")]
+struct InstructionSnapshot {
+    index: usize,
+    ok: bool,
+    accounts: Vec<(Address, Account)>,
+}
+
+/// Snapshots the transaction context after every top-level instruction.
+#[cfg(feature = "single-run-trace")]
+struct StateCollector {
+    snaps: std::sync::Arc<std::sync::Mutex<Vec<InstructionSnapshot>>>,
+}
+
+#[cfg(feature = "single-run-trace")]
+impl litesvm::InvocationInspectCallback for StateCollector {
+    fn before_invocation(
+        &self,
+        _svm: &LiteSVM,
+        _tx: &solana_transaction::sanitized::SanitizedTransaction,
+        _program_indices: &[solana_transaction_context::IndexOfAccount],
+        _invoke_context: &mut solana_program_runtime::invoke_context::InvokeContext,
+        _enable_register_tracing: bool,
+    ) {
+    }
+
+    fn after_invocation(
+        &self,
+        _svm: &LiteSVM,
+        _tx: &solana_transaction::sanitized::SanitizedTransaction,
+        _program_indices: &[solana_transaction_context::IndexOfAccount],
+        _invoke_context: &solana_program_runtime::invoke_context::InvokeContext,
+        _enable_register_tracing: bool,
+    ) {
+    }
+
+    fn after_instruction(
+        &self,
+        index: usize,
+        invoke_context: &solana_program_runtime::invoke_context::InvokeContext,
+        ok: bool,
+    ) {
+        use solana_account::ReadableAccount;
+        let tc = &*invoke_context.transaction_context;
+        let n = tc.get_number_of_accounts();
+        let mut accounts = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let (Ok(key), Ok(acc)) = (
+                tc.get_key_of_account_at_index(i),
+                tc.accounts().try_borrow(i),
+            ) else {
+                continue;
+            };
+            accounts.push((
+                Address::from(key.to_bytes()),
+                Account {
+                    lamports: acc.lamports(),
+                    data: acc.data().to_vec(),
+                    owner: Address::from(acc.owner().to_bytes()),
+                    executable: acc.executable(),
+                    rent_epoch: acc.rent_epoch(),
+                },
+            ));
+        }
+        if let Ok(mut s) = self.snaps.lock() {
+            s.push(InstructionSnapshot {
+                index,
+                ok,
+                accounts,
+            });
+        }
+    }
+}
+
 pub(crate) fn replay_result_of(result: &litesvm::types::TransactionResult) -> ReplayResult {
     to_replay_result(result.clone())
 }

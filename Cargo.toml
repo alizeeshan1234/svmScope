@@ -77,6 +77,12 @@ default = ["profiler"]
 # Compute profiler: traces every BPF instruction a transaction executes and
 # attributes it to functions and syscalls. Turns on LiteSVM register tracing.
 profiler = ["litesvm/register-tracing", "dep:solana-program-runtime", "dep:solana-transaction-context", "dep:rustc-demangle"]
+# Single-run step debugger: one execution of the whole transaction, with account
+# state snapshotted after every top-level instruction through LiteSVM's
+# `after_instruction` hook — no prefix replays, so programs that read later
+# instructions behave exactly as on chain and every step's diff is its own.
+# Needs the LiteSVM fork carrying that hook (see [patch.crates-io]).
+single-run-trace = ["litesvm/invocation-inspect-callback", "dep:solana-program-runtime", "dep:solana-transaction-context"]
 
 [dev-dependencies]
 # Enables LiteSVM's feature-set accessors (get_feature_set) for tests only;
@@ -84,3 +90,11 @@ profiler = ["litesvm/register-tracing", "dep:solana-program-runtime", "dep:solan
 litesvm = { version = "0.16", features = ["internal-test"] }
 solana-keypair = "=3.1.2"
 solana-system-interface = { version = "=3.2.0", features = ["bincode"] }
+
+# LiteSVM with `InvocationInspectCallback::after_instruction` (per-instruction
+# state observation). Pending upstream; until it lands the hook lives on this
+# branch. `cargo publish` ignores patches, so the `single-run-trace` feature is
+# only usable from a checkout (the hosted server); the published crate keeps
+# prefix replays.
+[patch.crates-io]
+litesvm = { git = "https://github.com/alizeeshan1234/LiteSVM", branch = "instruction-inspect" }
