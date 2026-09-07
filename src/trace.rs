@@ -141,7 +141,9 @@ pub struct Step {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<DecodedEvent>,
     /// The accounts this instruction was given, decoded as they stand after
-    /// the step (for CPIs: after the enclosing top-level step).
+    /// the step. For a CPI, after that inner instruction itself when the
+    /// runtime observer is available (the hosted server), otherwise after the
+    /// enclosing top-level step.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub state: Vec<StepAccountState>,
     /// True when this prefix failed but the whole transaction did not: a

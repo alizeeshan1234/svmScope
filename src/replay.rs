@@ -2343,6 +2343,10 @@ pub(crate) fn run_suite(
 pub(crate) struct RawStepRun {
     /// Top-level instruction indexes that were executed, in message order.
     pub(crate) keep: Vec<usize>,
+    /// Account state after each inner instruction (CPI) of this top-level
+    /// instruction, in completion order — from the runtime observer, single
+    /// run only. Empty when unavailable (prefix mode).
+    pub(crate) inner_posts: Vec<InnerSnapshot>,
     /// The runtime outcome (logs, inner instructions, CU, error).
     pub(crate) result: litesvm::types::TransactionResult,
     /// Every account after the run, when it succeeded. `None` on failure: a
@@ -2458,7 +2462,41 @@ impl ReplayContext {
         svm.set_invocation_inspect_callback(StateCollector {
             snaps: Arc::clone(&snaps),
         });
+        // Inner instructions: the runtime observer fires after every
+        // instruction at every depth, in completion order. Height-1 firings
+        // mark the end of a top-level instruction, so the count of those seen
+        // so far is the top-level index an inner snapshot belongs to.
+        let inner: Arc<Mutex<Vec<(usize, InnerSnapshot)>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let inner = Arc::clone(&inner);
+            let mut tops = 0usize;
+            solana_program_runtime::instruction_hook::set(Box::new(move |ctx, ok| {
+                let height = ctx.get_stack_height();
+                if height <= 1 {
+                    tops += 1;
+                    return;
+                }
+                let program = ctx
+                    .transaction_context
+                    .get_current_instruction_context()
+                    .ok()
+                    .and_then(|ic| ic.get_program_key().ok())
+                    .map(|k| k.to_string())
+                    .unwrap_or_default();
+                let snap = InnerSnapshot {
+                    height: height as u8,
+                    program,
+                    ok,
+                    accounts: snapshot_accounts(ctx),
+                };
+                if let Ok(mut v) = inner.lock() {
+                    v.push((tops, snap));
+                }
+            }));
+        }
         let result = svm.simulate_transaction(tx);
+        solana_program_runtime::instruction_hook::clear();
+        let inner = std::mem::take(&mut *inner.lock().unwrap());
         let snaps = std::mem::take(&mut *snaps.lock().unwrap());
         // The transaction's own verdict is authoritative. A failure tied to an
         // instruction is that instruction's; a failure with no instruction
@@ -2508,8 +2546,14 @@ impl ReplayContext {
                 (Err(failed), true) => Ok(failed.meta.clone()),
                 (Err(failed), false) => Err(failed.clone()),
             };
+            let inner_posts: Vec<InnerSnapshot> = inner
+                .iter()
+                .filter(|(top, _)| *top == k)
+                .map(|(_, s)| s.clone())
+                .collect();
             runs.push(RawStepRun {
                 keep: keep.clone(),
+                inner_posts,
                 result: step_result,
                 post,
             });
@@ -2556,13 +2600,32 @@ impl ReplayContext {
                 ),
                 Err(failed) => (Err(failed), None),
             };
-            runs.push(RawStepRun { keep, result, post });
+            runs.push(RawStepRun {
+                keep,
+                inner_posts: Vec::new(),
+                result,
+                post,
+            });
         }
         Ok(runs)
     }
 }
 
 /// The `ReplayResult` view of a raw runtime result (shared with the debugger).
+/// Account state after one inner instruction (a CPI), from the runtime observer.
+#[derive(Clone)]
+pub(crate) struct InnerSnapshot {
+    /// Stack height of the instruction (2 = called by a top-level instruction).
+    pub(crate) height: u8,
+    /// The program that ran.
+    pub(crate) program: String,
+    /// Whether it succeeded.
+    #[allow(dead_code)]
+    pub(crate) ok: bool,
+    /// Every transaction account as it stood when this instruction finished.
+    pub(crate) accounts: Vec<(Address, Account)>,
+}
+
 /// Account state after one top-level instruction, from the single-run hook.
 #[cfg(feature = "single-run-trace")]
 struct InstructionSnapshot {
@@ -2605,28 +2668,7 @@ impl litesvm::InvocationInspectCallback for StateCollector {
         invoke_context: &solana_program_runtime::invoke_context::InvokeContext,
         ok: bool,
     ) {
-        use solana_account::ReadableAccount;
-        let tc = &*invoke_context.transaction_context;
-        let n = tc.get_number_of_accounts();
-        let mut accounts = Vec::with_capacity(n as usize);
-        for i in 0..n {
-            let (Ok(key), Ok(acc)) = (
-                tc.get_key_of_account_at_index(i),
-                tc.accounts().try_borrow(i),
-            ) else {
-                continue;
-            };
-            accounts.push((
-                Address::from(key.to_bytes()),
-                Account {
-                    lamports: acc.lamports(),
-                    data: acc.data().to_vec(),
-                    owner: Address::from(acc.owner().to_bytes()),
-                    executable: acc.executable(),
-                    rent_epoch: acc.rent_epoch(),
-                },
-            ));
-        }
+        let accounts = snapshot_accounts(invoke_context);
         if let Ok(mut s) = self.snaps.lock() {
             s.push(InstructionSnapshot {
                 index,
@@ -2635,6 +2677,36 @@ impl litesvm::InvocationInspectCallback for StateCollector {
             });
         }
     }
+}
+
+/// Every transaction account as the invoke context currently holds it.
+#[cfg(feature = "single-run-trace")]
+fn snapshot_accounts(
+    invoke_context: &solana_program_runtime::invoke_context::InvokeContext,
+) -> Vec<(Address, Account)> {
+    use solana_account::ReadableAccount;
+    let tc = &*invoke_context.transaction_context;
+    let n = tc.get_number_of_accounts();
+    let mut accounts = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let (Ok(key), Ok(acc)) = (
+            tc.get_key_of_account_at_index(i),
+            tc.accounts().try_borrow(i),
+        ) else {
+            continue;
+        };
+        accounts.push((
+            Address::from(key.to_bytes()),
+            Account {
+                lamports: acc.lamports(),
+                data: acc.data().to_vec(),
+                owner: Address::from(acc.owner().to_bytes()),
+                executable: acc.executable(),
+                rent_epoch: acc.rent_epoch(),
+            },
+        ));
+    }
+    accounts
 }
 
 pub(crate) fn replay_result_of(result: &litesvm::types::TransactionResult) -> ReplayResult {

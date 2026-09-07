@@ -23,6 +23,7 @@ COPY server ./server
 COPY static ./static
 COPY symbols ./symbols
 COPY idls ./idls
+COPY vendor ./vendor
 
 RUN cargo build --release -p svmscope-server
 

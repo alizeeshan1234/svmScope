@@ -98,3 +98,7 @@ solana-system-interface = { version = "=3.2.0", features = ["bincode"] }
 # prefix replays.
 [patch.crates-io]
 litesvm = { git = "https://github.com/alizeeshan1234/LiteSVM", branch = "instruction-inspect" }
+# The program runtime with `instruction_hook` (an observer after every
+# instruction at every depth), vendored at the pinned version. Same rule as
+# above: only the checkout build sees it; publishing ignores patches.
+solana-program-runtime = { path = "vendor/solana-program-runtime" }

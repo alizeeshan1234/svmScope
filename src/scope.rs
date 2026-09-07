@@ -1454,55 +1454,125 @@ impl Replay {
                 diffs = decode_diffs(raw, idls);
             }
 
+            // Completion order of the nodes (post-order): a CPI finishes before
+            // its caller, so the runtime observer's inner snapshots line up with
+            // nodes in this order. Exact only when every inner node has one.
+            let mut completion = vec![usize::MAX; nodes.len()];
+            {
+                let mut open: Vec<usize> = Vec::new();
+                let mut rank = 0usize;
+                for (i, (d, _)) in nodes.iter().enumerate() {
+                    while open.last().is_some_and(|&t| nodes[t].0 >= *d) {
+                        completion[open.pop().unwrap()] = rank;
+                        rank += 1;
+                    }
+                    open.push(i);
+                }
+                while let Some(t) = open.pop() {
+                    completion[t] = rank;
+                    rank += 1;
+                }
+            }
+            // Exact only when every inner node has a snapshot whose program
+            // and depth agree with it — otherwise no CPI borrows a snapshot.
+            let inner_exact = nodes.len() > 1
+                && run.inner_posts.len() == nodes.len() - 1
+                && nodes.iter().enumerate().skip(1).all(|(i, (d, ix))| {
+                    run.inner_posts.get(completion[i]).is_some_and(|s| {
+                        s.height == *d
+                            && keys
+                                .get(ix.program_id_index as usize)
+                                .is_some_and(|p| *p == s.program)
+                    })
+                });
+            let inner_map = |rank: usize| -> Option<HashMap<Address, Account>> {
+                run.inner_posts
+                    .get(rank)
+                    .map(|s| s.accounts.iter().cloned().collect())
+            };
+            // Diffs of `addrs` between a before-lookup and an after-state.
+            let diffs_between = |before_of: &dyn Fn(&Address) -> Option<Account>,
+                                 after: &HashMap<Address, Account>,
+                                 addrs: &[String]|
+             -> Vec<AccountDiff> {
+                let mut raw = Vec::new();
+                for key in addrs {
+                    let Ok(addr) = Address::from_str(key) else {
+                        continue;
+                    };
+                    let before = before_of(&addr);
+                    let after_acc = after.get(&addr).cloned().or_else(|| before.clone());
+                    let before = before.or_else(|| after_acc.as_ref().map(|_| Account::default()));
+                    let (Some(b), Some(a)) = (&before, &after_acc) else {
+                        continue;
+                    };
+                    if b.lamports == a.lamports && b.data == a.data && b.owner == a.owner {
+                        continue;
+                    }
+                    raw.push(crate::replay::RawAccountDiff {
+                        address: key.clone(),
+                        owner: a.owner.to_string(),
+                        lamports_before: b.lamports,
+                        lamports_after: a.lamports,
+                        data_before: b.data.clone(),
+                        data_after: a.data.clone(),
+                    });
+                }
+                decode_diffs(raw, idls)
+            };
+
             // State after this prefix, for the accounts each node names.
             let changed: std::collections::HashSet<String> =
                 diffs.iter().map(|d| d.address.clone()).collect();
-            let state_of =
-                |addr: &str, role: Option<String>, decode_fields: bool| -> StepAccountState {
-                    let acc = post
-                        .as_ref()
-                        .and_then(|m| {
-                            Address::from_str(addr)
-                                .ok()
-                                .and_then(|a| m.get(&a).cloned())
-                        })
-                        .or_else(|| self.ctx.pre_account_owned(addr));
-                    match acc {
-                        Some(a) => {
-                            let owner = a.owner.to_string();
-                            let decoded = if decode_fields || changed.contains(addr) {
-                                decode::decode_bytes(&owner, &a.data).or_else(|| {
-                                    idls.get(&owner)
-                                        .and_then(|i| idl::decode_with_idl(i, &a.data))
-                                })
-                            } else {
-                                None
-                            };
-                            StepAccountState {
-                                address: addr.to_string(),
-                                role,
-                                owner,
-                                lamports: a.lamports,
-                                data_len: a.data.len(),
-                                type_name: decoded.as_ref().map(|d| d.type_name.clone()),
-                                fields: decoded.map(|d| d.fields).unwrap_or_default(),
-                                changed: changed.contains(addr),
-                                exists: true,
-                            }
-                        }
-                        None => StepAccountState {
+            let state_of = |map: Option<&HashMap<Address, Account>>,
+                            changed: &std::collections::HashSet<String>,
+                            addr: &str,
+                            role: Option<String>,
+                            decode_fields: bool|
+             -> StepAccountState {
+                let acc = map
+                    .and_then(|m| {
+                        Address::from_str(addr)
+                            .ok()
+                            .and_then(|a| m.get(&a).cloned())
+                    })
+                    .or_else(|| self.ctx.pre_account_owned(addr));
+                match acc {
+                    Some(a) => {
+                        let owner = a.owner.to_string();
+                        let decoded = if decode_fields || changed.contains(addr) {
+                            decode::decode_bytes(&owner, &a.data).or_else(|| {
+                                idls.get(&owner)
+                                    .and_then(|i| idl::decode_with_idl(i, &a.data))
+                            })
+                        } else {
+                            None
+                        };
+                        StepAccountState {
                             address: addr.to_string(),
                             role,
-                            owner: String::new(),
-                            lamports: 0,
-                            data_len: 0,
-                            type_name: None,
-                            fields: Vec::new(),
+                            owner,
+                            lamports: a.lamports,
+                            data_len: a.data.len(),
+                            type_name: decoded.as_ref().map(|d| d.type_name.clone()),
+                            fields: decoded.map(|d| d.fields).unwrap_or_default(),
                             changed: changed.contains(addr),
-                            exists: false,
-                        },
+                            exists: true,
+                        }
                     }
-                };
+                    None => StepAccountState {
+                        address: addr.to_string(),
+                        role,
+                        owner: String::new(),
+                        lamports: 0,
+                        data_len: 0,
+                        type_name: None,
+                        fields: Vec::new(),
+                        changed: changed.contains(addr),
+                        exists: false,
+                    },
+                }
+            };
             let return_data = (!meta.return_data.data.is_empty()).then(|| ReturnData {
                 program: meta.return_data.program_id.to_string(),
                 data_base64: base64::engine::general_purpose::STANDARD
@@ -1550,6 +1620,41 @@ impl Replay {
                     p
                 };
 
+                // A CPI with its own snapshot: state as it stood when this
+                // inner instruction finished, and its changes since the inner
+                // instruction that finished before it (or the step's start).
+                let (node_post, node_diffs): (Option<HashMap<Address, Account>>, Vec<AccountDiff>) =
+                    if i > 0 && inner_exact {
+                        let rank = completion[i];
+                        match inner_map(rank) {
+                            Some(after) => {
+                                let prev = if rank > 0 { inner_map(rank - 1) } else { None };
+                                let before_of = |a: &Address| -> Option<Account> {
+                                    prev.as_ref()
+                                        .and_then(|m| m.get(a).cloned())
+                                        .or_else(|| {
+                                            prev_post.as_ref().and_then(|m| m.get(a).cloned())
+                                        })
+                                        .or_else(|| initial.get(a).cloned())
+                                };
+                                let addrs: Vec<String> =
+                                    accounts.iter().map(|a| a.address.clone()).collect();
+                                let d = diffs_between(&before_of, &after, &addrs);
+                                (Some(after), d)
+                            }
+                            None => (None, Vec::new()),
+                        }
+                    } else {
+                        (None, Vec::new())
+                    };
+                let node_changed: std::collections::HashSet<String> =
+                    node_diffs.iter().map(|d| d.address.clone()).collect();
+                let (state_map, state_changed) = if node_post.is_some() {
+                    (node_post.as_ref(), &node_changed)
+                } else {
+                    (post.as_ref(), &changed)
+                };
+
                 // Per-node state: the accounts this instruction names, capped so a
                 // 40-account Jupiter route doesn't dump megabytes of fields.
                 let mut seen = std::collections::HashSet::new();
@@ -1558,7 +1663,9 @@ impl Replay {
                     .filter(|a| seen.insert(a.address.clone()))
                     .take(96)
                     .enumerate()
-                    .map(|(n, a)| state_of(&a.address, a.name.clone(), n < 32))
+                    .map(|(n, a)| {
+                        state_of(state_map, state_changed, &a.address, a.name.clone(), n < 32)
+                    })
                     .collect();
 
                 let (logs, cu, success) = if aligned {
@@ -1621,9 +1728,14 @@ impl Replay {
                     diffs: if i == 0 {
                         std::mem::take(&mut diffs)
                     } else {
-                        Vec::new()
+                        node_diffs
                     },
-                    state_known: i == 0 && post.is_some() && !halted,
+                    state_known: !halted
+                        && (if i == 0 {
+                            post.is_some()
+                        } else {
+                            node_post.is_some()
+                        }),
                     success: if halted { false } else { success },
                     error: None,
                     return_data: node_return,

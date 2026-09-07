@@ -5044,8 +5044,6 @@ dependencies = [
 [[package]]
 name = "solana-program-runtime"
 version = "4.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99a3895314c34396758131a8af156944453ebe18e70d2a5cde67eec899df48a1"
 dependencies = [
  "base64 0.22.1",
  "bincode",

@@ -1,0 +1,2500 @@
+use {
+    crate::{
+        invoke_context::InvokeContext,
+        loading_task::LoadingTaskWaiter,
+        program_cache_entry::{
+            ProgramCacheEntry, ProgramCacheEntryOwner, ProgramCacheEntryType, retention_score,
+        },
+        program_metrics::{EMA_SCALE, ProgramCacheStats},
+    },
+    log::error,
+    percentage::PercentageInteger,
+    solana_clock::{Epoch, Slot},
+    solana_pubkey::Pubkey,
+    solana_sbpf::program::BuiltinProgram,
+    solana_svm_type_overrides::{
+        rand::{Rng, rng},
+        sync::{Arc, Mutex, RwLock, atomic::Ordering},
+        thread,
+    },
+    std::{
+        collections::{HashMap, hash_map::Entry},
+        sync::Weak,
+    },
+};
+
+#[repr(transparent)]
+#[derive(Clone, Debug)]
+pub struct ProgramRuntimeEnvironment(Arc<BuiltinProgram<InvokeContext<'static, 'static>>>);
+impl std::hash::Hash for ProgramRuntimeEnvironment {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Arc::<BuiltinProgram<InvokeContext<'static, 'static>>>::as_ptr(&self.0).hash(state);
+    }
+}
+impl PartialEq for ProgramRuntimeEnvironment {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for ProgramRuntimeEnvironment {}
+impl std::ops::Deref for ProgramRuntimeEnvironment {
+    type Target = Arc<BuiltinProgram<InvokeContext<'static, 'static>>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl ProgramRuntimeEnvironment {
+    pub fn from(inner: BuiltinProgram<InvokeContext<'static, 'static>>) -> Self {
+        Self(Arc::new(inner))
+    }
+
+    pub const fn from_ref<'a>(
+        inner: &'a Arc<BuiltinProgram<InvokeContext<'static, 'static>>>,
+    ) -> &'a Self {
+        // Safety: This wrapper type is transparent and shares the same representation as the underlying type
+        unsafe { std::mem::transmute(inner) }
+    }
+}
+
+/// Paired execution and deployment environments.
+///
+/// Registered functions within each program runtime environment (syscalls)
+/// depend on per-epoch feature gate statuses. In most cases, the list of
+/// registered functions in the two environments will be the same. However,
+/// it's possible that the effective epoch of deployment could be in the
+/// *next epoch*.
+pub struct ProgramRuntimeEnvironments {
+    /// Environment compiled for the current epoch in which programs are
+    /// executing.
+    execution: ProgramRuntimeEnvironment,
+    /// Environment compiled for the epoch of the next slot at which a program
+    /// deployed in the current slot will execute.
+    deployment: ProgramRuntimeEnvironment,
+}
+
+impl ProgramRuntimeEnvironments {
+    /// Create a new ProgramRuntimeEnvironments from an `execution` and
+    /// `deployment` environment.
+    pub fn new(
+        execution: ProgramRuntimeEnvironment,
+        deployment: ProgramRuntimeEnvironment,
+    ) -> Self {
+        Self {
+            execution,
+            deployment,
+        }
+    }
+
+    /// Get the program runtime environment for execution.
+    pub fn get_env_for_execution(&self) -> &ProgramRuntimeEnvironment {
+        &self.execution
+    }
+
+    /// Get the program runtime environment for deployment.
+    pub fn get_env_for_deployment(&self) -> &ProgramRuntimeEnvironment {
+        &self.deployment
+    }
+
+    #[cfg(feature = "dev-context-only-utils")]
+    pub fn mock() -> Self {
+        Self {
+            execution: get_mock_program_runtime_environment(),
+            deployment: get_mock_program_runtime_environment(),
+        }
+    }
+}
+
+#[cfg(feature = "dev-context-only-utils")]
+pub fn get_mock_program_runtime_environment() -> ProgramRuntimeEnvironment {
+    static MOCK_ENVIRONMENT: std::sync::OnceLock<ProgramRuntimeEnvironment> =
+        std::sync::OnceLock::<ProgramRuntimeEnvironment>::new();
+    MOCK_ENVIRONMENT
+        .get_or_init(|| ProgramRuntimeEnvironment::from(BuiltinProgram::new_mock()))
+        .clone()
+}
+
+pub const MAX_LOADED_ENTRY_COUNT: usize = 512;
+
+/// Relationship between two fork IDs
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum BlockRelation {
+    /// The slot is on the same fork and is an ancestor of the other slot
+    Ancestor,
+    /// The two slots are equal and are on the same fork
+    Equal,
+    /// The slot is on the same fork and is a descendant of the other slot
+    Descendant,
+    /// The slots are on two different forks and may have had a common ancestor at some point
+    Unrelated,
+    /// Either one or both of the slots are either older than the latest root, or are in future
+    Unknown,
+}
+
+/// Maps relationship between two slots.
+pub trait ForkGraph {
+    /// Returns the BlockRelation of A to B
+    fn relationship(&self, a: Slot, b: Slot) -> BlockRelation;
+}
+
+/// Globally manages the transition between environments at the epoch boundary
+#[derive(Debug, Default)]
+pub struct EpochBoundaryPreparation {
+    /// The epoch of the upcoming_environment
+    pub upcoming_epoch: Epoch,
+    /// Anticipated replacement for `environments` at the next epoch
+    ///
+    /// This is `None` during most of an epoch, and only `Some` around the boundaries (at the end and beginning of an epoch).
+    /// More precisely, it starts with the cache preparation phase a few hundred slots before the epoch boundary,
+    /// and it ends with the first rerooting after the epoch boundary.
+    pub upcoming_environment: Option<ProgramRuntimeEnvironment>,
+    /// List of loaded programs which should be recompiled before the next epoch (but don't have to).
+    pub programs_to_recompile: Vec<(Pubkey, Arc<ProgramCacheEntry>)>,
+}
+
+impl EpochBoundaryPreparation {
+    pub fn new(epoch: Epoch) -> Self {
+        Self {
+            upcoming_epoch: epoch,
+            upcoming_environment: None,
+            programs_to_recompile: Vec::default(),
+        }
+    }
+
+    /// Returns the upcoming environments depending on the given epoch
+    pub fn get_upcoming_environment_for_epoch(
+        &self,
+        epoch: Epoch,
+    ) -> Option<ProgramRuntimeEnvironment> {
+        if epoch == self.upcoming_epoch {
+            return self.upcoming_environment.clone();
+        }
+        None
+    }
+
+    /// Before rerooting the blockstore this concludes the epoch boundary preparation
+    pub fn reroot(&mut self, epoch: Epoch) -> Option<ProgramRuntimeEnvironment> {
+        if epoch == self.upcoming_epoch
+            && let Some(upcoming_environment) = self.upcoming_environment.take()
+        {
+            self.programs_to_recompile.clear();
+            return Some(upcoming_environment);
+        }
+
+        None
+    }
+}
+
+/// Input of ProgramCache::extract()
+#[derive(Clone, PartialEq, Debug)]
+pub struct ProgramToLoad<'a> {
+    /// The program address
+    pub program_id: &'a Pubkey,
+    /// The program loader
+    pub loader: ProgramCacheEntryOwner,
+    /// Potentially filter out / ignore some entries during the start up / catch up phase
+    pub match_criteria: ProgramCacheMatchCriteria,
+    /// When the program account was last written to (might be after the deployment slot)
+    pub last_modification_slot: Slot,
+}
+
+#[derive(Debug)]
+pub(crate) enum IndexImplementation {
+    /// Fork-graph aware index implementation
+    V1 {
+        /// A two level index:
+        ///
+        /// - the first level is for the address at which programs are deployed
+        /// - the second level for the slot (and thus also fork), sorted by slot number.
+        entries: HashMap<Pubkey, Vec<Arc<ProgramCacheEntry>>>,
+        /// The entries that are getting loaded and have not yet finished loading.
+        ///
+        /// The key is the program address, the value is a tuple of the slot in which the program is
+        /// being loaded and the thread ID doing the load.
+        ///
+        /// It is possible that multiple TX batches from different slots need different versions of a
+        /// program. The deployment slot of a program is only known after load tho,
+        /// so all loads for a given program key are serialized.
+        loading_entries: Mutex<HashMap<Pubkey, (Slot, thread::ThreadId)>>,
+    },
+}
+
+/// This structure is the global cache of loaded, verified and compiled programs.
+///
+/// It ...
+/// - is validator global and fork graph aware, so it can optimize the commonalities across banks.
+/// - handles the visibility rules of un/re/deployments.
+/// - stores the usage statistics and verification status of each program.
+/// - is elastic and uses a probabilistic eviction strategy based on the usage statistics.
+/// - also keeps the compiled executables around, but only for the most used programs.
+/// - supports various kinds of tombstones to avoid loading programs which can not be loaded.
+/// - cleans up entries on orphan branches when the block store is rerooted.
+/// - supports the cache preparation phase before feature activations which can change cached programs.
+/// - manages the environments of the programs and upcoming environments for the next epoch.
+/// - allows for cooperative loading of TX batches which hit the same missing programs simultaneously.
+/// - enforces that all programs used in a batch are eagerly loaded ahead of execution.
+/// - is not persisted to disk or a snapshot, so it needs to cold start and warm up first.
+pub struct ProgramCache<FG: ForkGraph> {
+    /// Index of the cached entries and cooperative loading tasks
+    pub(crate) index: IndexImplementation,
+    /// The slot of the last rerooting
+    pub latest_root_slot: Slot,
+    /// Statistics counters
+    pub stats: ProgramCacheStats,
+    /// Reference to the block store
+    pub fork_graph: Option<Weak<RwLock<FG>>>,
+    /// Coordinates TX batches waiting for others to complete their task during cooperative loading
+    pub loading_task_waiter: Arc<LoadingTaskWaiter>,
+}
+
+impl<FG: ForkGraph> std::fmt::Debug for ProgramCache<FG> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProgramCache")
+            .field("root slot", &self.latest_root_slot)
+            .field("stats", &self.stats)
+            .field("index", &self.index)
+            .finish()
+    }
+}
+
+/// Local view into [ProgramCache] which was extracted for a specific TX batch.
+///
+/// This isolation enables the global [ProgramCache] to continue to evolve (e.g. evictions),
+/// while the TX batch is guaranteed it will continue to find all the programs it requires.
+/// For program management instructions this also buffers them before they are merged back into the global [ProgramCache].
+#[derive(Clone, Debug, Default)]
+pub struct ProgramCacheForTxBatch {
+    /// Pubkey is the address of a program.
+    /// ProgramCacheEntry is the corresponding program entry valid for the slot in which a transaction is being executed.
+    entries: HashMap<Pubkey, Arc<ProgramCacheEntry>>,
+    /// Program entries modified during the transaction batch.
+    modified_entries: HashMap<Pubkey, Arc<ProgramCacheEntry>>,
+    slot: Slot,
+    pub hit_max_limit: bool,
+    pub loaded_missing: bool,
+    pub merged_modified: bool,
+}
+
+impl ProgramCacheForTxBatch {
+    pub fn new(slot: Slot) -> Self {
+        Self {
+            entries: HashMap::new(),
+            modified_entries: HashMap::new(),
+            slot,
+            hit_max_limit: false,
+            loaded_missing: false,
+            merged_modified: false,
+        }
+    }
+
+    /// Refill the cache with a single entry. It's typically called during transaction loading, and
+    /// transaction processing (for program management instructions).
+    /// It replaces the existing entry (if any) with the provided entry. The return value contains
+    /// `true` if an entry existed.
+    /// The function also returns the newly inserted value.
+    pub fn replenish(
+        &mut self,
+        key: Pubkey,
+        entry: Arc<ProgramCacheEntry>,
+    ) -> (bool, Arc<ProgramCacheEntry>) {
+        (self.entries.insert(key, entry.clone()).is_some(), entry)
+    }
+
+    /// Store an entry in `modified_entries` for a program modified during the
+    /// transaction batch.
+    pub fn store_modified_entry(&mut self, key: Pubkey, entry: Arc<ProgramCacheEntry>) {
+        self.modified_entries.insert(key, entry);
+    }
+
+    /// Drain the program cache's modified entries, returning the owned
+    /// collection.
+    pub fn drain_modified_entries(&mut self) -> HashMap<Pubkey, Arc<ProgramCacheEntry>> {
+        std::mem::take(&mut self.modified_entries)
+    }
+
+    pub fn find(&self, key: &Pubkey) -> Option<Arc<ProgramCacheEntry>> {
+        // First lookup the cache of the programs modified by the current
+        // transaction. If not found, lookup the cache of the cache of the
+        // programs that are loaded for the transaction batch.
+        self.modified_entries
+            .get(key)
+            .or_else(|| self.entries.get(key))
+            .map(|entry| {
+                if entry.is_implicit_delay_visibility_tombstone(self.slot) {
+                    // Found a program entry on the current fork, but it's not effective
+                    // yet. It indicates that the program has delayed visibility. Return
+                    // the tombstone to reflect that.
+                    Arc::new(ProgramCacheEntry::new_tombstone_with_stats(
+                        entry.deployment_slot,
+                        entry.account_owner,
+                        ProgramCacheEntryType::DelayVisibility,
+                        Arc::clone(&entry.stats),
+                    ))
+                } else {
+                    entry.clone()
+                }
+            })
+    }
+
+    pub fn slot(&self) -> Slot {
+        self.slot
+    }
+
+    pub fn set_slot_for_tests(&mut self, slot: Slot) {
+        self.slot = slot;
+    }
+
+    pub fn merge(&mut self, modified_entries: &HashMap<Pubkey, Arc<ProgramCacheEntry>>) {
+        modified_entries.iter().for_each(|(key, entry)| {
+            self.merged_modified = true;
+            self.replenish(*key, entry.clone());
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum ProgramCacheMatchCriteria {
+    DeployedOnOrAfterSlot(Slot),
+    Tombstone,
+    NoCriteria,
+}
+
+impl<FG: ForkGraph> ProgramCache<FG> {
+    pub fn new(root_slot: Slot) -> Self {
+        Self {
+            index: IndexImplementation::V1 {
+                entries: HashMap::new(),
+                loading_entries: Mutex::new(HashMap::new()),
+            },
+            latest_root_slot: root_slot,
+            stats: ProgramCacheStats::default(),
+            fork_graph: None,
+            loading_task_waiter: Arc::new(LoadingTaskWaiter::default()),
+        }
+    }
+
+    pub fn set_fork_graph(&mut self, fork_graph: Weak<RwLock<FG>>) {
+        self.fork_graph = Some(fork_graph);
+    }
+
+    /// Insert a single entry. It's typically called during transaction loading,
+    /// when the cache doesn't contain the entry corresponding to program `key`.
+    pub fn assign_program(
+        &mut self,
+        program_runtime_environment: &ProgramRuntimeEnvironment,
+        key: Pubkey,
+        _last_modification_slot: Slot,
+        entry: Arc<ProgramCacheEntry>,
+    ) -> bool {
+        debug_assert!(!matches!(
+            &entry.program,
+            ProgramCacheEntryType::DelayVisibility
+        ));
+        // This function always returns `true` during normal operation.
+        // Only during the cache preparation phase this can return `false`
+        // for entries with `upcoming_environment`.
+        fn is_current_env(
+            program_runtime_environment: &ProgramRuntimeEnvironment,
+            env_opt: Option<&ProgramRuntimeEnvironment>,
+        ) -> bool {
+            env_opt
+                .map(|env| env == program_runtime_environment)
+                .unwrap_or(true)
+        }
+        match &mut self.index {
+            IndexImplementation::V1 { entries, .. } => {
+                let slot_versions = &mut entries.entry(key).or_default();
+                let insertion_point = slot_versions.binary_search_by(|at| {
+                    at.effective_slot
+                        .cmp(&entry.effective_slot)
+                        .then(at.deployment_slot.cmp(&entry.deployment_slot))
+                        .then(at.account_owner.cmp(&entry.account_owner))
+                        .then(
+                            // This `.then()` has no effect during normal operation.
+                            // Only during the cache preparation phase this does allow entries
+                            // which only differ in their environment to be interleaved in `slot_versions`.
+                            is_current_env(
+                                program_runtime_environment,
+                                at.program.get_environment(),
+                            )
+                            .cmp(&is_current_env(
+                                program_runtime_environment,
+                                entry.program.get_environment(),
+                            )),
+                        )
+                });
+                match insertion_point {
+                    Ok(index) => {
+                        let existing = slot_versions.get_mut(index).unwrap();
+                        match (&existing.program, &entry.program) {
+                            (
+                                ProgramCacheEntryType::Builtin(_),
+                                ProgramCacheEntryType::Builtin(_),
+                            )
+                            | (
+                                ProgramCacheEntryType::Unloaded(_),
+                                ProgramCacheEntryType::Loaded(_),
+                            ) => {}
+                            _ => {
+                                // Something is wrong, I can feel it ...
+                                error!(
+                                    "ProgramCache::assign_program() failed key={key:?} \
+                                     existing={slot_versions:?} entry={entry:?}"
+                                );
+                                debug_assert!(false, "Unexpected replacement of an entry");
+                                self.stats.replacements.fetch_add(1, Ordering::Relaxed);
+                                return true;
+                            }
+                        }
+                        entry.stats.merge_from(&existing.stats);
+                        *existing = Arc::clone(&entry);
+                        self.stats.reloads.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(index) => {
+                        self.stats.insertions.fetch_add(1, Ordering::Relaxed);
+                        slot_versions.insert(index, Arc::clone(&entry));
+                    }
+                }
+                // Remove existing entries in the same deployment slot unless they are for a different
+                // environment.
+                // This overwrites the current status of a program in program management instructions.
+                slot_versions.retain(|existing| {
+                    existing.deployment_slot != entry.deployment_slot
+                        || existing
+                            .program
+                            .get_environment()
+                            .zip(entry.program.get_environment())
+                            .map(|(a, b)| a != b)
+                            .unwrap_or(false)
+                        || existing == &entry
+                });
+            }
+        }
+        false
+    }
+
+    pub fn prune_by_deployment_slot(&mut self, slot: Slot) {
+        match &mut self.index {
+            IndexImplementation::V1 { entries, .. } => {
+                for second_level in entries.values_mut() {
+                    second_level.retain(|entry| entry.deployment_slot != slot);
+                }
+                self.remove_programs_with_no_entries();
+            }
+        }
+    }
+
+    /// Before rerooting the blockstore this removes all superfluous entries
+    pub fn prune(
+        &mut self,
+        new_root_slot: Slot,
+        new_environment: Option<ProgramRuntimeEnvironment>,
+        fork_graph: &FG,
+    ) {
+        match &mut self.index {
+            IndexImplementation::V1 { entries, .. } => {
+                for second_level in entries.values_mut() {
+                    // Remove entries un/re/deployed on orphan forks
+                    let mut first_ancestor_found = false;
+                    let mut first_ancestor_env = None;
+                    *second_level = second_level
+                        .iter()
+                        .rev()
+                        .filter(|entry| {
+                            let relation =
+                                fork_graph.relationship(entry.deployment_slot, new_root_slot);
+                            if entry.deployment_slot >= new_root_slot {
+                                matches!(relation, BlockRelation::Equal | BlockRelation::Descendant)
+                            } else if matches!(relation, BlockRelation::Ancestor)
+                                || entry.deployment_slot <= self.latest_root_slot
+                            {
+                                if !first_ancestor_found {
+                                    first_ancestor_found = true;
+                                    first_ancestor_env = entry.program.get_environment();
+                                    return true;
+                                }
+                                // Do not prune the entry if the runtime environment of the entry is
+                                // different than the entry that was previously found (stored in
+                                // first_ancestor_env). Different environment indicates that this entry
+                                // might belong to an older epoch that had a different environment (e.g.
+                                // different feature set). Once the root moves to the new/current epoch,
+                                // the entry will get pruned. But, until then the entry might still be
+                                // getting used by an older slot.
+                                if let Some(entry_env) = entry.program.get_environment()
+                                    && let Some(env) = first_ancestor_env
+                                    && entry_env != env
+                                {
+                                    return true;
+                                }
+                                self.stats.prunes_orphan.fetch_add(1, Ordering::Relaxed);
+                                false
+                            } else {
+                                self.stats.prunes_orphan.fetch_add(1, Ordering::Relaxed);
+                                false
+                            }
+                        })
+                        .filter(|entry| {
+                            // Remove outdated environment of previous feature set
+                            if let Some(new_environment) = new_environment.as_ref()
+                                && !Self::matches_environment(entry, new_environment)
+                            {
+                                self.stats
+                                    .prunes_environment
+                                    .fetch_add(1, Ordering::Relaxed);
+                                return false;
+                            }
+                            true
+                        })
+                        .cloned()
+                        .collect();
+                    second_level.reverse();
+                }
+            }
+        }
+        self.remove_programs_with_no_entries();
+        debug_assert!(self.latest_root_slot <= new_root_slot);
+        self.latest_root_slot = new_root_slot;
+    }
+
+    fn matches_environment(
+        entry: &Arc<ProgramCacheEntry>,
+        program_runtime_environment: &ProgramRuntimeEnvironment,
+    ) -> bool {
+        let Some(environment) = entry.program.get_environment() else {
+            return true;
+        };
+        environment == program_runtime_environment
+    }
+
+    fn matches_criteria(
+        program: &Arc<ProgramCacheEntry>,
+        criteria: &ProgramCacheMatchCriteria,
+    ) -> bool {
+        match criteria {
+            ProgramCacheMatchCriteria::DeployedOnOrAfterSlot(slot) => {
+                program.deployment_slot >= *slot
+            }
+            ProgramCacheMatchCriteria::Tombstone => program.is_tombstone(),
+            ProgramCacheMatchCriteria::NoCriteria => true,
+        }
+    }
+
+    /// Extracts a subset of the programs relevant to a transaction batch
+    /// and returns which program accounts the accounts DB needs to load.
+    pub fn extract(
+        &self,
+        search_for: &mut Vec<ProgramToLoad>,
+        loaded_programs_for_tx_batch: &mut ProgramCacheForTxBatch,
+        program_runtime_environment_for_execution: &ProgramRuntimeEnvironment,
+        increment_usage_counter: bool,
+        count_hits_and_misses: bool,
+    ) -> Option<Pubkey> {
+        debug_assert!(self.fork_graph.is_some());
+        let fork_graph = self.fork_graph.as_ref().unwrap().upgrade().unwrap();
+        let locked_fork_graph = fork_graph.read().unwrap();
+        let mut cooperative_loading_task = None;
+        match &self.index {
+            IndexImplementation::V1 {
+                entries,
+                loading_entries,
+            } => {
+                search_for.retain(|program_to_load| {
+                    if let Some(second_level) = entries.get(program_to_load.program_id) {
+                        let mut filter_by_deployment_slot = None;
+                        for entry in second_level.iter().rev() {
+                            let required_deployment_slot =
+                                filter_by_deployment_slot.unwrap_or(entry.deployment_slot);
+                            if required_deployment_slot != entry.deployment_slot
+                                || program_to_load.loader != entry.account_owner
+                            {
+                                continue;
+                            }
+                            let entry_in_same_branch = entry.deployment_slot
+                                <= self.latest_root_slot
+                                || matches!(
+                                    locked_fork_graph.relationship(
+                                        entry.deployment_slot,
+                                        loaded_programs_for_tx_batch.slot
+                                    ),
+                                    BlockRelation::Equal | BlockRelation::Ancestor
+                                );
+                            if entry_in_same_branch {
+                                let entry_is_effective =
+                                    loaded_programs_for_tx_batch.slot >= entry.effective_slot;
+                                let entry_to_return = if entry_is_effective {
+                                    if !Self::matches_environment(
+                                        entry,
+                                        program_runtime_environment_for_execution,
+                                    ) {
+                                        // We found an entry that would work, had its environment matched
+                                        // the one we're planning to use for this slot.
+                                        //
+                                        // At this point we know that whatever the "current version" of
+                                        // program is, it must have had a deployment slot equal to the
+                                        // program we're looking at in this iteration. We just have to find
+                                        // one with the correct environment and can skip entries for any
+                                        // other deployment slot while searching further.
+                                        filter_by_deployment_slot = filter_by_deployment_slot
+                                            .or(Some(entry.deployment_slot));
+                                        continue;
+                                    }
+                                    if !Self::matches_criteria(
+                                        entry,
+                                        &program_to_load.match_criteria,
+                                    ) {
+                                        break;
+                                    }
+                                    if let ProgramCacheEntryType::Unloaded(_environment) =
+                                        &entry.program
+                                    {
+                                        break;
+                                    }
+                                    entry.clone()
+                                } else if entry.is_implicit_delay_visibility_tombstone(
+                                    loaded_programs_for_tx_batch.slot,
+                                ) {
+                                    // Found a program entry on the current fork, but it's not effective
+                                    // yet. It indicates that the program has delayed visibility. Return
+                                    // the tombstone to reflect that.
+                                    Arc::new(ProgramCacheEntry::new_tombstone_with_stats(
+                                        entry.deployment_slot,
+                                        entry.account_owner,
+                                        ProgramCacheEntryType::DelayVisibility,
+                                        Arc::clone(&entry.stats),
+                                    ))
+                                } else {
+                                    continue;
+                                };
+                                entry_to_return
+                                    .update_access_slot(loaded_programs_for_tx_batch.slot);
+                                if increment_usage_counter {
+                                    entry_to_return.stats.uses.fetch_add(1, Ordering::Relaxed);
+                                }
+                                loaded_programs_for_tx_batch
+                                    .entries
+                                    .insert(*program_to_load.program_id, entry_to_return);
+                                return false;
+                            }
+                        }
+                    }
+                    if cooperative_loading_task.is_none() {
+                        let mut loading_entries = loading_entries.lock().unwrap();
+                        let entry = loading_entries.entry(*program_to_load.program_id);
+                        if let Entry::Vacant(entry) = entry {
+                            entry.insert((
+                                loaded_programs_for_tx_batch.slot,
+                                thread::current().id(),
+                            ));
+                            cooperative_loading_task = Some(*program_to_load.program_id);
+                        }
+                    }
+                    true
+                });
+            }
+        }
+        drop(locked_fork_graph);
+        if count_hits_and_misses {
+            self.stats
+                .misses
+                .fetch_add(search_for.len() as u64, Ordering::Relaxed);
+            self.stats.hits.fetch_add(
+                loaded_programs_for_tx_batch.entries.len() as u64,
+                Ordering::Relaxed,
+            );
+        }
+        cooperative_loading_task
+    }
+
+    /// Called by Bank::replenish_program_cache() for each program that is done loading.
+    pub fn finish_cooperative_loading_task(
+        &mut self,
+        program_runtime_environment: &ProgramRuntimeEnvironment,
+        current_slot: Slot,
+        key: Pubkey,
+        last_modification_slot: Slot,
+        loaded_program: Arc<ProgramCacheEntry>,
+    ) -> bool {
+        match &mut self.index {
+            IndexImplementation::V1 {
+                loading_entries, ..
+            } => {
+                let loading_thread = loading_entries.get_mut().unwrap().remove(&key);
+                debug_assert_eq!(loading_thread, Some((current_slot, thread::current().id())));
+                // Check that it will be visible to our own fork once inserted
+                if loaded_program.deployment_slot > self.latest_root_slot
+                    && !matches!(
+                        self.fork_graph
+                            .as_ref()
+                            .unwrap()
+                            .upgrade()
+                            .unwrap()
+                            .read()
+                            .unwrap()
+                            .relationship(loaded_program.deployment_slot, current_slot),
+                        BlockRelation::Equal | BlockRelation::Ancestor
+                    )
+                {
+                    self.stats.lost_insertions.fetch_add(1, Ordering::Relaxed);
+                }
+                let was_occupied = self.assign_program(
+                    program_runtime_environment,
+                    key,
+                    last_modification_slot,
+                    loaded_program,
+                );
+                self.loading_task_waiter.notify();
+                was_occupied
+            }
+        }
+    }
+
+    pub fn merge(
+        &mut self,
+        program_runtime_environment: &ProgramRuntimeEnvironment,
+        current_slot: Slot,
+        modified_entries: &HashMap<Pubkey, Arc<ProgramCacheEntry>>,
+    ) {
+        modified_entries.iter().for_each(|(key, entry)| {
+            self.assign_program(
+                program_runtime_environment,
+                *key,
+                current_slot,
+                entry.clone(),
+            );
+        })
+    }
+
+    /// Returns the list of entries which are verified and compiled.
+    pub fn get_flattened_entries(&self) -> Vec<(Pubkey, Slot, Arc<ProgramCacheEntry>)> {
+        match &self.index {
+            IndexImplementation::V1 { entries, .. } => entries
+                .iter()
+                .flat_map(|(id, second_level)| {
+                    second_level
+                        .iter()
+                        .filter_map(move |program| match program.program {
+                            ProgramCacheEntryType::Loaded(_) => Some((*id, 0, program.clone())),
+                            _ => None,
+                        })
+                })
+                .collect(),
+        }
+    }
+
+    /// Returns the list of all entries in the cache.
+    #[cfg(feature = "dev-context-only-utils")]
+    pub fn get_flattened_entries_for_tests(&self) -> Vec<(Pubkey, Arc<ProgramCacheEntry>)> {
+        match &self.index {
+            IndexImplementation::V1 { entries, .. } => entries
+                .iter()
+                .flat_map(|(id, second_level)| {
+                    second_level.iter().map(|program| (*id, program.clone()))
+                })
+                .collect(),
+        }
+    }
+
+    /// Returns the slot versions for the given program id.
+    pub fn get_slot_versions_for_tests(&self, key: &Pubkey) -> &[Arc<ProgramCacheEntry>] {
+        match &self.index {
+            IndexImplementation::V1 { entries, .. } => entries
+                .get(key)
+                .map(|second_level| second_level.as_ref())
+                .unwrap_or(&[]),
+        }
+    }
+
+    /// Unloads programs which were used infrequently
+    pub fn sort_and_unload(&mut self, shrink_to: PercentageInteger) {
+        let mut sorted_candidates = self.get_flattened_entries();
+        sorted_candidates.sort_by_cached_key(|(_id, _last_modification_slot, program)| {
+            program.stats.uses.load(Ordering::Relaxed)
+        });
+        let num_to_unload = sorted_candidates
+            .len()
+            .saturating_sub(shrink_to.apply_to(MAX_LOADED_ENTRY_COUNT));
+        for (program, last_modification_slot, entry) in sorted_candidates.iter().take(num_to_unload)
+        {
+            self.unload_program_entry(*program, *last_modification_slot, entry);
+        }
+    }
+
+    /// Evicts programs using random selection, choosing the worst scoring program out of the
+    /// entries sampled.
+    ///
+    /// The eviction is performed enough number of times to reduce the cache usage to the given
+    /// percentage.
+    pub fn evict_using_random_selection(&mut self, shrink_to: PercentageInteger, now: Slot) {
+        let mut candidates = self.get_flattened_entries();
+        let mut rng = rng();
+        self.stats
+            .water_level
+            .store(candidates.len() as u64, Ordering::Relaxed);
+        let num_to_unload = candidates
+            .len()
+            .saturating_sub(shrink_to.apply_to(MAX_LOADED_ENTRY_COUNT));
+        let mut sample_entry = |candidates: &Vec<(Pubkey, u64, Arc<ProgramCacheEntry>)>| {
+            // gen_range is deprecated in favor of random_range in rand>=0.9, but we also get
+            // rnd() from shuttle, which doesn't yet support rand 0.9 APIs
+            #[cfg(feature = "shuttle-test")]
+            let index = rng.gen_range(0..candidates.len());
+            #[cfg(not(feature = "shuttle-test"))]
+            let index = rng.random_range(0..candidates.len());
+            let usage_counter = candidates
+                .get(index)
+                .expect("Failed to get cached entry")
+                .2
+                .retention_score();
+            (index, usage_counter)
+        };
+
+        // Random sampling with just 2 choices can frequently lead to a situation where both
+        // entries chosen have relatively high retention scores, having us to pick one out of two
+        // poor options. We can tell what a relatively high retention score is, so we can make a
+        // few additional samples until we hit some other entry that isn't as highly scoring.
+        //
+        // Note that the "high enough" compilation time and use count numbers used here are
+        // relatively arbitrary.
+        const MAX_ADDITIONAL_SAMPLES: usize = 3;
+        let avoid_evicting_above_score = retention_score(now, 500 * EMA_SCALE, 500);
+        for _ in 0..num_to_unload {
+            let (mut index, mut score) = sample_entry(&candidates);
+            for _ in 0..MAX_ADDITIONAL_SAMPLES {
+                let (sample_index, sample_score) = sample_entry(&candidates);
+                if score > sample_score {
+                    index = sample_index;
+                    score = sample_score;
+                }
+                if score < avoid_evicting_above_score {
+                    break;
+                }
+            }
+            let (id, last_modification_slot, entry) = candidates.swap_remove(index);
+            self.unload_program_entry(id, last_modification_slot, &entry);
+        }
+    }
+
+    /// Removes all the entries at the given keys, if they exist
+    pub fn remove_programs(&mut self, keys: impl Iterator<Item = Pubkey>) {
+        match &mut self.index {
+            IndexImplementation::V1 { entries, .. } => {
+                for k in keys {
+                    entries.remove(&k);
+                }
+            }
+        }
+    }
+
+    /// This function removes the given entry for the given program from the cache.
+    /// The function expects that the program and entry exists in the cache. Otherwise it'll panic.
+    fn unload_program_entry(
+        &mut self,
+        id: Pubkey,
+        _last_modification_slot: Slot,
+        remove_entry: &Arc<ProgramCacheEntry>,
+    ) {
+        match &mut self.index {
+            IndexImplementation::V1 { entries, .. } => {
+                let second_level = entries.get_mut(&id).expect("Cache lookup failed");
+                let candidate = second_level
+                    .iter_mut()
+                    .find(|entry| entry == &remove_entry)
+                    .expect("Program entry not found");
+
+                // Certain entry types cannot be unloaded, such as tombstones, or already unloaded entries.
+                // For such entries, `to_unloaded()` will return None.
+                // These entry types do not occupy much memory.
+                if let Some(unloaded) = candidate.to_unloaded() {
+                    if candidate.stats.uses.load(Ordering::Relaxed) == 1 {
+                        self.stats.one_hit_wonders.fetch_add(1, Ordering::Relaxed);
+                    }
+                    self.stats
+                        .evictions
+                        .entry(id)
+                        .and_modify(|c| *c = c.saturating_add(1))
+                        .or_insert(1);
+                    *candidate = Arc::new(unloaded);
+                }
+            }
+        }
+    }
+
+    fn remove_programs_with_no_entries(&mut self) {
+        match &mut self.index {
+            IndexImplementation::V1 { entries, .. } => {
+                let num_programs_before_removal = entries.len();
+                entries.retain(|_key, second_level| !second_level.is_empty());
+                if entries.len() < num_programs_before_removal {
+                    self.stats.empty_entries.fetch_add(
+                        num_programs_before_removal.saturating_sub(entries.len()) as u64,
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "frozen-abi")]
+impl solana_frozen_abi::abi_example::AbiExample for ProgramCacheEntry {
+    fn example() -> Self {
+        // ProgramCacheEntry isn't serializable by definition.
+        Self::default()
+    }
+}
+
+#[cfg(feature = "frozen-abi")]
+impl<FG: ForkGraph> solana_frozen_abi::abi_example::AbiExample for ProgramCache<FG> {
+    fn example() -> Self {
+        // ProgramCache isn't serializable by definition.
+        Self::new(Slot::default())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use {
+        crate::{
+            loaded_programs::{
+                BlockRelation, ForkGraph, ProgramCache, ProgramCacheForTxBatch,
+                ProgramCacheMatchCriteria, ProgramRuntimeEnvironment, ProgramToLoad,
+                get_mock_program_runtime_environment,
+            },
+            program_cache_entry::{
+                DELAY_VISIBILITY_SLOT_OFFSET, ProgramCacheEntry, ProgramCacheEntryOwner,
+                ProgramCacheEntryType,
+            },
+            program_metrics::ProgramStatistics,
+        },
+        assert_matches::assert_matches,
+        percentage::Percentage,
+        solana_clock::Slot,
+        solana_pubkey::Pubkey,
+        solana_sbpf::{elf::Executable, program::BuiltinProgram},
+        solana_svm_type_overrides::sync::{
+            Arc, RwLock,
+            atomic::{AtomicU64, Ordering},
+        },
+        std::{fs::File, io::Read, ops::ControlFlow},
+        test_case::{test_case, test_matrix},
+    };
+
+    fn new_test_entry(deployment_slot: Slot, effective_slot: Slot) -> Arc<ProgramCacheEntry> {
+        new_test_entry_with_usage(
+            deployment_slot,
+            effective_slot,
+            ProgramStatistics::default(),
+        )
+    }
+
+    fn new_loaded_entry(env: ProgramRuntimeEnvironment) -> ProgramCacheEntryType {
+        let mut elf = Vec::new();
+        File::open("../programs/bpf_loader/test_elfs/out/noop_aligned.so")
+            .unwrap()
+            .read_to_end(&mut elf)
+            .unwrap();
+        let executable = Executable::load(&elf, Arc::clone(&*env)).unwrap();
+        ProgramCacheEntryType::Loaded(executable)
+    }
+
+    pub(crate) fn new_test_entry_with_usage(
+        deployment_slot: Slot,
+        effective_slot: Slot,
+        stats: ProgramStatistics,
+    ) -> Arc<ProgramCacheEntry> {
+        Arc::new(ProgramCacheEntry {
+            program: new_loaded_entry(get_mock_program_runtime_environment()),
+            account_owner: ProgramCacheEntryOwner::LoaderV2,
+            account_size: 0,
+            deployment_slot,
+            effective_slot,
+            stats: Arc::new(stats),
+            latest_access_slot: AtomicU64::new(deployment_slot),
+        })
+    }
+
+    fn new_test_builtin_entry(
+        deployment_slot: Slot,
+        effective_slot: Slot,
+    ) -> Arc<ProgramCacheEntry> {
+        Arc::new(ProgramCacheEntry {
+            program: ProgramCacheEntryType::Builtin(BuiltinProgram::new_mock()),
+            account_owner: ProgramCacheEntryOwner::NativeLoader,
+            account_size: 0,
+            deployment_slot,
+            effective_slot,
+            stats: Arc::default(),
+            latest_access_slot: AtomicU64::default(),
+        })
+    }
+
+    fn set_tombstone<FG: ForkGraph>(
+        cache: &mut ProgramCache<FG>,
+        key: Pubkey,
+        current_slot: Slot,
+        reason: ProgramCacheEntryType,
+    ) -> Arc<ProgramCacheEntry> {
+        let env = get_mock_program_runtime_environment();
+        let program = Arc::new(ProgramCacheEntry::new_tombstone(
+            current_slot,
+            ProgramCacheEntryOwner::LoaderV2,
+            reason,
+        ));
+        cache.assign_program(&env, key, current_slot, program.clone());
+        program
+    }
+
+    fn insert_unloaded_entry<FG: ForkGraph>(
+        cache: &mut ProgramCache<FG>,
+        key: Pubkey,
+        current_slot: Slot,
+    ) -> Arc<ProgramCacheEntry> {
+        let env = get_mock_program_runtime_environment();
+        let loaded = new_test_entry_with_usage(
+            current_slot,
+            current_slot.saturating_add(1),
+            ProgramStatistics::default(),
+        );
+        let unloaded = Arc::new(loaded.to_unloaded().expect("Failed to unload the program"));
+        cache.assign_program(&env, key, current_slot, unloaded.clone());
+        unloaded
+    }
+
+    fn num_matching_entries<P, FG>(cache: &ProgramCache<FG>, predicate: P) -> usize
+    where
+        P: Fn(&ProgramCacheEntryType) -> bool,
+        FG: ForkGraph,
+    {
+        cache
+            .get_flattened_entries_for_tests()
+            .iter()
+            .filter(|(_key, program)| predicate(&program.program))
+            .count()
+    }
+
+    fn program_deploy_test_helper(
+        cache: &mut ProgramCache<TestForkGraph>,
+        program: Pubkey,
+        deployment_slots: Vec<Slot>,
+        usage_counters: Vec<u64>,
+        programs: &mut Vec<(Pubkey, Slot, u64)>,
+    ) {
+        let env = get_mock_program_runtime_environment();
+        // Add multiple entries for program
+        deployment_slots
+            .iter()
+            .enumerate()
+            .for_each(|(i, deployment_slot)| {
+                let usage_counter = *usage_counters.get(i).unwrap_or(&0);
+                let stats = ProgramStatistics {
+                    uses: usage_counter.into(),
+                    ..Default::default()
+                };
+                cache.assign_program(
+                    &env,
+                    program,
+                    *deployment_slot,
+                    new_test_entry_with_usage(
+                        *deployment_slot,
+                        (*deployment_slot).saturating_add(2),
+                        stats,
+                    ),
+                );
+                programs.push((program, *deployment_slot, usage_counter));
+            });
+
+        // Add tombstones entries for program
+        let env = ProgramRuntimeEnvironment::from(BuiltinProgram::new_mock());
+        for slot in 21..31 {
+            set_tombstone(
+                cache,
+                program,
+                slot,
+                ProgramCacheEntryType::FailedVerification(env.clone()),
+            );
+        }
+
+        // Add unloaded entries for program
+        for slot in 31..41 {
+            insert_unloaded_entry(cache, program, slot);
+        }
+    }
+
+    #[test]
+    fn test_random_eviction() {
+        let mut programs = vec![];
+        let mut cache = ProgramCache::<TestForkGraph>::new(0);
+
+        // This test adds different kind of entries to the cache.
+        // Tombstones and unloaded entries are expected to not be evicted.
+        // It also adds multiple entries for three programs as it tries to create a typical cache instance.
+
+        // Program 1
+        program_deploy_test_helper(
+            &mut cache,
+            Pubkey::new_unique(),
+            vec![0, 10, 20],
+            vec![4, 5, 25],
+            &mut programs,
+        );
+
+        // Program 2
+        program_deploy_test_helper(
+            &mut cache,
+            Pubkey::new_unique(),
+            vec![5, 11],
+            vec![0, 2],
+            &mut programs,
+        );
+
+        // Program 3
+        program_deploy_test_helper(
+            &mut cache,
+            Pubkey::new_unique(),
+            vec![0, 5, 15],
+            vec![100, 3, 20],
+            &mut programs,
+        );
+
+        // 1 for each deployment slot
+        let num_loaded_expected = 8;
+        // 10 for each program
+        let num_unloaded_expected = 30;
+        // 10 for each program
+        let num_tombstones_expected = 30;
+
+        // Count the number of loaded, unloaded and tombstone entries.
+        programs.sort_by_key(|(_id, _slot, usage_count)| *usage_count);
+        let num_loaded = num_matching_entries(&cache, |program_type| {
+            matches!(program_type, ProgramCacheEntryType::Loaded(_))
+        });
+        let num_unloaded = num_matching_entries(&cache, |program_type| {
+            matches!(program_type, ProgramCacheEntryType::Unloaded(_))
+        });
+        let num_tombstones = num_matching_entries(&cache, |program_type| {
+            matches!(
+                program_type,
+                ProgramCacheEntryType::DelayVisibility
+                    | ProgramCacheEntryType::FailedVerification(_)
+                    | ProgramCacheEntryType::Closed
+            )
+        });
+
+        // Test that the cache is constructed with the expected number of entries.
+        assert_eq!(num_loaded, num_loaded_expected);
+        assert_eq!(num_unloaded, num_unloaded_expected);
+        assert_eq!(num_tombstones, num_tombstones_expected);
+
+        // Evict entries from the cache
+        let eviction_pct = 1;
+
+        let num_loaded_expected =
+            Percentage::from(eviction_pct).apply_to(crate::loaded_programs::MAX_LOADED_ENTRY_COUNT);
+        let num_unloaded_expected = num_unloaded_expected + num_loaded - num_loaded_expected;
+        cache.evict_using_random_selection(Percentage::from(eviction_pct), 21);
+
+        // Count the number of loaded, unloaded and tombstone entries.
+        let num_loaded = num_matching_entries(&cache, |program_type| {
+            matches!(program_type, ProgramCacheEntryType::Loaded(_))
+        });
+        let num_unloaded = num_matching_entries(&cache, |program_type| {
+            matches!(program_type, ProgramCacheEntryType::Unloaded(_))
+        });
+        let num_tombstones = num_matching_entries(&cache, |program_type| {
+            matches!(program_type, ProgramCacheEntryType::FailedVerification(_))
+        });
+
+        // However many entries are left after the shrink
+        assert_eq!(num_loaded, num_loaded_expected);
+        // The original unloaded entries + the evicted loaded entries
+        assert_eq!(num_unloaded, num_unloaded_expected);
+        // The original tombstones are not evicted
+        assert_eq!(num_tombstones, num_tombstones_expected);
+    }
+
+    #[test]
+    fn test_eviction() {
+        let mut programs = vec![];
+        let mut cache = ProgramCache::<TestForkGraph>::new(0);
+
+        // Program 1
+        program_deploy_test_helper(
+            &mut cache,
+            Pubkey::new_unique(),
+            vec![0, 10, 20],
+            vec![4, 5, 25],
+            &mut programs,
+        );
+
+        // Program 2
+        program_deploy_test_helper(
+            &mut cache,
+            Pubkey::new_unique(),
+            vec![5, 11],
+            vec![0, 2],
+            &mut programs,
+        );
+
+        // Program 3
+        program_deploy_test_helper(
+            &mut cache,
+            Pubkey::new_unique(),
+            vec![0, 5, 15],
+            vec![100, 3, 20],
+            &mut programs,
+        );
+
+        // 1 for each deployment slot
+        let num_loaded_expected = 8;
+        // 10 for each program
+        let num_unloaded_expected = 30;
+        // 10 for each program
+        let num_tombstones_expected = 30;
+
+        // Count the number of loaded, unloaded and tombstone entries.
+        programs.sort_by_key(|(_id, _slot, usage_count)| *usage_count);
+        let num_loaded = num_matching_entries(&cache, |program_type| {
+            matches!(program_type, ProgramCacheEntryType::Loaded(_))
+        });
+        let num_unloaded = num_matching_entries(&cache, |program_type| {
+            matches!(program_type, ProgramCacheEntryType::Unloaded(_))
+        });
+        let num_tombstones = num_matching_entries(&cache, |program_type| {
+            matches!(program_type, ProgramCacheEntryType::FailedVerification(_))
+        });
+
+        // Test that the cache is constructed with the expected number of entries.
+        assert_eq!(num_loaded, num_loaded_expected);
+        assert_eq!(num_unloaded, num_unloaded_expected);
+        assert_eq!(num_tombstones, num_tombstones_expected);
+
+        // Evict entries from the cache
+        let eviction_pct = 1;
+
+        let num_loaded_expected =
+            Percentage::from(eviction_pct).apply_to(crate::loaded_programs::MAX_LOADED_ENTRY_COUNT);
+        let num_unloaded_expected = num_unloaded_expected + num_loaded - num_loaded_expected;
+
+        cache.sort_and_unload(Percentage::from(eviction_pct));
+
+        // Check that every program is still in the cache.
+        let entries = cache.get_flattened_entries_for_tests();
+        programs.iter().for_each(|entry| {
+            assert!(entries.iter().any(|(key, _entry)| key == &entry.0));
+        });
+
+        let unloaded = entries
+            .iter()
+            .filter_map(|(key, program)| {
+                matches!(program.program, ProgramCacheEntryType::Unloaded(_))
+                    .then_some((*key, program.stats.uses.load(Ordering::Relaxed)))
+            })
+            .collect::<Vec<(Pubkey, u64)>>();
+
+        for index in 0..3 {
+            let expected = programs.get(index).expect("Missing program");
+            assert!(unloaded.contains(&(expected.0, expected.2)));
+        }
+
+        // Count the number of loaded, unloaded and tombstone entries.
+        let num_loaded = num_matching_entries(&cache, |program_type| {
+            matches!(program_type, ProgramCacheEntryType::Loaded(_))
+        });
+        let num_unloaded = num_matching_entries(&cache, |program_type| {
+            matches!(program_type, ProgramCacheEntryType::Unloaded(_))
+        });
+        let num_tombstones = num_matching_entries(&cache, |program_type| {
+            matches!(
+                program_type,
+                ProgramCacheEntryType::DelayVisibility
+                    | ProgramCacheEntryType::FailedVerification(_)
+                    | ProgramCacheEntryType::Closed
+            )
+        });
+
+        // However many entries are left after the shrink
+        assert_eq!(num_loaded, num_loaded_expected);
+        // The original unloaded entries + the evicted loaded entries
+        assert_eq!(num_unloaded, num_unloaded_expected);
+        // The original tombstones are not evicted
+        assert_eq!(num_tombstones, num_tombstones_expected);
+    }
+
+    #[test]
+    fn test_usage_count_of_unloaded_program() {
+        let mut cache = ProgramCache::<TestForkGraph>::new(0);
+        let env = get_mock_program_runtime_environment();
+
+        let program = Pubkey::new_unique();
+        let evict_to_pct = 2;
+        let cache_capacity_after_shrink =
+            Percentage::from(evict_to_pct).apply_to(crate::loaded_programs::MAX_LOADED_ENTRY_COUNT);
+        // Add enough programs to the cache to trigger 1 eviction after shrinking.
+        let num_total_programs = (cache_capacity_after_shrink + 1) as u64;
+        (0..num_total_programs).for_each(|i| {
+            let stats = ProgramStatistics {
+                uses: (i + 10).into(),
+                ..Default::default()
+            };
+            let entry = new_test_entry_with_usage(i, i + 2, stats);
+            cache.assign_program(&env, program, i, entry);
+        });
+
+        cache.sort_and_unload(Percentage::from(evict_to_pct));
+
+        let num_unloaded = num_matching_entries(&cache, |program_type| {
+            matches!(program_type, ProgramCacheEntryType::Unloaded(_))
+        });
+        assert_eq!(num_unloaded, 1);
+
+        cache
+            .get_flattened_entries_for_tests()
+            .iter()
+            .for_each(|(_key, program)| {
+                if matches!(program.program, ProgramCacheEntryType::Unloaded(_)) {
+                    // Test that the usage counter is retained for the unloaded program
+                    assert_eq!(program.stats.uses.load(Ordering::Relaxed), 10);
+                    assert_eq!(program.deployment_slot, 0);
+                    assert_eq!(program.effective_slot, 2);
+                }
+            });
+
+        // Replenish the program that was just unloaded. Use 0 as the usage counter. This should be
+        // updated with the usage counter from the unloaded program.
+        cache.assign_program(
+            &env,
+            program,
+            0,
+            new_test_entry_with_usage(0, 2, ProgramStatistics::default()),
+        );
+
+        cache
+            .get_flattened_entries_for_tests()
+            .iter()
+            .for_each(|(_key, program)| {
+                if matches!(program.program, ProgramCacheEntryType::Unloaded(_))
+                    && program.deployment_slot == 0
+                    && program.effective_slot == 2
+                {
+                    // Test that the usage counter was correctly updated.
+                    assert_eq!(program.stats.uses.load(Ordering::Relaxed), 10);
+                }
+            });
+    }
+
+    #[test]
+    fn test_fuzz_assign_program_order() {
+        use rand::prelude::SliceRandom;
+        const EXPECTED_ENTRIES: [(u64, u64); 7] =
+            [(1, 2), (5, 5), (5, 6), (5, 10), (9, 10), (10, 10), (3, 12)];
+        let mut rng = rand::rng();
+        let program_id = Pubkey::new_unique();
+        let env = get_mock_program_runtime_environment();
+        for _ in 0..1000 {
+            let mut entries = EXPECTED_ENTRIES.to_vec();
+            entries.shuffle(&mut rng);
+            let mut cache = ProgramCache::<TestForkGraph>::new(0);
+            for (deployment_slot, effective_slot) in entries {
+                let entry = Arc::new(ProgramCacheEntry {
+                    program: new_loaded_entry(ProgramRuntimeEnvironment::from(
+                        BuiltinProgram::new_mock(),
+                    )), // Assign them different environments
+                    account_owner: ProgramCacheEntryOwner::LoaderV2,
+                    account_size: 0,
+                    deployment_slot,
+                    effective_slot,
+                    stats: Arc::default(),
+                    latest_access_slot: AtomicU64::new(deployment_slot),
+                });
+                assert!(!cache.assign_program(&env, program_id, deployment_slot, entry));
+            }
+            for ((deployment_slot, effective_slot), entry) in EXPECTED_ENTRIES
+                .iter()
+                .zip(cache.get_slot_versions_for_tests(&program_id).iter())
+            {
+                assert_eq!(entry.deployment_slot, *deployment_slot);
+                assert_eq!(entry.effective_slot, *effective_slot);
+            }
+        }
+    }
+
+    #[test_matrix(
+        (
+            ProgramCacheEntryType::Closed,
+            ProgramCacheEntryType::FailedVerification(get_mock_program_runtime_environment()),
+            new_loaded_entry(get_mock_program_runtime_environment()),
+        ),
+        (
+            ProgramCacheEntryType::FailedVerification(get_mock_program_runtime_environment()),
+            ProgramCacheEntryType::Closed,
+            ProgramCacheEntryType::Unloaded(get_mock_program_runtime_environment()),
+            new_loaded_entry(get_mock_program_runtime_environment()),
+            ProgramCacheEntryType::Builtin(BuiltinProgram::new_mock()),
+        )
+    )]
+    #[test_matrix(
+        (
+            ProgramCacheEntryType::Unloaded(get_mock_program_runtime_environment()),
+        ),
+        (
+            ProgramCacheEntryType::FailedVerification(get_mock_program_runtime_environment()),
+            ProgramCacheEntryType::Closed,
+            ProgramCacheEntryType::Unloaded(get_mock_program_runtime_environment()),
+            ProgramCacheEntryType::Builtin(BuiltinProgram::new_mock()),
+        )
+    )]
+    #[test_matrix(
+        (ProgramCacheEntryType::Builtin(BuiltinProgram::new_mock()),),
+        (
+            ProgramCacheEntryType::FailedVerification(get_mock_program_runtime_environment()),
+            ProgramCacheEntryType::Closed,
+            ProgramCacheEntryType::Unloaded(get_mock_program_runtime_environment()),
+            new_loaded_entry(get_mock_program_runtime_environment()),
+        )
+    )]
+    #[should_panic(expected = "Unexpected replacement of an entry")]
+    fn test_assign_program_failure(old: ProgramCacheEntryType, new: ProgramCacheEntryType) {
+        let mut cache = ProgramCache::<TestForkGraph>::new(0);
+        let env = get_mock_program_runtime_environment();
+        let program_id = Pubkey::new_unique();
+        assert!(!cache.assign_program(
+            &env,
+            program_id,
+            10,
+            Arc::new(ProgramCacheEntry {
+                program: old,
+                account_owner: ProgramCacheEntryOwner::LoaderV2,
+                account_size: 0,
+                deployment_slot: 10,
+                effective_slot: 11,
+                stats: Arc::default(),
+                latest_access_slot: AtomicU64::default(),
+            }),
+        ));
+        cache.assign_program(
+            &env,
+            program_id,
+            10,
+            Arc::new(ProgramCacheEntry {
+                program: new,
+                account_owner: ProgramCacheEntryOwner::LoaderV2,
+                account_size: 0,
+                deployment_slot: 10,
+                effective_slot: 11,
+                stats: Arc::default(),
+                latest_access_slot: AtomicU64::default(),
+            }),
+        );
+    }
+
+    #[test_case(
+        ProgramCacheEntryType::Unloaded(ProgramRuntimeEnvironment::from(
+            BuiltinProgram::new_mock()
+        )),
+        new_loaded_entry(get_mock_program_runtime_environment())
+    )]
+    #[test_case(
+        ProgramCacheEntryType::Builtin(BuiltinProgram::new_mock()),
+        ProgramCacheEntryType::Builtin(BuiltinProgram::new_mock())
+    )]
+    fn test_assign_program_success(old: ProgramCacheEntryType, new: ProgramCacheEntryType) {
+        let mut cache = ProgramCache::<TestForkGraph>::new(0);
+        let env = get_mock_program_runtime_environment();
+        let program_id = Pubkey::new_unique();
+        assert!(!cache.assign_program(
+            &env,
+            program_id,
+            10,
+            Arc::new(ProgramCacheEntry {
+                program: old,
+                account_owner: ProgramCacheEntryOwner::LoaderV2,
+                account_size: 0,
+                deployment_slot: 10,
+                effective_slot: 11,
+                stats: Arc::default(),
+                latest_access_slot: AtomicU64::default(),
+            }),
+        ));
+        assert!(!cache.assign_program(
+            &env,
+            program_id,
+            10,
+            Arc::new(ProgramCacheEntry {
+                program: new,
+                account_owner: ProgramCacheEntryOwner::LoaderV2,
+                account_size: 0,
+                deployment_slot: 10,
+                effective_slot: 11,
+                stats: Arc::default(),
+                latest_access_slot: AtomicU64::default(),
+            }),
+        ));
+    }
+
+    #[test]
+    fn test_assign_program_removes_entries_in_same_slot() {
+        let mut cache = ProgramCache::<TestForkGraph>::new(0);
+        let env = get_mock_program_runtime_environment();
+        let program_id = Pubkey::new_unique();
+        let closed_other_slot = Arc::new(ProgramCacheEntry {
+            program: ProgramCacheEntryType::Closed,
+            account_owner: ProgramCacheEntryOwner::LoaderV2,
+            account_size: 0,
+            deployment_slot: 9,
+            effective_slot: 9,
+            stats: Arc::default(),
+            latest_access_slot: AtomicU64::default(),
+        });
+        let closed_current_slot = Arc::new(ProgramCacheEntry {
+            program: ProgramCacheEntryType::Closed,
+            account_owner: ProgramCacheEntryOwner::LoaderV2,
+            account_size: 0,
+            deployment_slot: 10,
+            effective_slot: 10,
+            stats: Arc::default(),
+            latest_access_slot: AtomicU64::default(),
+        });
+        let loaded_entry_current_env = Arc::new(ProgramCacheEntry {
+            program: ProgramCacheEntryType::Unloaded(get_mock_program_runtime_environment()),
+            account_owner: ProgramCacheEntryOwner::LoaderV2,
+            account_size: 0,
+            deployment_slot: 10,
+            effective_slot: 11,
+            stats: Arc::default(),
+            latest_access_slot: AtomicU64::default(),
+        });
+        let loaded_entry_upcoming_env = Arc::new(ProgramCacheEntry {
+            program: ProgramCacheEntryType::Unloaded(ProgramRuntimeEnvironment::from(
+                BuiltinProgram::new_mock(),
+            )),
+            account_owner: ProgramCacheEntryOwner::LoaderV2,
+            account_size: 0,
+            deployment_slot: 10,
+            effective_slot: 11,
+            stats: Arc::default(),
+            latest_access_slot: AtomicU64::default(),
+        });
+        assert!(!cache.assign_program(&env, program_id, 9, closed_other_slot.clone()));
+        assert!(!cache.assign_program(&env, program_id, 10, closed_current_slot));
+        assert!(!cache.assign_program(&env, program_id, 10, loaded_entry_upcoming_env.clone()));
+        assert!(!cache.assign_program(&env, program_id, 10, loaded_entry_current_env.clone()));
+        // Only the conflicting entry in the same slot which does not have a different environment is removed
+        assert_eq!(
+            cache.get_slot_versions_for_tests(&program_id),
+            &[
+                closed_other_slot,
+                loaded_entry_current_env,
+                loaded_entry_upcoming_env
+            ]
+        );
+    }
+
+    #[test]
+    fn test_tombstone() {
+        let env = get_mock_program_runtime_environment();
+        let tombstone = ProgramCacheEntry::new_tombstone(
+            0,
+            ProgramCacheEntryOwner::LoaderV2,
+            ProgramCacheEntryType::FailedVerification(env.clone()),
+        );
+        assert_matches!(
+            tombstone.program,
+            ProgramCacheEntryType::FailedVerification(_)
+        );
+        assert!(tombstone.is_tombstone());
+        assert_eq!(tombstone.deployment_slot, 0);
+        assert_eq!(tombstone.effective_slot, 0);
+
+        let tombstone = ProgramCacheEntry::new_tombstone(
+            100,
+            ProgramCacheEntryOwner::LoaderV2,
+            ProgramCacheEntryType::Closed,
+        );
+        assert_matches!(tombstone.program, ProgramCacheEntryType::Closed);
+        assert!(tombstone.is_tombstone());
+        assert_eq!(tombstone.deployment_slot, 100);
+        assert_eq!(tombstone.effective_slot, 100);
+
+        let mut cache = ProgramCache::<TestForkGraph>::new(0);
+        let program1 = Pubkey::new_unique();
+        let tombstone = set_tombstone(
+            &mut cache,
+            program1,
+            10,
+            ProgramCacheEntryType::FailedVerification(env.clone()),
+        );
+        let slot_versions = cache.get_slot_versions_for_tests(&program1);
+        assert_eq!(slot_versions.len(), 1);
+        assert!(slot_versions.first().unwrap().is_tombstone());
+        assert_eq!(tombstone.deployment_slot, 10);
+        assert_eq!(tombstone.effective_slot, 10);
+
+        // Add a program at slot 50, and a tombstone for the program at slot 60
+        let program2 = Pubkey::new_unique();
+        cache.assign_program(&env, program2, 50, new_test_builtin_entry(50, 51));
+        let slot_versions = cache.get_slot_versions_for_tests(&program2);
+        assert_eq!(slot_versions.len(), 1);
+        assert!(!slot_versions.first().unwrap().is_tombstone());
+
+        let tombstone = set_tombstone(
+            &mut cache,
+            program2,
+            60,
+            ProgramCacheEntryType::FailedVerification(env),
+        );
+        let slot_versions = cache.get_slot_versions_for_tests(&program2);
+        assert_eq!(slot_versions.len(), 2);
+        assert!(!slot_versions.first().unwrap().is_tombstone());
+        assert!(slot_versions.get(1).unwrap().is_tombstone());
+        assert!(tombstone.is_tombstone());
+        assert_eq!(tombstone.deployment_slot, 60);
+        assert_eq!(tombstone.effective_slot, 60);
+    }
+
+    struct TestForkGraph {
+        relation: BlockRelation,
+    }
+    impl ForkGraph for TestForkGraph {
+        fn relationship(&self, _a: Slot, _b: Slot) -> BlockRelation {
+            self.relation
+        }
+    }
+
+    #[test]
+    fn test_prune_empty() {
+        let mut cache = ProgramCache::<TestForkGraph>::new(0);
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {
+            relation: BlockRelation::Unrelated,
+        }));
+
+        cache.set_fork_graph(Arc::downgrade(&fork_graph));
+
+        cache.prune(0, None, &fork_graph.read().unwrap());
+        assert!(cache.get_flattened_entries_for_tests().is_empty());
+
+        cache.prune(10, None, &fork_graph.read().unwrap());
+        assert!(cache.get_flattened_entries_for_tests().is_empty());
+
+        let mut cache = ProgramCache::<TestForkGraph>::new(0);
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {
+            relation: BlockRelation::Ancestor,
+        }));
+
+        cache.set_fork_graph(Arc::downgrade(&fork_graph));
+
+        cache.prune(0, None, &fork_graph.read().unwrap());
+        assert!(cache.get_flattened_entries_for_tests().is_empty());
+
+        cache.prune(10, None, &fork_graph.read().unwrap());
+        assert!(cache.get_flattened_entries_for_tests().is_empty());
+
+        let mut cache = ProgramCache::<TestForkGraph>::new(0);
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {
+            relation: BlockRelation::Descendant,
+        }));
+
+        cache.set_fork_graph(Arc::downgrade(&fork_graph));
+
+        cache.prune(0, None, &fork_graph.read().unwrap());
+        assert!(cache.get_flattened_entries_for_tests().is_empty());
+
+        cache.prune(10, None, &fork_graph.read().unwrap());
+        assert!(cache.get_flattened_entries_for_tests().is_empty());
+
+        let mut cache = ProgramCache::<TestForkGraph>::new(0);
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {
+            relation: BlockRelation::Unknown,
+        }));
+        cache.set_fork_graph(Arc::downgrade(&fork_graph));
+
+        cache.prune(0, None, &fork_graph.read().unwrap());
+        assert!(cache.get_flattened_entries_for_tests().is_empty());
+
+        cache.prune(10, None, &fork_graph.read().unwrap());
+        assert!(cache.get_flattened_entries_for_tests().is_empty());
+    }
+
+    #[test]
+    fn test_prune_different_env() {
+        let mut cache = ProgramCache::<TestForkGraph>::new(0);
+        let env = get_mock_program_runtime_environment();
+
+        let fork_graph = Arc::new(RwLock::new(TestForkGraph {
+            relation: BlockRelation::Ancestor,
+        }));
+
+        cache.set_fork_graph(Arc::downgrade(&fork_graph));
+
+        let program1 = Pubkey::new_unique();
+        cache.assign_program(&env, program1, 10, new_test_entry(10, 10));
+        let new_env = ProgramRuntimeEnvironment::from(BuiltinProgram::new_mock());
+        let upcoming_environment = Some(new_env.clone());
+        let updated_program = Arc::new(ProgramCacheEntry {
+            program: new_loaded_entry(new_env.clone()),
+            deployment_slot: 20,
+            effective_slot: 20,
+            ..Default::default()
+        });
+        cache.assign_program(
+            &env,
+            program1,
+            updated_program.deployment_slot,
+            updated_program.clone(),
+        );
+
+        // Test that there are 2 entries for the program
+        assert_eq!(cache.get_slot_versions_for_tests(&program1).len(), 2);
+
+        cache.prune(21, None, &fork_graph.read().unwrap());
+
+        // Test that prune didn't remove the entry, since environments are different.
+        assert_eq!(cache.get_slot_versions_for_tests(&program1).len(), 2);
+
+        cache.prune(22, upcoming_environment, &fork_graph.read().unwrap());
+
+        // Test that prune removed 1 entry, since epoch changed
+        assert_eq!(cache.get_slot_versions_for_tests(&program1).len(), 1);
+
+        let entry = cache
+            .get_slot_versions_for_tests(&program1)
+            .first()
+            .expect("Failed to get the program")
+            .clone();
+        // Test that the correct entry remains in the cache
+        assert_eq!(entry, updated_program);
+    }
+
+    #[derive(Default)]
+    struct TestForkGraphSpecific {
+        forks: Vec<Vec<Slot>>,
+    }
+
+    impl TestForkGraphSpecific {
+        fn insert_fork(&mut self, fork: &[Slot]) {
+            let mut fork = fork.to_vec();
+            fork.sort();
+            self.forks.push(fork)
+        }
+    }
+
+    impl ForkGraph for TestForkGraphSpecific {
+        fn relationship(&self, a: Slot, b: Slot) -> BlockRelation {
+            match self.forks.iter().try_for_each(|fork| {
+                let relation = fork
+                    .iter()
+                    .position(|x| *x == a)
+                    .and_then(|a_pos| {
+                        fork.iter().position(|x| *x == b).and_then(|b_pos| {
+                            (a_pos == b_pos)
+                                .then_some(BlockRelation::Equal)
+                                .or_else(|| (a_pos < b_pos).then_some(BlockRelation::Ancestor))
+                                .or(Some(BlockRelation::Descendant))
+                        })
+                    })
+                    .unwrap_or(BlockRelation::Unrelated);
+
+                if relation != BlockRelation::Unrelated {
+                    return ControlFlow::Break(relation);
+                }
+
+                ControlFlow::Continue(())
+            }) {
+                ControlFlow::Break(relation) => relation,
+                _ => BlockRelation::Unrelated,
+            }
+        }
+    }
+
+    fn get_entries_to_load<'a>(
+        cache: &ProgramCache<TestForkGraphSpecific>,
+        loading_slot: Slot,
+        keys: &'a [Pubkey],
+    ) -> Vec<ProgramToLoad<'a>> {
+        let fork_graph = cache.fork_graph.as_ref().unwrap().upgrade().unwrap();
+        let locked_fork_graph = fork_graph.read().unwrap();
+        let entries = cache.get_flattened_entries_for_tests();
+        keys.iter()
+            .filter_map(|key| {
+                entries
+                    .iter()
+                    .rev()
+                    .find(|(program_id, entry)| {
+                        program_id == key
+                            && matches!(
+                                locked_fork_graph.relationship(entry.deployment_slot, loading_slot),
+                                BlockRelation::Equal | BlockRelation::Ancestor,
+                            )
+                    })
+                    .map(|(_program_id, entry)| ProgramToLoad {
+                        program_id: key,
+                        loader: entry.account_owner,
+                        match_criteria: ProgramCacheMatchCriteria::NoCriteria,
+                        last_modification_slot: entry.deployment_slot,
+                    })
+            })
+            .collect()
+    }
+
+    fn match_slot(
+        extracted: &ProgramCacheForTxBatch,
+        program: &Pubkey,
+        deployment_slot: Slot,
+        working_slot: Slot,
+    ) -> bool {
+        assert_eq!(extracted.slot, working_slot);
+        extracted
+            .entries
+            .get(program)
+            .map(|entry| entry.deployment_slot == deployment_slot)
+            .unwrap_or(false)
+    }
+
+    fn match_missing(
+        missing: &[ProgramToLoad],
+        program_id: &Pubkey,
+        expected_result: bool,
+    ) -> bool {
+        missing.iter().any(|entry| entry.program_id == program_id) == expected_result
+    }
+
+    #[test]
+    fn test_fork_extract_and_prune() {
+        let mut cache = ProgramCache::<TestForkGraphSpecific>::new(0);
+        let env = get_mock_program_runtime_environment();
+
+        // Fork graph created for the test
+        //                   0
+        //                 /   \
+        //                10    5
+        //                |     |
+        //                20    11
+        //                |     | \
+        //                22   15  25
+        //                      |   |
+        //                     16  27
+        //                      |
+        //                     19
+        //                      |
+        //                     23
+
+        let mut fork_graph = TestForkGraphSpecific::default();
+        fork_graph.insert_fork(&[0, 10, 20, 22]);
+        fork_graph.insert_fork(&[0, 5, 11, 15, 16, 18, 19, 21, 23]);
+        fork_graph.insert_fork(&[0, 5, 11, 25, 27]);
+
+        let fork_graph = Arc::new(RwLock::new(fork_graph));
+        cache.set_fork_graph(Arc::downgrade(&fork_graph));
+
+        let program1 = Pubkey::new_unique();
+        cache.assign_program(&env, program1, 0, new_test_entry(0, 1));
+        cache.assign_program(&env, program1, 10, new_test_entry(10, 11));
+        cache.assign_program(&env, program1, 20, new_test_entry(20, 21));
+
+        let program2 = Pubkey::new_unique();
+        cache.assign_program(&env, program2, 5, new_test_entry(5, 6));
+        cache.assign_program(
+            &env,
+            program2,
+            11,
+            new_test_entry(11, 11 + DELAY_VISIBILITY_SLOT_OFFSET),
+        );
+
+        let program3 = Pubkey::new_unique();
+        cache.assign_program(&env, program3, 25, new_test_entry(25, 26));
+
+        let program4 = Pubkey::new_unique();
+        cache.assign_program(&env, program4, 0, new_test_entry(0, 1));
+        cache.assign_program(&env, program4, 5, new_test_entry(5, 6));
+        // The following is a special case, where effective slot is 3 slots in the future
+        cache.assign_program(
+            &env,
+            program4,
+            15,
+            new_test_entry(15, 15 + DELAY_VISIBILITY_SLOT_OFFSET),
+        );
+
+        // Current fork graph
+        //                   0
+        //                 /   \
+        //                10    5
+        //                |     |
+        //                20    11
+        //                |     | \
+        //                22   15  25
+        //                      |   |
+        //                     16  27
+        //                      |
+        //                     19
+        //                      |
+        //                     23
+
+        // Testing fork 0 - 10 - 20 - 22 with current slot at 22
+        let keys = &[program1, program2, program3, program4];
+        let mut missing = get_entries_to_load(&cache, 22, keys);
+        assert!(match_missing(&missing, &program2, false));
+        assert!(match_missing(&missing, &program3, false));
+        let mut extracted = ProgramCacheForTxBatch::new(22);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 20, 22));
+        assert!(match_slot(&extracted, &program4, 0, 22));
+
+        // Testing fork 0 - 5 - 11 - 15 - 16 with current slot at 15
+        let mut missing = get_entries_to_load(&cache, 15, keys);
+        assert!(match_missing(&missing, &program3, false));
+        let mut extracted = ProgramCacheForTxBatch::new(15);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 0, 15));
+        assert!(match_slot(&extracted, &program2, 11, 15));
+        // The effective slot of program4 deployed in slot 15 is 19. So it should not be usable in slot 16.
+        // A delay visibility tombstone should be returned here.
+        let tombstone = extracted
+            .find(&program4)
+            .expect("Failed to find the tombstone");
+        assert_matches!(tombstone.program, ProgramCacheEntryType::DelayVisibility);
+        assert_eq!(tombstone.deployment_slot, 15);
+
+        // Testing the same fork above, but current slot is now 18 (equal to effective slot of program4).
+        let mut missing = get_entries_to_load(&cache, 18, keys);
+        assert!(match_missing(&missing, &program3, false));
+        let mut extracted = ProgramCacheForTxBatch::new(18);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 0, 18));
+        assert!(match_slot(&extracted, &program2, 11, 18));
+        // The effective slot of program4 deployed in slot 15 is 18. So it should be usable in slot 18.
+        assert!(match_slot(&extracted, &program4, 15, 18));
+
+        // Testing the same fork above, but current slot is now 23 (future slot than effective slot of program4).
+        let mut missing = get_entries_to_load(&cache, 23, keys);
+        assert!(match_missing(&missing, &program3, false));
+        let mut extracted = ProgramCacheForTxBatch::new(23);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 0, 23));
+        assert!(match_slot(&extracted, &program2, 11, 23));
+        // The effective slot of program4 deployed in slot 15 is 19. So it should be usable in slot 23.
+        assert!(match_slot(&extracted, &program4, 15, 23));
+
+        // Testing fork 0 - 5 - 11 - 15 - 16 with current slot at 11
+        let mut missing = get_entries_to_load(&cache, 11, keys);
+        assert!(match_missing(&missing, &program3, false));
+        let mut extracted = ProgramCacheForTxBatch::new(11);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 0, 11));
+        // program2 was updated at slot 11, but is not effective till slot 12. The result should contain a tombstone.
+        let tombstone = extracted
+            .find(&program2)
+            .expect("Failed to find the tombstone");
+        assert_matches!(tombstone.program, ProgramCacheEntryType::DelayVisibility);
+        assert_eq!(tombstone.deployment_slot, 11);
+        assert!(match_slot(&extracted, &program4, 5, 11));
+
+        cache.prune(5, None, &fork_graph.read().unwrap());
+
+        // Fork graph after pruning
+        //                   0
+        //                   |
+        //                   5
+        //                   |
+        //                   11
+        //                   | \
+        //                  15  25
+        //                   |   |
+        //                  16  27
+        //                   |
+        //                  19
+        //                   |
+        //                  23
+
+        // Testing fork 11 - 15 - 16- 19 - 22 with root at 5 and current slot at 22
+        let mut missing = get_entries_to_load(&cache, 21, keys);
+        assert!(match_missing(&missing, &program3, false));
+        let mut extracted = ProgramCacheForTxBatch::new(21);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        // Since the fork was pruned, we should not find the entry deployed at slot 20.
+        assert!(match_slot(&extracted, &program1, 0, 21));
+        assert!(match_slot(&extracted, &program2, 11, 21));
+        assert!(match_slot(&extracted, &program4, 15, 21));
+
+        // Testing fork 0 - 5 - 11 - 25 - 27 with current slot at 27
+        let mut missing = get_entries_to_load(&cache, 27, keys);
+        let mut extracted = ProgramCacheForTxBatch::new(27);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 0, 27));
+        assert!(match_slot(&extracted, &program2, 11, 27));
+        assert!(match_slot(&extracted, &program3, 25, 27));
+        assert!(match_slot(&extracted, &program4, 5, 27));
+
+        cache.prune(15, None, &fork_graph.read().unwrap());
+
+        // Fork graph after pruning
+        //                  0
+        //                  |
+        //                  5
+        //                  |
+        //                  11
+        //                  |
+        //                  15
+        //                  |
+        //                  16
+        //                  |
+        //                  19
+        //                  |
+        //                  23
+
+        // Testing fork 16, 19, 23, with root at 15, current slot at 23
+        let mut missing = get_entries_to_load(&cache, 23, keys);
+        assert!(match_missing(&missing, &program3, false));
+        let mut extracted = ProgramCacheForTxBatch::new(23);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 0, 23));
+        assert!(match_slot(&extracted, &program2, 11, 23));
+        assert!(match_slot(&extracted, &program4, 15, 23));
+    }
+
+    #[test]
+    fn test_extract_using_deployment_slot() {
+        let mut cache = ProgramCache::<TestForkGraphSpecific>::new(0);
+        let env = get_mock_program_runtime_environment();
+
+        // Fork graph created for the test
+        //                   0
+        //                 /   \
+        //                10    5
+        //                |     |
+        //                20    11
+        //                |     | \
+        //                22   15  25
+        //                      |   |
+        //                     16  27
+        //                      |
+        //                     19
+        //                      |
+        //                     23
+
+        let mut fork_graph = TestForkGraphSpecific::default();
+        fork_graph.insert_fork(&[0, 10, 20, 22]);
+        fork_graph.insert_fork(&[0, 5, 11, 12, 15, 16, 18, 19, 21, 23]);
+        fork_graph.insert_fork(&[0, 5, 11, 25, 27]);
+
+        let fork_graph = Arc::new(RwLock::new(fork_graph));
+        cache.set_fork_graph(Arc::downgrade(&fork_graph));
+
+        let program1 = Pubkey::new_unique();
+        cache.assign_program(&env, program1, 0, new_test_entry(0, 1));
+        cache.assign_program(&env, program1, 20, new_test_entry(20, 21));
+
+        let program2 = Pubkey::new_unique();
+        cache.assign_program(&env, program2, 5, new_test_entry(5, 6));
+        cache.assign_program(&env, program2, 11, new_test_entry(11, 12));
+
+        let program3 = Pubkey::new_unique();
+        cache.assign_program(&env, program3, 25, new_test_entry(25, 26));
+
+        // Testing fork 0 - 5 - 11 - 15 - 16 - 19 - 21 - 23 with current slot at 19
+        let keys = &[program1, program2, program3];
+        let mut missing = get_entries_to_load(&cache, 12, keys);
+        assert!(match_missing(&missing, &program3, false));
+        let mut extracted = ProgramCacheForTxBatch::new(12);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 0, 12));
+        assert!(match_slot(&extracted, &program2, 11, 12));
+
+        // Test the same fork, but request the program modified at a later slot than what's in the cache.
+        let mut missing = get_entries_to_load(&cache, 12, keys);
+        missing.get_mut(0).unwrap().match_criteria =
+            ProgramCacheMatchCriteria::DeployedOnOrAfterSlot(5);
+        missing.get_mut(1).unwrap().match_criteria =
+            ProgramCacheMatchCriteria::DeployedOnOrAfterSlot(5);
+        assert!(match_missing(&missing, &program3, false));
+        let mut extracted = ProgramCacheForTxBatch::new(12);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_missing(&missing, &program1, true));
+        assert!(match_slot(&extracted, &program2, 11, 12));
+    }
+
+    #[test]
+    fn test_extract_unloaded() {
+        let mut cache = ProgramCache::<TestForkGraphSpecific>::new(0);
+        let env = get_mock_program_runtime_environment();
+
+        // Fork graph created for the test
+        //                   0
+        //                 /   \
+        //                10    5
+        //                |     |
+        //                20    11
+        //                |     | \
+        //                22   15  25
+        //                      |   |
+        //                     16  27
+        //                      |
+        //                     19
+        //                      |
+        //                     23
+
+        let mut fork_graph = TestForkGraphSpecific::default();
+        fork_graph.insert_fork(&[0, 10, 20, 22]);
+        fork_graph.insert_fork(&[0, 5, 11, 15, 16, 19, 21, 23]);
+        fork_graph.insert_fork(&[0, 5, 11, 25, 27]);
+
+        let fork_graph = Arc::new(RwLock::new(fork_graph));
+        cache.set_fork_graph(Arc::downgrade(&fork_graph));
+
+        let program1 = Pubkey::new_unique();
+        cache.assign_program(&env, program1, 0, new_test_entry(0, 1));
+        cache.assign_program(&env, program1, 20, new_test_entry(20, 21));
+
+        let program2 = Pubkey::new_unique();
+        cache.assign_program(&env, program2, 5, new_test_entry(5, 6));
+        cache.assign_program(&env, program2, 11, new_test_entry(11, 12));
+
+        let program3 = Pubkey::new_unique();
+        // Insert an unloaded program with correct/cache's environment at slot 25
+        let _ = insert_unloaded_entry(&mut cache, program3, 25);
+
+        // Insert another unloaded program with a different environment at slot 20
+        // Since this entry's environment won't match cache's environment, looking up this
+        // entry should return missing instead of unloaded entry.
+        cache.assign_program(
+            &env,
+            program3,
+            20,
+            Arc::new(
+                new_test_entry(20, 21)
+                    .to_unloaded()
+                    .expect("Failed to create unloaded program"),
+            ),
+        );
+
+        // Testing fork 0 - 5 - 11 - 15 - 16 - 19 - 21 - 23 with current slot at 19
+        let keys = &[program1, program2, program3];
+        let mut missing = get_entries_to_load(&cache, 19, keys);
+        assert!(match_missing(&missing, &program3, false));
+        let mut extracted = ProgramCacheForTxBatch::new(19);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 0, 19));
+        assert!(match_slot(&extracted, &program2, 11, 19));
+
+        // Testing fork 0 - 5 - 11 - 25 - 27 with current slot at 27
+        let mut missing = get_entries_to_load(&cache, 27, keys);
+        let mut extracted = ProgramCacheForTxBatch::new(27);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 0, 27));
+        assert!(match_slot(&extracted, &program2, 11, 27));
+        assert!(match_missing(&missing, &program3, true));
+
+        // Testing fork 0 - 10 - 20 - 22 with current slot at 22
+        let mut missing = get_entries_to_load(&cache, 22, keys);
+        assert!(match_missing(&missing, &program2, false));
+        let mut extracted = ProgramCacheForTxBatch::new(22);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 20, 22));
+        assert!(match_missing(&missing, &program3, true));
+    }
+
+    #[test]
+    fn test_extract_different_environment() {
+        let mut cache = ProgramCache::<TestForkGraphSpecific>::new(0);
+        let env = get_mock_program_runtime_environment();
+        let other_env = ProgramRuntimeEnvironment::from(BuiltinProgram::new_mock());
+
+        // Fork graph created for the test
+        //                0
+        //                |
+        //                10
+        //                |
+        //                20
+        //                |
+        //                22
+
+        let mut fork_graph = TestForkGraphSpecific::default();
+        fork_graph.insert_fork(&[0, 10, 20, 22]);
+
+        let fork_graph = Arc::new(RwLock::new(fork_graph));
+        cache.set_fork_graph(Arc::downgrade(&fork_graph));
+
+        let program1 = Pubkey::new_unique();
+        cache.assign_program(
+            &env,
+            program1,
+            10,
+            Arc::new(ProgramCacheEntry::new_tombstone(
+                10,
+                ProgramCacheEntryOwner::LoaderV3,
+                ProgramCacheEntryType::Closed,
+            )),
+        );
+        cache.assign_program(&env, program1, 20, new_test_entry(20, 21));
+
+        // Testing fork 0 - 10 - 20 - 22 with current slot at 22
+        let keys = &[program1];
+        let mut missing = get_entries_to_load(&cache, 22, keys);
+        let mut extracted = ProgramCacheForTxBatch::new(22);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 20, 22));
+
+        // Looking for a different environment
+        let mut missing = get_entries_to_load(&cache, 22, keys);
+        let mut extracted = ProgramCacheForTxBatch::new(22);
+        cache.extract(&mut missing, &mut extracted, &other_env, true, true);
+        assert!(match_missing(&missing, &program1, true));
+    }
+
+    #[test]
+    fn test_extract_nonexistent() {
+        let mut cache = ProgramCache::<TestForkGraphSpecific>::new(0);
+        let env = get_mock_program_runtime_environment();
+        let fork_graph = TestForkGraphSpecific::default();
+        let fork_graph = Arc::new(RwLock::new(fork_graph));
+        cache.set_fork_graph(Arc::downgrade(&fork_graph));
+
+        let program1 = Pubkey::new_unique();
+        let mut missing = vec![ProgramToLoad {
+            program_id: &program1,
+            loader: ProgramCacheEntryOwner::LoaderV3,
+            match_criteria: ProgramCacheMatchCriteria::NoCriteria,
+            last_modification_slot: 0,
+        }];
+        let mut extracted = ProgramCacheForTxBatch::new(0);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_missing(&missing, &program1, true));
+    }
+
+    #[test]
+    fn test_unloaded() {
+        let mut cache = ProgramCache::<TestForkGraph>::new(0);
+        let env = get_mock_program_runtime_environment();
+        for program_cache_entry_type in [
+            ProgramCacheEntryType::FailedVerification(get_mock_program_runtime_environment()),
+            ProgramCacheEntryType::Closed,
+            ProgramCacheEntryType::Unloaded(get_mock_program_runtime_environment()),
+            ProgramCacheEntryType::Builtin(BuiltinProgram::new_mock()),
+        ] {
+            let entry = Arc::new(ProgramCacheEntry {
+                program: program_cache_entry_type,
+                account_owner: ProgramCacheEntryOwner::LoaderV2,
+                account_size: 0,
+                deployment_slot: 0,
+                effective_slot: 0,
+                stats: Arc::default(),
+                latest_access_slot: AtomicU64::default(),
+            });
+            assert!(entry.to_unloaded().is_none());
+
+            // Check that unload_program_entry() does nothing for this entry
+            let program_id = Pubkey::new_unique();
+            cache.assign_program(&env, program_id, entry.deployment_slot, entry.clone());
+            cache.unload_program_entry(program_id, entry.deployment_slot, &entry);
+            assert_eq!(cache.get_slot_versions_for_tests(&program_id).len(), 1);
+            assert!(cache.stats.evictions.is_empty());
+        }
+
+        let stats = ProgramStatistics {
+            uses: 3.into(),
+            ..Default::default()
+        };
+        let entry = new_test_entry_with_usage(1, 2, stats);
+        let unloaded_entry = entry.to_unloaded().unwrap();
+        assert_eq!(unloaded_entry.deployment_slot, 1);
+        assert_eq!(unloaded_entry.effective_slot, 2);
+        assert_eq!(unloaded_entry.latest_access_slot.load(Ordering::Relaxed), 1);
+        assert_eq!(unloaded_entry.stats.uses.load(Ordering::Relaxed), 3);
+
+        // Check that unload_program_entry() does its work
+        let program_id = Pubkey::new_unique();
+        cache.assign_program(&env, program_id, entry.deployment_slot, entry.clone());
+        cache.unload_program_entry(program_id, entry.deployment_slot, &entry);
+        assert!(cache.stats.evictions.contains_key(&program_id));
+    }
+
+    #[test]
+    fn test_fork_prune_find_first_ancestor() {
+        let mut cache = ProgramCache::<TestForkGraphSpecific>::new(0);
+        let env = get_mock_program_runtime_environment();
+
+        // Fork graph created for the test
+        //                   0
+        //                 /   \
+        //                10    5
+        //                |
+        //                20
+
+        // Deploy program on slot 0, and slot 5.
+        // Prune the fork that has slot 5. The cache should still have the program
+        // deployed at slot 0.
+        let mut fork_graph = TestForkGraphSpecific::default();
+        fork_graph.insert_fork(&[0, 10, 20]);
+        fork_graph.insert_fork(&[0, 5]);
+        let fork_graph = Arc::new(RwLock::new(fork_graph));
+        cache.set_fork_graph(Arc::downgrade(&fork_graph));
+
+        let program1 = Pubkey::new_unique();
+        cache.assign_program(&env, program1, 0, new_test_entry(0, 1));
+        cache.assign_program(&env, program1, 5, new_test_entry(5, 6));
+
+        cache.prune(10, None, &fork_graph.read().unwrap());
+
+        let keys = &[program1];
+        let mut missing = get_entries_to_load(&cache, 20, keys);
+        let mut extracted = ProgramCacheForTxBatch::new(20);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+
+        // The cache should have the program deployed at slot 0
+        assert_eq!(
+            extracted
+                .find(&program1)
+                .expect("Did not find the program")
+                .deployment_slot,
+            0
+        );
+    }
+
+    #[test]
+    fn test_prune_by_deployment_slot() {
+        let mut cache = ProgramCache::<TestForkGraphSpecific>::new(0);
+        let env = get_mock_program_runtime_environment();
+
+        // Fork graph created for the test
+        //                   0
+        //                 /   \
+        //                10    5
+        //                |
+        //                20
+
+        // Deploy program on slot 0, and slot 5.
+        // Prune the fork that has slot 5. The cache should still have the program
+        // deployed at slot 0.
+        let mut fork_graph = TestForkGraphSpecific::default();
+        fork_graph.insert_fork(&[0, 10, 20]);
+        fork_graph.insert_fork(&[0, 5, 6]);
+        let fork_graph = Arc::new(RwLock::new(fork_graph));
+        cache.set_fork_graph(Arc::downgrade(&fork_graph));
+
+        let program1 = Pubkey::new_unique();
+        cache.assign_program(&env, program1, 0, new_test_entry(0, 1));
+        cache.assign_program(&env, program1, 5, new_test_entry(5, 6));
+
+        let program2 = Pubkey::new_unique();
+        cache.assign_program(&env, program2, 10, new_test_entry(10, 11));
+
+        let keys = &[program1, program2];
+        let mut missing = get_entries_to_load(&cache, 20, keys);
+        let mut extracted = ProgramCacheForTxBatch::new(20);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 0, 20));
+        assert!(match_slot(&extracted, &program2, 10, 20));
+
+        let mut missing = get_entries_to_load(&cache, 6, keys);
+        assert!(match_missing(&missing, &program2, false));
+        let mut extracted = ProgramCacheForTxBatch::new(6);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 5, 6));
+
+        // Pruning slot 5 will remove program1 entry deployed at slot 5.
+        // On fork chaining from slot 5, the entry deployed at slot 0 will become visible.
+        cache.prune_by_deployment_slot(5);
+
+        let mut missing = get_entries_to_load(&cache, 20, keys);
+        let mut extracted = ProgramCacheForTxBatch::new(20);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 0, 20));
+        assert!(match_slot(&extracted, &program2, 10, 20));
+
+        let mut missing = get_entries_to_load(&cache, 6, keys);
+        assert!(match_missing(&missing, &program2, false));
+        let mut extracted = ProgramCacheForTxBatch::new(6);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 0, 6));
+
+        // Pruning slot 10 will remove program2 entry deployed at slot 10.
+        // As there is no other entry for program2, extract() will return it as missing.
+        cache.prune_by_deployment_slot(10);
+
+        let mut missing = get_entries_to_load(&cache, 20, keys);
+        assert!(match_missing(&missing, &program2, false));
+        let mut extracted = ProgramCacheForTxBatch::new(20);
+        cache.extract(&mut missing, &mut extracted, &env, true, true);
+        assert!(match_slot(&extracted, &program1, 0, 20));
+    }
+
+    #[test]
+    fn test_usable_entries_for_slot() {
+        ProgramCache::<TestForkGraph>::new(0);
+        let tombstone = Arc::new(ProgramCacheEntry::new_tombstone(
+            0,
+            ProgramCacheEntryOwner::LoaderV2,
+            ProgramCacheEntryType::Closed,
+        ));
+
+        assert!(ProgramCache::<TestForkGraph>::matches_criteria(
+            &tombstone,
+            &ProgramCacheMatchCriteria::NoCriteria
+        ));
+
+        assert!(ProgramCache::<TestForkGraph>::matches_criteria(
+            &tombstone,
+            &ProgramCacheMatchCriteria::Tombstone
+        ));
+
+        assert!(ProgramCache::<TestForkGraph>::matches_criteria(
+            &tombstone,
+            &ProgramCacheMatchCriteria::DeployedOnOrAfterSlot(0)
+        ));
+
+        assert!(!ProgramCache::<TestForkGraph>::matches_criteria(
+            &tombstone,
+            &ProgramCacheMatchCriteria::DeployedOnOrAfterSlot(1)
+        ));
+
+        let program = new_test_entry(0, 1);
+
+        assert!(ProgramCache::<TestForkGraph>::matches_criteria(
+            &program,
+            &ProgramCacheMatchCriteria::NoCriteria
+        ));
+
+        assert!(!ProgramCache::<TestForkGraph>::matches_criteria(
+            &program,
+            &ProgramCacheMatchCriteria::Tombstone
+        ));
+
+        assert!(ProgramCache::<TestForkGraph>::matches_criteria(
+            &program,
+            &ProgramCacheMatchCriteria::DeployedOnOrAfterSlot(0)
+        ));
+
+        assert!(!ProgramCache::<TestForkGraph>::matches_criteria(
+            &program,
+            &ProgramCacheMatchCriteria::DeployedOnOrAfterSlot(1)
+        ));
+
+        let program = Arc::new(new_test_entry_with_usage(
+            0,
+            1,
+            ProgramStatistics::default(),
+        ));
+
+        assert!(ProgramCache::<TestForkGraph>::matches_criteria(
+            &program,
+            &ProgramCacheMatchCriteria::NoCriteria
+        ));
+
+        assert!(!ProgramCache::<TestForkGraph>::matches_criteria(
+            &program,
+            &ProgramCacheMatchCriteria::Tombstone
+        ));
+
+        assert!(ProgramCache::<TestForkGraph>::matches_criteria(
+            &program,
+            &ProgramCacheMatchCriteria::DeployedOnOrAfterSlot(0)
+        ));
+
+        assert!(!ProgramCache::<TestForkGraph>::matches_criteria(
+            &program,
+            &ProgramCacheMatchCriteria::DeployedOnOrAfterSlot(1)
+        ));
+    }
+}
