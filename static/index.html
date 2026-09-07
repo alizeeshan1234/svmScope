@@ -4499,7 +4499,11 @@ function selectStep(i) {
   const open = dbgMode === 'expert' ? ' open' : '';
   const introNote = stepIntrospects(s) ? (() => {
     const tops = trace.steps.filter(x => x.depth === 1);
-    return `<div class="intro-note"><span class="introspect">introspects</span> This instruction is handed the Instructions sysvar: the program reads the other instructions of this transaction. It sees ${tops.length} top-level instructions: ${tops.map((x, k) => `<b>${k}</b> ${esc(x.name || short(x.program))}`).join(' · ')}.</div>`;
+    const list = tops.map((x, k) => `<b>${k}</b> ${esc(x.name || short(x.program))}`).join(' · ');
+    // A failing introspecting step: its check is about which instructions are
+    // in the transaction and where — say so before the raw error.
+    const failHint = isFail ? `<div class="intro-note" style="color:var(--amber)">It failed while reading them. Programs introspect to enforce a companion instruction (a flash loan's repay, a precompile signature check before them) or to reject an unexpected one (a sandwich guard). The error below decides which; the list here is what the check ran against.</div>` : '';
+    return `<div class="intro-note"><span class="introspect">introspects</span> This instruction is handed the Instructions sysvar: the program reads the other instructions of this transaction. It sees ${tops.length} top-level instructions: ${list}.</div>${failHint}`;
   })() : '';
   const head = `<div class="card"><h2>${progChip(s.program)}${s.name ? `<span class="ixname">${esc(s.name)}</span>` : ''}</h2>
     <div class="dbg-plain">${esc(plainStep(s))}</div>${introNote}
