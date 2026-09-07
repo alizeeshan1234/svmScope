@@ -1371,6 +1371,14 @@ pub enum Mutation {
         /// The bytes to write.
         bytes: Vec<u8>,
     },
+    /// Remove top-level instruction `index` (its original position) from the
+    /// transaction before replaying: "what if this instruction were not
+    /// here?" Later instructions shift up; instruction-index mutations still
+    /// refer to original positions.
+    SkipIx {
+        /// Zero-based position among the transaction's top-level instructions.
+        index: usize,
+    },
     /// Set a **named** integer/bool field — no byte offsets. The field resolves
     /// through the account's decoded layout (SPL layouts, or the owner
     /// program's IDL) exactly like [`crate::Check`]'s named-field asserts:
@@ -1467,7 +1475,7 @@ impl Mutation {
             | Mutation::DataPatch { address, .. }
             | Mutation::Field { address, .. }
             | Mutation::Owner { address, .. } => address,
-            Mutation::IxArg { .. } | Mutation::IxData { .. } => "",
+            Mutation::IxArg { .. } | Mutation::IxData { .. } | Mutation::SkipIx { .. } => "",
         }
     }
 }
@@ -1518,7 +1526,10 @@ fn encode_field_value(f: &crate::decode::Field, value: i128) -> Result<Vec<u8>> 
 /// never folded into a "failed replay" — a typo'd address must not satisfy an
 /// `expect: revert` scenario.
 fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
-    if matches!(m, Mutation::IxArg { .. } | Mutation::IxData { .. }) {
+    if matches!(
+        m,
+        Mutation::IxArg { .. } | Mutation::IxData { .. } | Mutation::SkipIx { .. }
+    ) {
         return Ok(());
     }
     let address = m.address();
@@ -1557,7 +1568,7 @@ fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
         }
         // Instruction mutations rewrite the transaction, not an account; see
         // `ReplayContext::tx_with_mutations`.
-        Mutation::IxArg { .. } | Mutation::IxData { .. } => return Ok(()),
+        Mutation::IxArg { .. } | Mutation::IxData { .. } | Mutation::SkipIx { .. } => return Ok(()),
     }
     svm.set_account(addr, account).map_err(|e| {
         Error::MalformedRpcResponse(format!("set_account failed for {address}: {e:?}"))
@@ -2020,12 +2031,40 @@ impl ReplayContext {
                 })?;
             ix.data[*offset..end].copy_from_slice(bytes);
         }
+        // Skips last, so every index above still meant the original position.
+        let skipped: std::collections::BTreeSet<usize> = resolved
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SkipIx { index } => Some(*index),
+                _ => None,
+            })
+            .collect();
+        if !skipped.is_empty() {
+            let ixs: &mut Vec<_> = match &mut tx.message {
+                VersionedMessage::Legacy(m) => &mut m.instructions,
+                VersionedMessage::V0(m) => &mut m.instructions,
+                VersionedMessage::V1(m) => &mut m.instructions,
+            };
+            if let Some(&bad) = skipped.iter().find(|&&i| i >= ixs.len()) {
+                return Err(Error::InvalidSpec(format!(
+                    "instruction index {bad} out of range"
+                )));
+            }
+            if skipped.len() >= ixs.len() {
+                return Err(Error::InvalidSpec("cannot skip every instruction".into()));
+            }
+            let mut i = 0;
+            ixs.retain(|_| {
+                let keep = !skipped.contains(&i);
+                i += 1;
+                keep
+            });
+        }
         Ok(tx)
     }
 
     /// The transaction with `mutations` applied to its instruction data, for
     /// callers that drive the SVM themselves (the profiler).
-    #[cfg(feature = "profiler")]
     pub(crate) fn tx_for(&self, mutations: &[Mutation]) -> Result<VersionedTransaction> {
         let resolved: Vec<Mutation> = mutations
             .iter()
@@ -2069,7 +2108,10 @@ impl ReplayContext {
     /// bounds. Lets a suite fail fast — before any scenario executes.
     pub(crate) fn validate_mutations(&self, mutations: &[Mutation]) -> Result<()> {
         for m in mutations {
-            if matches!(m, Mutation::IxArg { .. } | Mutation::IxData { .. }) {
+            if matches!(
+                m,
+                Mutation::IxArg { .. } | Mutation::IxData { .. } | Mutation::SkipIx { .. }
+            ) {
                 // Resolving is the validation: index, IDL, offset and fit.
                 let r = self.resolve_mutation(m)?;
                 self.tx_with_mutations(&[r])?;

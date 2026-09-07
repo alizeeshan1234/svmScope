@@ -1275,7 +1275,9 @@ impl Replay {
         let runs = self.ctx.trace_raw(mutations)?;
         let idls = self.ctx.idl_map();
         let keys = self.ctx.message_account_keys();
-        let tx = self.ctx.transaction();
+        // The transaction as mutated (instruction edits, skipped instructions):
+        // step names, data and indexes must follow what actually replayed.
+        let tx = self.ctx.tx_for(mutations)?;
         let top_ixs = tx.message.instructions();
         let n = top_ixs.len();
 

@@ -52,7 +52,8 @@ pub fn feature_toggles(features: Vec<FeatureInput>) -> Result<Vec<FeatureToggle>
 /// One what-if mutation. `kind` selects the variant:
 /// `{"kind":"lamports","address":..,"lamports":..}`,
 /// `{"kind":"data","address":..,"offset":..,"bytes_hex":".."}` (patch at offset), or
-/// `{"kind":"field","address":..,"field":..,"value":..}` (set a named field).
+/// `{"kind":"field","address":..,"field":..,"value":..}` (set a named field), or
+/// `{"kind":"skipix","index":..}` (remove top-level instruction `index`).
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum MutationInput {
@@ -74,6 +75,14 @@ pub enum MutationInput {
     },
     /// Set a named argument of a top-level instruction, re-encoded through the
     /// program's IDL (fixed-size scalar arguments only).
+
+    /// Remove a top-level instruction (by its original index) before replaying.
+    SkipIx {
+        /// Zero-based position among the transaction's top-level instructions.
+        index: usize,
+    },
+
+    /// Set a top-level instruction's named argument (fixed-size scalars, via the IDL).
     IxArg {
         /// Zero-based top-level instruction index.
         index: usize,
@@ -133,6 +142,7 @@ impl MutationInput {
                 bytes: hex_decode(&bytes_hex)?,
             },
             MutationInput::IxArg { index, arg, value } => Mutation::IxArg { index, arg, value },
+            MutationInput::SkipIx { index } => Mutation::SkipIx { index },
             MutationInput::Field {
                 address,
                 field,
