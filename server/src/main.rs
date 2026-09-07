@@ -706,16 +706,18 @@ async fn profile_handler(
     let tt = req.time_travel.clone();
     let tier = req.tier.clone();
     let sig = req.signature;
-    tokio::task::spawn_blocking(move || run_profile(url, sig, mutations, tt, features, symbols, tier))
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("task error: {e}"),
-            )
-        })?
-        .map(Json)
-        .map_err(lib_err)
+    tokio::task::spawn_blocking(move || {
+        run_profile(url, sig, mutations, tt, features, symbols, tier)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?
+    .map(Json)
+    .map_err(lib_err)
 }
 
 /// GET /profile/{signature} — the as-it-happened profile, no symbols, cacheable.
@@ -729,11 +731,10 @@ async fn profile_get_handler(
             url,
             signature,
             vec![],
-            TimeTravel::default(,
+            TimeTravel::default(),
+            vec![],
+            vec![],
             None,
-        ),
-            vec![],
-            vec![],
         )
     })
     .await
