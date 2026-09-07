@@ -1279,6 +1279,18 @@ impl Replay {
         // step names, data and indexes must follow what actually replayed.
         let tx = self.ctx.tx_for(mutations)?;
         let top_ixs = tx.message.instructions();
+        // Original position of each mutated-transaction instruction, once
+        // skipped instructions are accounted for.
+        let skipped: std::collections::BTreeSet<usize> = mutations
+            .iter()
+            .filter_map(|m| match m {
+                Mutation::SkipIx { index } => Some(*index),
+                _ => None,
+            })
+            .collect();
+        let original_of: Vec<usize> = (0..self.ctx.transaction().message.instructions().len())
+            .filter(|i| !skipped.contains(i))
+            .collect();
         let n = top_ixs.len();
 
         // The whole transaction is the last prefix. Its logs are the canonical
@@ -1542,6 +1554,9 @@ impl Replay {
                     path,
                     depth: *depth,
                     index: k,
+                    original_index: (!skipped.is_empty())
+                        .then(|| original_of.get(k).copied())
+                        .flatten(),
                     program,
                     name,
                     args,

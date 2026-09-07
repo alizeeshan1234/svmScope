@@ -4314,9 +4314,12 @@ function stepSummary(s) {
 }
 function renderCompare(base, after) {
   const rows = [];
-  const paths = [...new Set([...base.steps, ...after.steps].map(s => s.path))];
+  // A skipped instruction shifts every later step; key rows by the step's
+  // position in the original transaction so rows line up.
+  const keyOf = s => s.original_index != null ? s.path.replace(/^\d+/, String(s.original_index)) : s.path;
+  const paths = [...new Set([...base.steps.map(keyOf), ...after.steps.map(keyOf)])];
   for (const p of paths) {
-    const b = stepSummary(base.steps.find(s => s.path === p)), a = stepSummary(after.steps.find(s => s.path === p));
+    const b = stepSummary(base.steps.find(s => keyOf(s) === p)), a = stepSummary(after.steps.find(s => keyOf(s) === p));
     if (JSON.stringify(b) === JSON.stringify(a)) continue;
     const cell = (x) => !x ? '<span class="cb">did not run</span>' :
       `<span class="${x.success ? 'ok' : 'bad'}">${x.success ? '✓' : '✗'}</span>` +

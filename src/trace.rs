@@ -64,6 +64,11 @@ pub struct Step {
     pub depth: u8,
     /// The top-level instruction this step belongs to.
     pub index: usize,
+    /// When instructions were skipped (`Mutation::SkipIx`), the index this
+    /// step's instruction had in the original transaction, so a mutated trace
+    /// can be lined up against the unmodified one. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_index: Option<usize>,
     /// The invoked program's address.
     pub program: String,
     /// Decoded instruction name where an IDL or native layout allows it.
