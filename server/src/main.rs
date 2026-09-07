@@ -163,6 +163,17 @@ fn localnet_alias(c: &str) -> bool {
 /// enabled AND it passes the SSRF check) > per-cluster env var > cluster's public
 /// endpoint > the generic env default. A caller `rpc` that is disabled or unsafe is
 /// ignored, falling through to trusted sources.
+/// A `Scope` for `url`, with the archival endpoint from `SVMSCOPE_ARCHIVE_URL`
+/// attached when set — every replay (analyze, trace, profile, replay_at_slot)
+/// then gets exact historical state, not just the one handler that used to.
+fn scope_for(url: String) -> Scope {
+    let scope = Scope::new(url);
+    match std::env::var("SVMSCOPE_ARCHIVE_URL") {
+        Ok(a) if !a.trim().is_empty() => scope.with_archive(a.trim().to_string()),
+        _ => scope,
+    }
+}
+
 fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> String {
     // Only trust a caller-supplied RPC when the operator has opted in.
     let allow = custom_rpc_allowed();
@@ -264,7 +275,7 @@ async fn analyze_handler(
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     // `analyze` does blocking I/O (RPC) and heavy CPU work (replay), so run it on
     // the blocking thread pool instead of stalling the async runtime.
-    let result = tokio::task::spawn_blocking(move || Scope::new(url).analyze(&signature))
+    let result = tokio::task::spawn_blocking(move || scope_for(url).analyze(&signature))
         .await
         .map_err(|e| {
             (
@@ -312,7 +323,7 @@ async fn simulate_handler(
 
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
-        let mut replay = Scope::new(url).replay(&req.signature)?;
+        let mut replay = scope_for(url).replay(&req.signature)?;
         replay.set_time_travel(req.time_travel);
         replay.set_features(features);
         Ok(replay.simulate(&mutations)?.result)
@@ -364,7 +375,7 @@ async fn suite_handler(
 
     let result =
         tokio::task::spawn_blocking(move || -> Result<Vec<ScenarioOutcome>, svmscope::Error> {
-            let mut replay = Scope::new(url).replay(&signature)?;
+            let mut replay = scope_for(url).replay(&signature)?;
             replay.set_time_travel(req.time_travel);
             replay.set_features(features);
             replay.run_suite(&scenarios)
@@ -417,7 +428,7 @@ async fn preflight_handler(
 
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
-        let replay = Scope::new(url).preflight(&req.transaction)?;
+        let replay = scope_for(url).preflight(&req.transaction)?;
         Ok(replay.simulate(&mutations)?.result)
     })
     .await
@@ -440,7 +451,7 @@ async fn account_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::AccountOverview>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || Scope::new(url).account(&address))
+    let result = tokio::task::spawn_blocking(move || scope_for(url).account(&address))
         .await
         .map_err(|e| {
             (
@@ -461,7 +472,7 @@ async fn signatures_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::SigInfo>>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || Scope::new(url).signatures(&address, 25))
+    let result = tokio::task::spawn_blocking(move || scope_for(url).signatures(&address, 25))
         .await
         .map_err(|e| {
             (
@@ -495,7 +506,7 @@ async fn preflight_report_handler(
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(
         move || -> Result<svmscope::SimulationReport, svmscope::Error> {
-            let scope = Scope::new(url);
+            let scope = scope_for(url);
             let tx = Scope::parse_unsigned_b64(&req.transaction)?;
             // Decode the pre-sign overview (size, fees, named instructions,
             // actions/warnings) before simulating — it explains the tx even
@@ -543,7 +554,7 @@ async fn replay_report_handler(
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(
         move || -> Result<svmscope::SimulationReport, svmscope::Error> {
-            let mut replay = Scope::new(url).replay(&req.signature)?;
+            let mut replay = scope_for(url).replay(&req.signature)?;
             replay.set_time_travel(tt);
             replay.set_features(features);
             Ok(replay.simulate(&mutations)?.into_report())
@@ -627,7 +638,7 @@ fn run_profile(
     symbols: Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
     tier: Option<String>,
 ) -> Result<ProfileResponse, svmscope::Error> {
-    let scope = Scope::new(url);
+    let scope = scope_for(url);
     let mut replay = if tier.as_deref() == Some("now") {
         scope.replay(&signature)?
     } else {
@@ -774,7 +785,7 @@ async fn trace_handler(
 
     let result =
         tokio::task::spawn_blocking(move || -> Result<svmscope::Trace, svmscope::Error> {
-            let scope = Scope::new(url);
+            let scope = scope_for(url);
             let (sig, b64) = (req.signature, req.transaction);
             let Some(sig) = sig else {
                 let mut replay = scope.preflight(&b64.expect("validated above"))?;
@@ -866,7 +877,7 @@ async fn trace_get_handler(
     }
     let result =
         tokio::task::spawn_blocking(move || -> Result<svmscope::Trace, svmscope::Error> {
-            Scope::new(url).replay_at_slot(&signature)?.trace(&[])
+            scope_for(url).replay_at_slot(&signature)?.trace(&[])
         })
         .await
         .map_err(|e| {
@@ -920,7 +931,7 @@ async fn decode_account_handler(
     let idl = (!req.idl.is_null()).then_some(req.idl);
 
     let result =
-        tokio::task::spawn_blocking(move || Scope::new(url).decode_account(&address, idl.as_ref()))
+        tokio::task::spawn_blocking(move || scope_for(url).decode_account(&address, idl.as_ref()))
             .await
             .map_err(|e| {
                 (
@@ -946,15 +957,14 @@ async fn instructions_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::idl::IdlInstruction>>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result =
-        tokio::task::spawn_blocking(move || Scope::new(url).program_instructions(&program))
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("task error: {e}"),
-                )
-            })?;
+    let result = tokio::task::spawn_blocking(move || scope_for(url).program_instructions(&program))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
 
     result.map(Json).map_err(lib_err)
 }
@@ -966,7 +976,7 @@ async fn replay_handler(
 ) -> Result<Json<ReplayResult>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
-        Ok(Scope::new(url).replay(&signature)?.run()?.result)
+        Ok(scope_for(url).replay(&signature)?.run()?.result)
     })
     .await
     .map_err(|e| {
@@ -1011,12 +1021,7 @@ async fn replay_at_slot_handler(
             // SVMSCOPE_ARCHIVE_URL (an archival endpoint honoring the `slot`
             // param, e.g. Alchemy's Account Archive) upgrades this replay from
             // Reconstructed to Exact. Unset = free reconstruction, as before.
-            let mut scope = Scope::new(url);
-            if let Ok(archive) = std::env::var("SVMSCOPE_ARCHIVE_URL") {
-                if !archive.trim().is_empty() {
-                    scope = scope.with_archive(archive);
-                }
-            }
+            let scope = scope_for(url);
             let replay = scope.replay_at_slot(&signature)?;
             let cert = replay.certificate();
             let result = replay.run()?.result;
@@ -1084,7 +1089,7 @@ async fn counterfactual_handler(
 
     let out =
         tokio::task::spawn_blocking(move || -> Result<CounterfactualResponse, svmscope::Error> {
-            let replay = Scope::new(url).replay(&signature)?;
+            let replay = scope_for(url).replay(&signature)?;
             let acct = account.clone();
             let threshold = replay
                 .find_threshold(lo, hi, move |v| vec![Mutation::lamports(acct.clone(), v)])?;
@@ -1133,7 +1138,7 @@ async fn scan_handler(
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     let out = tokio::task::spawn_blocking(
         move || -> Result<Vec<svmscope::BreakingPoint>, svmscope::Error> {
-            let scope = Scope::new(url);
+            let scope = scope_for(url);
             let analysis = scope.analyze(&signature)?;
             let accounts: Vec<String> = analysis
                 .accounts
@@ -1169,7 +1174,7 @@ async fn diagnose_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::Diagnosis>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let out = tokio::task::spawn_blocking(move || Scope::new(url).diagnose(&signature))
+    let out = tokio::task::spawn_blocking(move || scope_for(url).diagnose(&signature))
         .await
         .map_err(|e| {
             (
@@ -1189,7 +1194,7 @@ async fn freeze_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::Fixture>, (StatusCode, String)> {
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || Scope::new(url).capture(&signature))
+    let result = tokio::task::spawn_blocking(move || scope_for(url).capture(&signature))
         .await
         .map_err(|e| {
             (
