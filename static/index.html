@@ -4815,7 +4815,13 @@ function renderProfile() {
     + (sysRows.length ? sysRows.map(([n, c, cu]) => `<tr><td class="fn">${esc(n)}</td><td class="n">${fmt(c)}</td><td class="n">${fmt(cu)}</td></tr>`).join('') : '<tr><td class="fn anon" colspan="3">none</td></tr>') + '</tbody></table>'
     + (f.syscall_overhead != null && sysRows.length ? `<div class="prof-note">Fixed charges explain at least <b>${fmt(sysFloor)}</b> of the <b>${fmt(f.syscall_overhead)}</b> CU beyond instructions; the rest scales with bytes copied, hashed, or passed to CPIs.</div>` : '');
   const labeled = f.functions.filter(x => /^function_\d+$/.test(x.name) && x.label).length;
-  html += `<div class="prof-sym">${anon ? `This program is stripped (every mainnet program is): <b>${anon}</b> of ${f.functions.length} functions have no symbol name, so <b>${labeled}</b> of them are labelled by what they did — handlers, CPIs, PDA derivation, events, errors. ` : 'All functions named. '}`
+  // Every function named (a verified rebuild matched the on-chain binary):
+  // say so and stop asking for symbols. Otherwise explain what is missing and
+  // offer the .debug upload.
+  const exactNamed = !anon && f.functions.some(x => x.name.includes('::'));
+  html += exactNamed
+    ? `<div class="prof-sym">All <b>${f.functions.length}</b> functions carry their Rust names: this program's on-chain binary matches a verified build svmscope rebuilt with symbols.</div>`
+    : `<div class="prof-sym">${anon ? `This program is stripped (every mainnet program is): <b>${anon}</b> of ${f.functions.length} functions have no symbol name, so <b>${labeled}</b> of them are labelled by what they did — handlers, CPIs, PDA derivation, events, errors. ` : 'All functions named. '}`
     + `Have a build of it? Add the <code>.debug</code> file <code>cargo build-sbf --debug</code> writes, and functions get their Rust names. If that build is not the one on chain, add its <code>.so</code> too and functions are matched by code shape.<br>`
     + `<label>.debug <input type="file" id="profSymFile" accept=".debug,application/octet-stream" /></label> `
     + `<label>.so (optional) <input type="file" id="profSoFile" accept=".so,application/octet-stream" /></label> <span id="profSymStatus"></span></div>`;
@@ -4825,13 +4831,13 @@ function renderProfile() {
   $(profContainer).querySelectorAll('.prof-frames button').forEach(b => b.addEventListener('click', () => { profFrame = +b.dataset.i; profZoom = []; renderProfile(); }));
   $(profContainer).querySelectorAll('.prof-ixs tr[data-i]').forEach(r => r.addEventListener('click', () => { profFrame = +r.dataset.i; profZoom = []; renderProfile(); }));
   const readB64 = async (file) => { const buf = new Uint8Array(await file.arrayBuffer()); let bin = ''; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000)); return btoa(bin); };
-  $('profSymFile').addEventListener('change', async (ev) => {
+  $('profSymFile')?.addEventListener('change', async (ev) => {
     const file = ev.target.files[0]; if (!file) return;
     profSymbols[f.program] = { ...(profSymbols[f.program] || {}), elf_b64: await readB64(file) };
     $('profSymStatus').textContent = `${file.name} attached to ${short(f.program)} · re-profiling…`;
     await runProfile();
   });
-  $('profSoFile').addEventListener('change', async (ev) => {
+  $('profSoFile')?.addEventListener('change', async (ev) => {
     const file = ev.target.files[0]; if (!file) return;
     profSymbols[f.program] = { ...(profSymbols[f.program] || {}), so_b64: await readB64(file) };
     if (!profSymbols[f.program].elf_b64) { $('profSymStatus').textContent = `${file.name} attached; now add the .debug from the same build.`; return; }
