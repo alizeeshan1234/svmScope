@@ -485,7 +485,8 @@ const SLOTS_PER_EPOCH: i64 = 432_000;
 const SECS_PER_SLOT: f64 = 0.4;
 
 impl TimeTravel {
-    pub(crate) fn is_noop(&self) -> bool {
+    /// True when no clock or balance rewind is requested.
+    pub fn is_noop(&self) -> bool {
         self.epochs.is_none()
             && self.slots.is_none()
             && self.seconds.is_none()

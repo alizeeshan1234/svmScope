@@ -224,6 +224,11 @@ struct TraceRequest {
     cluster: Option<String>,
     #[serde(default)]
     rpc: Option<String>,
+    /// `at_slot` or `now`: pin the state tier (a mutated re-run must use the
+    /// tier its base trace used). Omit to let the server choose: at-slot
+    /// first, current state if that diverges from the on-chain outcome.
+    #[serde(default)]
+    tier: Option<String>,
 }
 
 /// Serve the static frontend page.
@@ -575,6 +580,9 @@ struct ProfileRequest {
     cluster: Option<String>,
     #[serde(default)]
     rpc: Option<String>,
+    /// `at_slot` (default) or `now`: which state to profile against.
+    #[serde(default)]
+    tier: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -617,9 +625,14 @@ fn run_profile(
     tt: TimeTravel,
     features: Vec<svmscope::FeatureToggle>,
     symbols: Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
+    tier: Option<String>,
 ) -> Result<ProfileResponse, svmscope::Error> {
     let scope = Scope::new(url);
-    let mut replay = scope.replay_at_slot(&signature)?;
+    let mut replay = if tier.as_deref() == Some("now") {
+        scope.replay(&signature)?
+    } else {
+        scope.replay_at_slot(&signature)?
+    };
     replay.set_time_travel(tt);
     replay.set_features(features);
     let (result, mut profile) = replay.profile(&mutations)?;
@@ -691,8 +704,9 @@ async fn profile_handler(
     }
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();
+    let tier = req.tier.clone();
     let sig = req.signature;
-    tokio::task::spawn_blocking(move || run_profile(url, sig, mutations, tt, features, symbols))
+    tokio::task::spawn_blocking(move || run_profile(url, sig, mutations, tt, features, symbols, tier))
         .await
         .map_err(|e| {
             (
@@ -715,7 +729,9 @@ async fn profile_get_handler(
             url,
             signature,
             vec![],
-            TimeTravel::default(),
+            TimeTravel::default(,
+            None,
+        ),
             vec![],
             vec![],
         )
@@ -753,18 +769,54 @@ async fn trace_handler(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
     let tt = req.time_travel.clone();
+    let pinned = req.tier.clone();
 
     let result =
         tokio::task::spawn_blocking(move || -> Result<svmscope::Trace, svmscope::Error> {
             let scope = Scope::new(url);
-            let mut replay = match (req.signature, req.transaction) {
-                (Some(sig), _) => scope.replay_at_slot(&sig)?,
-                (None, Some(b64)) => scope.preflight(&b64)?,
-                (None, None) => unreachable!("validated above"),
+            let (sig, b64) = (req.signature, req.transaction);
+            let Some(sig) = sig else {
+                let mut replay = scope.preflight(&b64.expect("validated above"))?;
+                replay.set_time_travel(tt);
+                replay.set_features(features);
+                return replay.trace(&mutations);
             };
-            replay.set_time_travel(tt);
-            replay.set_features(features);
-            replay.trace(&mutations)
+            let build = |tier: &str| -> Result<svmscope::Trace, svmscope::Error> {
+                let mut replay = if tier == "now" {
+                    scope.replay(&sig)?
+                } else {
+                    scope.replay_at_slot(&sig)?
+                };
+                replay.set_time_travel(tt.clone());
+                replay.set_features(features.clone());
+                let mut t = replay.trace(&mutations)?;
+                t.tier = Some(tier.to_string());
+                Ok(t)
+            };
+            if let Some(t) = pinned.as_deref() {
+                return build(t);
+            }
+            // Best of two tiers: reconstructed state at the slot first; if its
+            // outcome disagrees with the chain and current state reproduces the
+            // on-chain outcome, current state is the more faithful replay.
+            let at_slot = build("at_slot")?;
+            let diverged = at_slot
+                .onchain_success
+                .is_some_and(|on| on != at_slot.result.success);
+            if diverged && mutations.is_empty() && tt.is_noop() {
+                if let Ok(now) = build("now") {
+                    if now.onchain_success == Some(now.result.success) {
+                        let mut now = now;
+                        now.tier_note = Some(format!(
+                            "State reconstructed at the transaction's slot {} where the chain {}; current state reproduces the on-chain outcome, so this trace ran against current state.",
+                            if at_slot.result.success { "succeeded" } else { "failed" },
+                            if at_slot.onchain_success == Some(true) { "succeeded" } else { "failed" }
+                        ));
+                        return Ok(now);
+                    }
+                }
+            }
+            Ok(at_slot)
         })
         .await
         .map_err(|e| {

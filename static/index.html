@@ -4206,6 +4206,7 @@ function renderStory(tr) {
     ? `This transaction succeeded.`
     : `This transaction failed at step ${failed ? failed.path : '?'}${failed && progInfo(failed.program).known ? ' in ' + progInfo(failed.program).name : ''}.`;
   const why = !ok && tr.explain ? `<div class="why"><b>Why:</b> ${esc(tr.explain.title)}. ${esc(tr.explain.detail)}</div>` : '';
+  const tierLine = tr.tier_note && !traceBase ? `<li>${esc(tr.tier_note)}</li>` : '';
   const drift = tr.onchain_success != null && tr.onchain_success !== ok && !traceBase;
   const driftLine = drift ? `<li>On the real network this transaction <b>${tr.onchain_success ? 'succeeded' : 'failed'}</b>. This replay ran against reconstructed state, so some account data may have moved on since; the difference is not necessarily a bug.</li>` : '';
   $('dbgStory').innerHTML = `<div class="story"><div class="h">What happened</div>
@@ -4213,7 +4214,7 @@ function renderStory(tr) {
     <ul>
       ${walletLines.map(l => `<li>${l}</li>`).join('')}
       <li>It ran <b>${top.length} step${top.length === 1 ? '' : 's'}</b>${inner ? ` with <b>${inner} inner call${inner === 1 ? '' : 's'}</b> between programs` : ''}, using ${progs.length ? progs.map(p => `<b>${esc(p)}</b>`).join(', ') : 'only built-in programs'}.</li>
-      <li>Total work: <b>${fmt(tr.result.compute_units)}</b> compute units.</li>${driftLine}
+      <li>Total work: <b>${fmt(tr.result.compute_units)}</b> compute units.</li>${driftLine}${tierLine}
     </ul></div>`;
   wireCopy($('dbgStory'));
 }
@@ -4288,7 +4289,7 @@ async function runWithChanges() {
   if (!dbgMuts.length) return;
   const b = $('dbgRun'); b.disabled = true; b.textContent = '▶ Re-running…';
   try {
-    const body = { signature: dbgSigCur, mutations: dbgMuts.map(({ _label, _warn, ...m }) => m), time_travel: timeTravel, features: activeFeatures, ...clusterParams() };
+    const body = { signature: dbgSigCur, mutations: dbgMuts.map(({ _label, _warn, ...m }) => m), time_travel: timeTravel, features: activeFeatures, tier: (traceBase || trace)?.tier, ...clusterParams() };
     const res = await api('/trace', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     if (!res.ok) throw new Error(await res.text());
     const after = await res.json();

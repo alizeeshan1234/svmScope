@@ -43,6 +43,15 @@ pub struct Trace {
     /// with this is state drift (see `fidelity`), not a bug in the program.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub onchain_success: Option<bool>,
+    /// Which state the replay ran against: `at_slot` (reconstructed at the
+    /// transaction's slot) or `now` (current). Set by the caller that chose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// Why this tier was chosen when it is not the default — e.g. the
+    /// reconstructed state diverged from the on-chain outcome and current
+    /// state reproduces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_note: Option<String>,
 }
 
 /// One instruction or CPI.

@@ -1596,6 +1596,8 @@ impl Replay {
             clock: (!self.time_travel.is_noop()).then(|| self.ctx.describe_clock()),
             fidelity: self.fidelity.label().to_string(),
             onchain_success: self.recorded.as_ref().map(|r| r.success),
+            tier: None,
+            tier_note: None,
         })
     }
 
