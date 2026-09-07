@@ -834,9 +834,9 @@ fn trace_with_world(
             Some(r) => r,
             None => {
                 let r = if tier == "now" {
-                    scope.replay(&sig)?
+                    scope.replay(sig)?
                 } else {
-                    scope.replay_at_slot(&sig)?
+                    scope.replay_at_slot(sig)?
                 };
                 world_put(key, r.clone());
                 r
