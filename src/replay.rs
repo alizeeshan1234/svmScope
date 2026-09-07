@@ -2460,7 +2460,33 @@ impl ReplayContext {
         });
         let result = svm.simulate_transaction(tx);
         let snaps = std::mem::take(&mut *snaps.lock().unwrap());
-        let failed_at: Option<usize> = snaps.iter().find(|s| !s.ok).map(|s| s.index);
+        // The transaction's own verdict is authoritative. A failure tied to an
+        // instruction is that instruction's; a failure with no instruction
+        // index (a rent check after the last instruction, a rejection before
+        // the first) still fails the trace: it is pinned to the last
+        // instruction that ran, or to the first when nothing ran, so no step
+        // and no run can read as a success the chain never produced.
+        let failed_at: Option<usize> = match &result {
+            Ok(_) => None,
+            Err(failed) => {
+                // `InstructionError(<idx>, ..)` carries the instruction; the
+                // error type is not a direct dependency, so read the index the
+                // same way the rest of the crate does, from its formatting.
+                let text = format!("{:?}", failed.err);
+                let by_index = text
+                    .strip_prefix("InstructionError(")
+                    .and_then(|r| r.split(',').next())
+                    .and_then(|i| i.trim().parse::<usize>().ok());
+                Some(by_index.unwrap_or_else(|| {
+                    snaps
+                        .iter()
+                        .filter(|s| s.ok)
+                        .map(|s| s.index)
+                        .max()
+                        .unwrap_or(0)
+                }))
+            }
+        };
         let keep: Vec<usize> = (0..n).collect();
         let mut runs = Vec::with_capacity(n);
         for k in 0..n {
@@ -3067,5 +3093,49 @@ mod tests {
         assert_eq!(pre.lamports.get(&keys[0]).copied(), Some(5_000_000_000));
         assert_eq!(pre.lamports.get(&keys[1]).copied(), Some(2_039_280));
         assert!(!pre.is_empty());
+    }
+}
+
+#[cfg(all(test, feature = "single-run-trace"))]
+mod single_run_parity_tests {
+    use crate::{Fixture, Replay};
+
+    fn check(fixture: &str) {
+        let replay = Replay::from_fixture(&Fixture::from_json(fixture).unwrap()).unwrap();
+        let plain = replay.run().unwrap();
+        let traced = replay.trace(&[]).unwrap();
+        assert_eq!(
+            traced.result.success, plain.result.success,
+            "verdict changed by tracing"
+        );
+        assert_eq!(
+            traced.result.error, plain.result.error,
+            "error changed by tracing"
+        );
+        assert_eq!(
+            traced.result.compute_units, plain.result.compute_units,
+            "compute changed by tracing"
+        );
+        // The trace's verdict must also be the transaction's: every step
+        // succeeded iff the transaction did, and a failure names a step.
+        assert_eq!(traced.failed_step.is_some(), !plain.result.success);
+        if let Some(rec) = replay.recorded() {
+            assert_eq!(
+                traced.result.success, rec.success,
+                "verdict differs from the recorded outcome"
+            );
+        }
+    }
+
+    #[test]
+    fn traced_success_matches_plain_run() {
+        check(include_str!("../tests/fixtures/counter_increment.json"));
+    }
+
+    #[test]
+    fn traced_revert_matches_plain_run() {
+        check(include_str!(
+            "../tests/fixtures/vesting_precliff_revert.json"
+        ));
     }
 }
