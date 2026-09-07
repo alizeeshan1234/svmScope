@@ -630,7 +630,8 @@ body::after {
 .intro-note { font-size: 12.5px; color: var(--text-2); line-height: 1.5; margin: 6px 0 10px; }
 .intro-view { width: 100%; border-collapse: collapse; font-size: 12px; }
 .intro-view th { text-align: left; color: var(--text-3); font-weight: 600; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; padding: 4px 8px; }
-.intro-view td { padding: 4px 8px; border-top: 1px solid var(--border); font-family: var(--font-mono); }
+.intro-view td { padding: 5px 10px; border-top: 1px solid var(--border); font-family: var(--font-mono); white-space: nowrap; }
+.intro-view td.disc { font-size: 11px; }
 .intro-view td.disc { color: var(--text-3); }
 .intro-view tr.reader td { background: var(--bg-2); }
 .tnode .ixname {
@@ -1723,8 +1724,8 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
 
       <div class="grid">
         <div class="card"><h2>Instruction call tree <span id="treeCount" class="count"></span></h2><div id="tree" class="tree"></div></div>
-        <div class="card" id="introspectionCard" hidden><h2>Instruction introspection <span id="introspectCount" class="count"></span></h2><div id="introspection"></div></div>
         <div class="card"><h2>Compute units <span id="cuCount" class="count"></span><a class="cu-link" id="cuProfileLink" title="Every BPF instruction this transaction executed, by function, as a flamegraph">🔥 see where it went →</a></h2><div id="compute" class="rows"></div></div>
+        <div class="card" id="introspectionCard" style="grid-column: 1 / -1" hidden><h2>Instruction introspection <span id="introspectCount" class="count"></span></h2><div id="introspection"></div></div>
         <div class="card"><h2>SOL balance changes <span id="diffCount" class="count"></span></h2><div id="diffs" class="rows"></div></div>
         <div class="card"><h2>Token balance changes <span id="tokCount" class="count"></span></h2><div id="tokens" class="rows"></div></div>
       </div>
