@@ -1380,6 +1380,22 @@ pub enum Mutation {
         /// Zero-based position among the transaction's top-level instructions.
         index: usize,
     },
+    /// Replace top-level instruction `index`'s data wholesale (any length),
+    /// for arguments the fixed-offset patch cannot express.
+    IxDataReplace {
+        /// Zero-based position among the transaction's top-level instructions.
+        index: usize,
+        /// The new instruction data.
+        bytes: Vec<u8>,
+    },
+    /// Move a top-level instruction from position `from` to position `to`
+    /// (positions after skips are applied): "what if it ran earlier/later?"
+    MoveIx {
+        /// Current position.
+        from: usize,
+        /// Destination position.
+        to: usize,
+    },
     /// Set a **named** integer/bool field — no byte offsets. The field resolves
     /// through the account's decoded layout (SPL layouts, or the owner
     /// program's IDL) exactly like [`crate::Check`]'s named-field asserts:
@@ -1476,7 +1492,11 @@ impl Mutation {
             | Mutation::DataPatch { address, .. }
             | Mutation::Field { address, .. }
             | Mutation::Owner { address, .. } => address,
-            Mutation::IxArg { .. } | Mutation::IxData { .. } | Mutation::SkipIx { .. } => "",
+            Mutation::IxArg { .. }
+            | Mutation::IxData { .. }
+            | Mutation::SkipIx { .. }
+            | Mutation::IxDataReplace { .. }
+            | Mutation::MoveIx { .. } => "",
         }
     }
 }
@@ -1529,7 +1549,11 @@ fn encode_field_value(f: &crate::decode::Field, value: i128) -> Result<Vec<u8>> 
 fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
     if matches!(
         m,
-        Mutation::IxArg { .. } | Mutation::IxData { .. } | Mutation::SkipIx { .. }
+        Mutation::IxArg { .. }
+            | Mutation::IxData { .. }
+            | Mutation::SkipIx { .. }
+            | Mutation::IxDataReplace { .. }
+            | Mutation::MoveIx { .. }
     ) {
         return Ok(());
     }
@@ -1569,7 +1593,11 @@ fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
         }
         // Instruction mutations rewrite the transaction, not an account; see
         // `ReplayContext::tx_with_mutations`.
-        Mutation::IxArg { .. } | Mutation::IxData { .. } | Mutation::SkipIx { .. } => return Ok(()),
+        Mutation::IxArg { .. }
+        | Mutation::IxData { .. }
+        | Mutation::SkipIx { .. }
+        | Mutation::IxDataReplace { .. }
+        | Mutation::MoveIx { .. } => return Ok(()),
     }
     svm.set_account(addr, account).map_err(|e| {
         Error::MalformedRpcResponse(format!("set_account failed for {address}: {e:?}"))
@@ -2032,7 +2060,21 @@ impl ReplayContext {
                 })?;
             ix.data[*offset..end].copy_from_slice(bytes);
         }
-        // Skips last, so every index above still meant the original position.
+        // Whole-data replacements, by original position.
+        for m in resolved {
+            if let Mutation::IxDataReplace { index, bytes } = m {
+                let ixs: &mut Vec<_> = match &mut tx.message {
+                    VersionedMessage::Legacy(m) => &mut m.instructions,
+                    VersionedMessage::V0(m) => &mut m.instructions,
+                    VersionedMessage::V1(m) => &mut m.instructions,
+                };
+                let ix = ixs.get_mut(*index).ok_or_else(|| {
+                    Error::InvalidSpec(format!("instruction index {index} out of range"))
+                })?;
+                ix.data = bytes.clone();
+            }
+        }
+        // Skips next, so every index above still meant the original position.
         let skipped: std::collections::BTreeSet<usize> = resolved
             .iter()
             .filter_map(|m| match m {
@@ -2060,6 +2102,24 @@ impl ReplayContext {
                 i += 1;
                 keep
             });
+        }
+        // Moves last, in the post-skip numbering.
+        for m in resolved {
+            if let Mutation::MoveIx { from, to } = m {
+                let ixs: &mut Vec<_> = match &mut tx.message {
+                    VersionedMessage::Legacy(m) => &mut m.instructions,
+                    VersionedMessage::V0(m) => &mut m.instructions,
+                    VersionedMessage::V1(m) => &mut m.instructions,
+                };
+                if *from >= ixs.len() || *to >= ixs.len() {
+                    return Err(Error::InvalidSpec(format!(
+                        "move {from} → {to}: out of range for {} instructions",
+                        ixs.len()
+                    )));
+                }
+                let ix = ixs.remove(*from);
+                ixs.insert(*to, ix);
+            }
         }
         Ok(tx)
     }
@@ -2111,7 +2171,11 @@ impl ReplayContext {
         for m in mutations {
             if matches!(
                 m,
-                Mutation::IxArg { .. } | Mutation::IxData { .. } | Mutation::SkipIx { .. }
+                Mutation::IxArg { .. }
+                    | Mutation::IxData { .. }
+                    | Mutation::SkipIx { .. }
+                    | Mutation::IxDataReplace { .. }
+                    | Mutation::MoveIx { .. }
             ) {
                 // Resolving is the validation: index, IDL, offset and fit.
                 let r = self.resolve_mutation(m)?;

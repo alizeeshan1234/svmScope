@@ -53,7 +53,9 @@ pub fn feature_toggles(features: Vec<FeatureInput>) -> Result<Vec<FeatureToggle>
 /// `{"kind":"lamports","address":..,"lamports":..}`,
 /// `{"kind":"data","address":..,"offset":..,"bytes_hex":".."}` (patch at offset), or
 /// `{"kind":"field","address":..,"field":..,"value":..}` (set a named field), or
-/// `{"kind":"skipix","index":..}` (remove top-level instruction `index`).
+/// `{"kind":"skipix","index":..}` (remove top-level instruction `index`),
+/// `{"kind":"ixdata","index":..,"bytes_hex":".."}` (replace its data wholesale), or
+/// `{"kind":"moveix","from":..,"to":..}` (move it to another position).
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum MutationInput {
@@ -80,6 +82,20 @@ pub enum MutationInput {
     SkipIx {
         /// Zero-based position among the transaction's top-level instructions.
         index: usize,
+    },
+    /// Replace a top-level instruction's data wholesale (hex, any length).
+    IxData {
+        /// Zero-based position among the transaction's top-level instructions.
+        index: usize,
+        /// The new data, hex-encoded.
+        bytes_hex: String,
+    },
+    /// Move a top-level instruction to another position.
+    MoveIx {
+        /// Current position.
+        from: usize,
+        /// Destination position.
+        to: usize,
     },
 
     /// Set a top-level instruction's named argument (fixed-size scalars, via the IDL).
@@ -143,6 +159,11 @@ impl MutationInput {
             },
             MutationInput::IxArg { index, arg, value } => Mutation::IxArg { index, arg, value },
             MutationInput::SkipIx { index } => Mutation::SkipIx { index },
+            MutationInput::IxData { index, bytes_hex } => Mutation::IxDataReplace {
+                index,
+                bytes: hex_decode(&bytes_hex)?,
+            },
+            MutationInput::MoveIx { from, to } => Mutation::MoveIx { from, to },
             MutationInput::Field {
                 address,
                 field,

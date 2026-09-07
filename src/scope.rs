@@ -1554,6 +1554,8 @@ impl Replay {
                     path,
                     depth: *depth,
                     index: k,
+                    data_hex: (*depth == 1)
+                        .then(|| top_ixs[k].data.iter().map(|b| format!("{b:02x}")).collect()),
                     original_index: (!skipped.is_empty())
                         .then(|| original_of.get(k).copied())
                         .flatten(),

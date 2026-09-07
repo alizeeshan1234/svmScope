@@ -4632,11 +4632,11 @@ function renderInspector(s) {
   $('dbgDetail').insertAdjacentHTML('beforeend',
     `<div class="card"><details class="tech"${dbgMode === 'expert' ? ' open' : ''}><summary>Change something and run it again</summary>
       <div class="ov-form">
-        <div><label>target</label><select id="ovTarget">${argOpts}${acctOpts ? `<optgroup label="accounts">${acctOpts}</optgroup>` : ''}</select></div>
+        <div><label>target</label><select id="ovTarget">${argOpts}${s.depth === 1 ? `<option value="ixdata">instruction data · raw hex</option>` : ''}${acctOpts ? `<optgroup label="accounts">${acctOpts}</optgroup>` : ''}</select></div>
         <div><label>what</label><select id="ovWhat"></select></div>
         <div><label>new value</label><input id="ovVal" placeholder="value" spellcheck="false" /></div>
         <div><button class="btn sm" id="ovAdd">＋ Stage</button></div>
-        ${s.depth === 1 ? `<div><button class="btn sm" id="ovSkip" title="Re-run the transaction without this instruction">⤼ Skip this instruction</button></div>` : ''}
+        ${s.depth === 1 ? `<div><button class="btn sm" id="ovSkip" title="Re-run the transaction without this instruction">⤼ Skip this instruction</button> <button class="btn sm" id="ovUp" title="Run this instruction one position earlier">▲ Earlier</button> <button class="btn sm" id="ovDown" title="Run this instruction one position later">▼ Later</button></div>` : ''}
       </div>
       <div class="ov-note">Pick what to change, type a new value, press Stage, then <b>Re-run with changes</b> at the top. Account edits apply to the state before the transaction starts; argument edits rewrite this instruction.</div>
     </details></div>` +
@@ -4660,6 +4660,11 @@ function renderInspector(s) {
   const target = $('ovTarget'), what = $('ovWhat'), val = $('ovVal');
   const fillWhat = () => {
     const tv = target.value || '';
+    if (tv === 'ixdata') {
+      what.innerHTML = `<option value="hex">replace the whole data (hex, any length)</option>`;
+      val.value = s.data_hex || '';
+      return;
+    }
     if (tv.startsWith('arg:')) {
       const a = s.args.find(x => x.name === tv.slice(4));
       what.innerHTML = `<option value="arg">set argument (${esc(a?.type || '')})</option>`;
@@ -4673,12 +4678,23 @@ function renderInspector(s) {
   };
   const fillVal = () => {
     const tv = target.value || '', w = what.value || '';
+    if (tv === 'ixdata') { val.value = s.data_hex || ''; return; }
     if (tv.startsWith('arg:')) { val.value = s.args.find(x => x.name === tv.slice(4))?.value || ''; return; }
     const a = byAddr[tv];
     if (w === 'lamports') val.value = a ? (a.lamports / 1e9).toString() : '';
     else { const f = a?.fields.find(x => x.name === w.slice(6)); val.value = f ? f.value : ''; }
   };
   target.addEventListener('change', fillWhat); what.addEventListener('change', fillVal); fillWhat();
+  const stageMove = (to) => {
+    const tops = trace.steps.filter(x => x.depth === 1).length;
+    if (to < 0 || to >= tops) return;
+    const readers = trace.steps.filter(x => x.depth === 1 && x.index !== s.index && stepIntrospects(x));
+    const warn = readers.length ? `${readers.length} other instruction${readers.length > 1 ? 's read' : ' reads'} the transaction's instruction list (${readers.map(x => '#' + x.index).join(', ')}); moving #${s.index} changes what they see.` : '';
+    dbgMuts.push({ kind: 'moveix', from: s.index, to, _label: `move #${s.index} ${s.name || short(s.program)} → position ${to}`, _warn: warn });
+    renderStage();
+  };
+  $('ovUp')?.addEventListener('click', () => stageMove(s.index - 1));
+  $('ovDown')?.addEventListener('click', () => stageMove(s.index + 1));
   $('ovSkip')?.addEventListener('click', () => {
     if (dbgMuts.some(m => m.kind === 'skipix' && m.index === s.index)) return;
     const readers = trace.steps.filter(x => x.depth === 1 && x.index !== s.index && stepIntrospects(x));
@@ -4689,6 +4705,12 @@ function renderInspector(s) {
   $('ovAdd').addEventListener('click', () => {
     const tv = target.value || '', w = what.value || '', v = val.value.trim();
     if (!tv || v === '') return;
+    if (tv === 'ixdata') {
+      const hex = v.replace(/^0x/i, '').replace(/\s+/g, '');
+      if (!/^([0-9a-f]{2})*$/i.test(hex)) return;
+      stageMutation({ kind: 'ixdata', index: s.index, bytes_hex: hex, _label: `ix ${s.index} · data = ${hex.slice(0, 16)}${hex.length > 16 ? '…' : ''} (${hex.length / 2} bytes)`, _warn: '' });
+      return;
+    }
     if (tv.startsWith('arg:')) {
       const name = tv.slice(4), a = s.args.find(x => x.name === name);
       const value = a?.type === 'bool' ? (v === 'true' || v === '1') : a?.type === 'pubkey' ? v : Number(v);

@@ -69,6 +69,10 @@ pub struct Step {
     /// can be lined up against the unmodified one. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_index: Option<usize>,
+    /// The top-level instruction's data, hex — what a raw-data mutation
+    /// replaces. Only on depth-1 steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_hex: Option<String>,
     /// The invoked program's address.
     pub program: String,
     /// Decoded instruction name where an IDL or native layout allows it.
