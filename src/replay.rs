@@ -3197,6 +3197,24 @@ mod single_run_parity_tests {
                 "verdict differs from the recorded outcome"
             );
         }
+        // Final account state: for every account the plain run reports as
+        // changed, the last step that touched it in the trace must leave it
+        // exactly where the plain run did.
+        for pd in &plain.diffs {
+            let last = traced
+                .steps
+                .iter()
+                .flat_map(|st| st.diffs.iter())
+                .filter(|d| d.address == pd.address)
+                .last();
+            if let Some(td) = last {
+                assert_eq!(
+                    td.lamports_after, pd.lamports_after,
+                    "final lamports of {} differ under tracing",
+                    pd.address
+                );
+            }
+        }
     }
 
     #[test]
