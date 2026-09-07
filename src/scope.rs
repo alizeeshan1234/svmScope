@@ -1292,6 +1292,18 @@ impl Replay {
             result.error_name = explain.as_ref().map(|e| e.title.clone());
         }
         let whole_succeeded = result.success;
+        // Where the whole transaction failed, as a top-level instruction index
+        // (`InstructionError(<idx>, ..)`), so a prefix that fails *earlier*
+        // than that is known to be an artifact of running as a prefix: the
+        // whole run got past it. Introspecting instructions are the usual
+        // case — a flash loan's repay search cannot see instructions the
+        // prefix does not contain.
+        let whole_failed_at: Option<usize> = result
+            .error
+            .as_deref()
+            .and_then(|e| e.split("InstructionError(").nth(1))
+            .and_then(|r| r.split(',').next())
+            .and_then(|i| i.trim().parse().ok());
 
         // Every invocation the full run logged, pre-order. Depth-1 spans are the
         // top-level instructions in message order; the spans that follow a
@@ -1324,7 +1336,8 @@ impl Replay {
                 Err(f) => &f.meta,
             };
             let run_failed = run.result.is_err();
-            let artifact = run_failed && whole_succeeded;
+            let artifact =
+                run_failed && (whole_succeeded || whole_failed_at.is_some_and(|w| w > k));
             let pos = run.keep.iter().position(|&i| i == k).unwrap_or(0);
 
             // Nodes for this step: the top-level instruction, then its CPIs in
