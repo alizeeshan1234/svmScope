@@ -175,8 +175,8 @@ pub use scope::{
 pub use search::Threshold;
 pub use submit::CapturedTransaction;
 pub use trace::{
-    DecodedEvent, ReturnData, Step, StepAccountState, StepDiff, StepError, StepSummary, Trace,
-    TraceDiff,
+    DecodedEvent, DriftedAccount, ReturnData, Step, StepAccountState, StepDiff, StepError,
+    StepSummary, Trace, TraceDiff,
 };
 
 /// Compile-checks every Rust example in the README as part of `cargo test`.

@@ -803,6 +803,39 @@ async fn trace_handler(
                 replay.set_features(features.clone());
                 let mut t = replay.trace(&mutations)?;
                 t.tier = Some(tier.to_string());
+                // A failure the chain did not have: name the failing step's
+                // accounts that could not be rewound, with their last write.
+                let cert = replay.certificate();
+                let slot = match cert.fidelity {
+                    svmscope::Fidelity::Reconstructed { slot } | svmscope::Fidelity::Exact { slot } => Some(slot),
+                    _ => None,
+                };
+                t.state_slot = slot;
+                let diverged = t.onchain_success.is_some_and(|on| on != t.result.success);
+                if let (true, Some(fi), Some(slot)) = (diverged, t.failed_step, slot) {
+                    if let Some(step) = t.steps.get(fi) {
+                        let drifted: std::collections::HashSet<&str> =
+                            cert.drifted.iter().map(String::as_str).collect();
+                        let mut seen = std::collections::HashSet::new();
+                        let mut out = Vec::new();
+                        for acc in &step.accounts {
+                            if !drifted.contains(acc.address.as_str()) || !seen.insert(acc.address.clone()) {
+                                continue;
+                            }
+                            if out.len() >= 16 {
+                                break;
+                            }
+                            let last = scope.last_write_slot(&acc.address);
+                            out.push(svmscope::DriftedAccount {
+                                address: acc.address.clone(),
+                                role: acc.name.clone(),
+                                last_write_slot: last,
+                                changed_since_slot: last.is_some_and(|l| l > slot),
+                            });
+                        }
+                        t.drifted = out;
+                    }
+                }
                 Ok(t)
             };
             if let Some(t) = pinned.as_deref() {

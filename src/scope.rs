@@ -101,6 +101,27 @@ impl Scope {
 
     /// Attach an archival RPC endpoint (e.g. Alchemy's Account Archive) so
     /// `replay_at_slot` can fetch account state as of a transaction's slot.
+
+    /// Slot of `address`'s most recent on-chain write (its latest signature),
+    /// or `None` if it has none or the lookup fails. One cheap RPC call.
+    pub fn last_write_slot(&self, address: &str) -> Option<u64> {
+        let resp: serde_json::Value = self
+            .client
+            .send(
+                RpcRequest::GetSignaturesForAddress,
+                serde_json::json!([address, { "limit": 1 }]),
+            )
+            .ok()?;
+        resp["result"]
+            .as_array()
+            .or_else(|| resp.as_array())
+            .and_then(|a| a.first())
+            .and_then(|e| e["slot"].as_u64())
+    }
+
+    /// Attach an archival RPC that honours a historical `slot` on
+    /// `getAccountInfo` (e.g. Alchemy's Account Archive). Replays at a slot
+    /// then fetch every account as of that slot: exact, not reconstructed.
     pub fn with_archive(mut self, archive_url: impl Into<String>) -> Scope {
         self.archive = Some(RpcClient::new(archive_url.into()));
         self
@@ -1615,6 +1636,8 @@ impl Replay {
             onchain_success: self.recorded.as_ref().map(|r| r.success),
             tier: None,
             tier_note: None,
+            state_slot: None,
+            drifted: Vec::new(),
         })
     }
 

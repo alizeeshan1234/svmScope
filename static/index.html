@@ -4207,6 +4207,11 @@ function renderStory(tr) {
     : `This transaction failed at step ${failed ? failed.path : '?'}${failed && progInfo(failed.program).known ? ' in ' + progInfo(failed.program).name : ''}.`;
   const why = !ok && tr.explain ? `<div class="why"><b>Why:</b> ${esc(tr.explain.title)}. ${esc(tr.explain.detail)}</div>` : '';
   const tierLine = tr.tier_note && !traceBase ? `<li>${esc(tr.tier_note)}</li>` : '';
+  // Why a reconstructed replay diverged: the failing step's accounts whose data
+  // could not be rewound, with their most recent on-chain write.
+  const driftedLine = (tr.drifted && tr.drifted.length && !traceBase) ? `<li>Why: the failing step reads ${tr.drifted.length} account${tr.drifted.length > 1 ? 's' : ''} whose data could not be rewound to slot ${fmt(tr.state_slot)}: ` +
+    tr.drifted.map(d => `<b>${esc(d.role || short(d.address))}</b> ${copyPill(d.address, short(d.address))}${d.changed_since_slot ? ` <span style="color:var(--amber)">written at slot ${fmt(d.last_write_slot)}, ${fmt(d.last_write_slot - tr.state_slot)} slots after this transaction</span>` : d.last_write_slot != null ? ' <span style="color:var(--text-3)">no write since</span>' : ''}`).join(' · ') +
+    `. The replay saw that newer data. Exact state at the slot needs an archival RPC (SVMSCOPE_ARCHIVE_URL).</li>` : '';
   const drift = tr.onchain_success != null && tr.onchain_success !== ok && !traceBase;
   const driftLine = drift ? `<li>On the real network this transaction <b>${tr.onchain_success ? 'succeeded' : 'failed'}</b>. This replay ran against reconstructed state, so some account data may have moved on since; the difference is not necessarily a bug.</li>` : '';
   $('dbgStory').innerHTML = `<div class="story"><div class="h">What happened</div>
@@ -4214,7 +4219,7 @@ function renderStory(tr) {
     <ul>
       ${walletLines.map(l => `<li>${l}</li>`).join('')}
       <li>It ran <b>${top.length} step${top.length === 1 ? '' : 's'}</b>${inner ? ` with <b>${inner} inner call${inner === 1 ? '' : 's'}</b> between programs` : ''}, using ${progs.length ? progs.map(p => `<b>${esc(p)}</b>`).join(', ') : 'only built-in programs'}.</li>
-      <li>Total work: <b>${fmt(tr.result.compute_units)}</b> compute units.</li>${driftLine}${tierLine}
+      <li>Total work: <b>${fmt(tr.result.compute_units)}</b> compute units.</li>${driftLine}${driftedLine}${tierLine}
     </ul></div>`;
   wireCopy($('dbgStory'));
 }

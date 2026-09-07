@@ -52,6 +52,30 @@ pub struct Trace {
     /// state reproduces it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier_note: Option<String>,
+    /// The slot the replay's state was taken as of (reconstructed or exact).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_slot: Option<u64>,
+    /// When the replay failed where the chain did not: the failing step's
+    /// accounts whose data could not be rewound to the slot, with their last
+    /// on-chain write — the concrete reason a reconstructed replay diverged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drifted: Vec<DriftedAccount>,
+}
+
+/// An account of the failing step whose state may differ from the slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct DriftedAccount {
+    /// The account.
+    pub address: String,
+    /// Its role in the failing instruction, from the IDL where known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Slot of the account's most recent on-chain write, if it could be looked up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_write_slot: Option<u64>,
+    /// True when that write landed after the replayed slot: the account is
+    /// known to have changed since.
+    pub changed_since_slot: bool,
 }
 
 /// One instruction or CPI.
