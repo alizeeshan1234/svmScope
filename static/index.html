@@ -4525,7 +4525,7 @@ function selectStep(i) {
     <div class="kv">step <b>${esc(s.path)}</b>${s.depth > 1 ? ` · an inner call, ${s.depth - 1} level${s.depth > 2 ? 's' : ''} deep` : ''}` +
     (s.cu_consumed != null ? ` · <b>${fmt(s.cu_consumed)}</b> compute units` : '') +
     (s.prefix_artifact ? ` · <span style="color:var(--amber)">failed only when run as a prefix; the whole transaction got past this step${stepIntrospects(s) ? ' (it introspects, and a prefix does not contain the later instructions its check looks for)' : ' (mid-transaction state a later step fixes)'}</span>` : '') +
-    (!s.state_known && s.depth > 1 ? ` · <span style="color:var(--text-3)">state shown is after the enclosing top-level step</span>` : '') +
+    (!s.state_known && s.depth > 1 ? ` · <span style="color:var(--text-3)">${s.state_known ? 'state shown is as this inner call finished' : 'state shown is after the enclosing top-level step'}</span>` : '') +
     `</div>` +
     (s.return_data ? `<div class="kv">return data <span class="ret">${esc(s.return_data.data_base64)}</span> <span class="ix-ty">base64, ${esc(short(s.return_data.program))}</span></div>` : '') +
     (s.error ? `<div class="explain"><div class="ic">⚠️</div><div>
