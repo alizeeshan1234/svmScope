@@ -536,7 +536,8 @@ body::after {
 
 /* ---------- cards ---------- */
 .grid > .col { display: flex; flex-direction: column; gap: var(--s-4, 16px); min-width: 0; }
-.grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-4); }
+.grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--s-4); }
+.grid > .card, .grid > .col > .card { min-width: 0; }
 @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
 
 .card {
