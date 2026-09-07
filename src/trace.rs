@@ -93,6 +93,12 @@ pub struct Step {
     /// can be lined up against the unmodified one. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_index: Option<usize>,
+    /// When set, this step's account changes are measured from the post-state
+    /// of top-level step `diffs_since`, not the immediately preceding one: the
+    /// steps in between ran only as prefixes that committed nothing, so their
+    /// changes are folded into this step's diffs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diffs_since: Option<usize>,
     /// The top-level instruction's data, hex — what a raw-data mutation
     /// replaces. Only on depth-1 steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -794,10 +794,21 @@ async fn trace_handler(
                 return replay.trace(&mutations);
             };
             let build = |tier: &str| -> Result<svmscope::Trace, svmscope::Error> {
-                let mut replay = if tier == "now" {
-                    scope.replay(&sig)?
-                } else {
-                    scope.replay_at_slot(&sig)?
+                // The captured world is cached per (rpc, signature, tier), so a
+                // mutated re-run compares against exactly the state its base
+                // trace saw, not a fresh reconstruction that may have moved on.
+                let key = format!("{}|{sig}|{tier}", scope.rpc_url());
+                let mut replay = match world_get(&key) {
+                    Some(r) => r,
+                    None => {
+                        let r = if tier == "now" {
+                            scope.replay(&sig)?
+                        } else {
+                            scope.replay_at_slot(&sig)?
+                        };
+                        world_put(key, r.clone());
+                        r
+                    }
                 };
                 replay.set_time_travel(tt.clone());
                 replay.set_features(features.clone());
@@ -879,6 +890,28 @@ async fn trace_handler(
 /// link opens instantly long after the short response cache has expired. A
 /// landed transaction's as-it-happened trace does not change, so the only
 /// reason to expire is memory.
+type WorldStore = std::collections::HashMap<String, (std::time::Instant, svmscope::Replay)>;
+static WORLDS: std::sync::LazyLock<std::sync::Mutex<WorldStore>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+const WORLD_TTL: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+const WORLD_MAX: usize = 48;
+fn world_get(key: &str) -> Option<svmscope::Replay> {
+    let store = WORLDS.lock().ok()?;
+    store
+        .get(key)
+        .filter(|(t, _)| t.elapsed() < WORLD_TTL)
+        .map(|(_, r)| r.clone())
+}
+fn world_put(key: String, replay: svmscope::Replay) {
+    if let Ok(mut store) = WORLDS.lock() {
+        store.retain(|_, (t, _)| t.elapsed() < WORLD_TTL);
+        if store.len() >= WORLD_MAX {
+            store.clear();
+        }
+        store.insert(key, (std::time::Instant::now(), replay));
+    }
+}
+
 type TraceStore = std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<String>)>;
 static TRACE_STORE: std::sync::LazyLock<std::sync::Mutex<TraceStore>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));

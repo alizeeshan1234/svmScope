@@ -101,9 +101,14 @@ impl Scope {
 
     /// Attach an archival RPC endpoint (e.g. Alchemy's Account Archive) so
     /// `replay_at_slot` can fetch account state as of a transaction's slot.
-
     /// Slot of `address`'s most recent on-chain write (its latest signature),
     /// or `None` if it has none or the lookup fails. One cheap RPC call.
+    /// The RPC endpoint this scope talks to.
+    pub fn rpc_url(&self) -> String {
+        self.client.url()
+    }
+
+    /// Slot of `address`'s most recent on-chain write, or `None`.
     pub fn last_write_slot(&self, address: &str) -> Option<u64> {
         let resp: serde_json::Value = self
             .client
@@ -1070,6 +1075,7 @@ impl PatchComparison {
 /// A transaction's reconstructed world — fetched once via [`Scope::replay`],
 /// then replayed locally any number of times. Every run builds a pristine SVM,
 /// so runs are independent, repeatable, and free.
+#[derive(Clone)]
 pub struct Replay {
     pub(crate) ctx: ReplayContext,
     /// What actually happened on-chain (`None` for pre-flight transactions and
@@ -1363,6 +1369,20 @@ impl Replay {
         let mut steps: Vec<Step> = Vec::new();
         let mut failed_step: Option<usize> = None;
         let mut prev_post: Option<HashMap<Address, Account>> = None;
+        // The world the first step actually ran against: initial accounts with
+        // the mutations applied, so a "before" value is the mutated one.
+        let initial: HashMap<Address, Account> = {
+            let mut svm = self.ctx.fresh_svm();
+            self.ctx.apply_mutations_to(&mut svm, mutations)?;
+            keys.iter()
+                .filter_map(|k| Address::from_str(k).ok())
+                .filter_map(|a| svm.get_account(&a).map(|acc| (a, acc)))
+                .collect()
+        };
+        // Which step's post-state the diffs are relative to; a prefix that
+        // failed commits nothing, so the next step's diffs start from the last
+        // step that did.
+        let mut last_post_step: Option<usize> = None;
         let mut halted = false; // a real failure happened; later steps never ran
 
         for (k, run) in runs.iter().enumerate().take(n) {
@@ -1411,8 +1431,11 @@ impl Replay {
                     let before = prev_post
                         .as_ref()
                         .and_then(|m| m.get(&addr).cloned())
-                        .or_else(|| self.ctx.pre_account_owned(key));
+                        .or_else(|| initial.get(&addr).cloned());
                     let after = post.get(&addr).cloned().or_else(|| before.clone());
+                    // A newly created account has no "before": diff it against
+                    // an empty one rather than dropping it.
+                    let before = before.or_else(|| after.as_ref().map(|_| Account::default()));
                     let (Some(b), Some(a)) = (&before, &after) else {
                         continue;
                     };
@@ -1488,7 +1511,8 @@ impl Replay {
 
             // Emit the nodes.
             let base_index = steps.len();
-            let mut path_stack: Vec<usize> = Vec::new(); // child counters per depth
+            let mut next: Vec<usize> = Vec::new(); // next child index per depth
+            let mut lineage: Vec<usize> = Vec::new(); // indexes of this node's ancestors
             let mut innermost_failure: Option<usize> = None;
             for (i, (depth, ix)) in nodes.iter().enumerate() {
                 let program = keys
@@ -1499,27 +1523,32 @@ impl Replay {
                 let (name, args, accounts) =
                     ixname::enrich_offline(idls, &program, &ix.data, &account_indexes, &keys);
 
-                // Path: "k" for the top, then "k.c0", "k.c0.c1", …
+                // Path: "k" for the top, then "k.c0", "k.c0.c1", … `next` holds
+                // the next child index per depth; `lineage` the indexes assigned
+                // to this node's ancestors (and itself), so a child of "k.0" is
+                // "k.0.0" — the parent's counter advances only for its siblings.
                 let d = *depth as usize;
-                path_stack.truncate(d.saturating_sub(1));
-                while path_stack.len() < d.saturating_sub(1) {
-                    path_stack.push(0);
-                }
                 let path = if d <= 1 {
+                    next.clear();
+                    lineage.clear();
                     k.to_string()
                 } else {
+                    let level = d - 2;
+                    next.truncate(level + 1);
+                    while next.len() <= level {
+                        next.push(0);
+                    }
+                    let idx = next[level];
+                    next[level] += 1;
+                    lineage.truncate(level);
+                    lineage.push(idx);
                     let mut p = k.to_string();
-                    for c in &path_stack {
+                    for c in &lineage {
                         p.push('.');
                         p.push_str(&c.to_string());
                     }
                     p
                 };
-                if d >= 2 {
-                    if let Some(last) = path_stack.last_mut() {
-                        *last += 1;
-                    }
-                }
 
                 // Per-node state: the accounts this instruction names, capped so a
                 // 40-account Jupiter route doesn't dump megabytes of fields.
@@ -1575,6 +1604,9 @@ impl Replay {
                     path,
                     depth: *depth,
                     index: k,
+                    diffs_since: (k > 0 && last_post_step != Some(k - 1))
+                        .then_some(last_post_step)
+                        .flatten(),
                     data_hex: (*depth == 1)
                         .then(|| top_ixs[k].data.iter().map(|b| format!("{b:02x}")).collect()),
                     original_index: (!skipped.is_empty())
@@ -1621,6 +1653,7 @@ impl Replay {
 
             if !run_failed {
                 prev_post = post;
+                last_post_step = Some(k);
             }
         }
 

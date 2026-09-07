@@ -114,8 +114,9 @@ pub enum MutationInput {
         address: String,
         /// The field's name (exact, or an unambiguous final dot-segment).
         field: String,
-        /// The new value; must fit the field's declared type.
-        value: i64,
+        /// The new value, a JSON number or a decimal string (for values beyond
+        /// what JavaScript numbers represent exactly); must fit the field's type.
+        value: serde_json::Value,
     },
 }
 
@@ -171,7 +172,16 @@ impl MutationInput {
             } => Mutation::Field {
                 address,
                 field,
-                value: i128::from(value),
+                value: value
+                    .as_i64()
+                    .map(i128::from)
+                    .or_else(|| value.as_u64().map(i128::from))
+                    .or_else(|| value.as_str().and_then(|s| s.trim().parse::<i128>().ok()))
+                    .ok_or_else(|| {
+                        crate::Error::InvalidSpec(format!(
+                            "field value must be an integer, got {value}"
+                        ))
+                    })?,
             },
         })
     }

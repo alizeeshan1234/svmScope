@@ -4521,7 +4521,7 @@ function selectStep(i) {
     return `<div class="intro-note"><span class="introspect">introspects</span> This instruction is handed the Instructions sysvar: the program reads the other instructions of this transaction. It sees ${tops.length} top-level instructions: ${list}.</div>${failHint}`;
   })() : '';
   const head = `<div class="card"><h2>${progChip(s.program)}${s.name ? `<span class="ixname">${esc(s.name)}</span>` : ''}</h2>
-    <div class="dbg-plain">${esc(plainStep(s))}</div>${introNote}
+    <div class="dbg-plain">${esc(plainStep(s))}</div>${introNote}${s.diffs_since != null ? `<div class="intro-note" style="color:var(--amber)">Account changes below are measured from the state after step ${s.diffs_since}: the step${s.diffs_since + 1 < s.index ? 's' : ''} in between ran only as ${s.diffs_since + 1 < s.index ? 'prefixes' : 'a prefix'} that committed nothing, so their changes are folded in here.</div>` : ''}
     <div class="kv">step <b>${esc(s.path)}</b>${s.depth > 1 ? ` · an inner call, ${s.depth - 1} level${s.depth > 2 ? 's' : ''} deep` : ''}` +
     (s.cu_consumed != null ? ` · <b>${fmt(s.cu_consumed)}</b> compute units` : '') +
     (s.prefix_artifact ? ` · <span style="color:var(--amber)">failed only when run as a prefix; the whole transaction got past this step${stepIntrospects(s) ? ' (it introspects, and a prefix does not contain the later instructions its check looks for)' : ' (mid-transaction state a later step fixes)'}</span>` : '') +
@@ -4718,7 +4718,10 @@ function renderInspector(s) {
     }
     if (tv.startsWith('arg:')) {
       const name = tv.slice(4), a = s.args.find(x => x.name === name);
-      const value = a?.type === 'bool' ? (v === 'true' || v === '1') : a?.type === 'pubkey' ? v : Number(v);
+      // Integers beyond 2^53 cannot survive a JavaScript Number: send the
+      // decimal string and let the engine parse it exactly.
+      const bigInt = /^-?\d+$/.test(v) && !Number.isSafeInteger(Number(v));
+      const value = a?.type === 'bool' ? (v === 'true' || v === '1') : a?.type === 'pubkey' ? v : bigInt ? v : Number(v);
       if (typeof value === 'number' && !Number.isFinite(value)) return;
       stageMutation({ kind: 'ixarg', index: s.index, arg: name, value, _label: `ix ${s.index} · ${name} = ${v}`, _warn: '' });
       return;
@@ -4730,8 +4733,9 @@ function renderInspector(s) {
       stageMutation({ kind: 'lamports', address, lamports: Math.round(sol * 1e9), _label: `${short(address)} balance = ${v} SOL`, _warn: warn });
     } else {
       const field = w.slice(6);
-      const value = /^(true|false)$/.test(v) ? (v === 'true' ? 1 : 0) : Number(v);
-      if (!Number.isFinite(value)) return;
+      const bigInt = /^-?\d+$/.test(v) && !Number.isSafeInteger(Number(v));
+      const value = /^(true|false)$/.test(v) ? (v === 'true' ? 1 : 0) : bigInt ? v : Number(v);
+      if (typeof value === 'number' && !Number.isFinite(value)) return;
       stageMutation({ kind: 'field', address, field, value, _label: `${short(address)}.${field} = ${v}`, _warn: warn });
     }
   });

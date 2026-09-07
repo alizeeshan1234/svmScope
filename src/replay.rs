@@ -236,6 +236,7 @@ fn fetch_loaded_at_slot(
 }
 
 /// A ready-to-load account: either raw data, or a program's ELF bytecode.
+#[derive(Clone)]
 enum Loaded {
     Data(Account),
     Program(Vec<u8>),
@@ -414,6 +415,7 @@ pub(crate) struct LoadedInfo {
 
 /// The reconstructed world a transaction ran in, fetched once. Run any number of
 /// scenarios against it with [`ReplayContext::run`] — each gets a pristine SVM.
+#[derive(Clone)]
 pub(crate) struct ReplayContext {
     /// The replayed transaction's signature (empty for pre-flight transactions).
     signature: String,
@@ -662,7 +664,7 @@ impl ReplayContext {
 
     /// A pristine SVM loaded with the reconstructed state, its clock advanced to
     /// the transaction's slot (and then by any requested time travel).
-    fn fresh_svm(&self) -> LiteSVM {
+    pub(crate) fn fresh_svm(&self) -> LiteSVM {
         self.fresh_svm_with(false)
     }
 
@@ -2136,7 +2138,6 @@ impl ReplayContext {
 
     /// Apply `mutations` to `svm` (the profiler's copy of [`Self::run_full`]'s
     /// setup without executing).
-    #[cfg(feature = "profiler")]
     pub(crate) fn apply_mutations_to(
         &self,
         svm: &mut LiteSVM,
