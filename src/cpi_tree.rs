@@ -44,6 +44,17 @@ pub struct CpiEntry {
     /// Decoded instruction arguments (name/type/value).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<IxArg>,
+    /// First eight bytes of the instruction data, hex — the discriminator a
+    /// program introspecting the transaction through the Instructions sysvar
+    /// would match on. `None` for empty data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discriminator: Option<String>,
+    /// True when the instruction is handed the Instructions sysvar
+    /// (`Sysvar1nstructions1111111111111111111111111`): the program reads the
+    /// other instructions of this transaction — flash-loan repay checks,
+    /// precompile signature checks, guards against sandwiching.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub introspects: bool,
     /// Compute units this invocation consumed, from the `Program X consumed N of
     /// M compute units` log line. `None` for programs that log no such line
     /// (the builtins) or when the logs were truncated.
@@ -56,6 +67,18 @@ pub struct CpiEntry {
     /// `analyze` to resolve addresses, never serialized.
     #[serde(skip)]
     pub(crate) account_indexes: Vec<usize>,
+}
+
+/// The Instructions sysvar: a program given this account reads the
+/// transaction's other instructions.
+pub(crate) const INSTRUCTIONS_SYSVAR: &str = "Sysvar1nstructions1111111111111111111111111";
+
+/// Mark every instruction that is handed the Instructions sysvar. Call after
+/// the accounts are resolved to addresses.
+pub(crate) fn mark_introspection(tree: &mut [CpiEntry]) {
+    for e in tree.iter_mut() {
+        e.introspects = e.accounts.iter().any(|a| a.address == INSTRUCTIONS_SYSVAR);
+    }
 }
 
 /// Attach per-invocation compute from the transaction logs. The `invoke`
@@ -106,6 +129,11 @@ pub(crate) fn build_cpi_tree(tx: &Value) -> Vec<CpiEntry> {
             .unwrap_or_default()
     };
     let entry = |index, program, stack_height, ix: &Value| CpiEntry {
+        discriminator: {
+            let d = data_of(ix);
+            (!d.is_empty()).then(|| d.iter().take(8).map(|b| format!("{b:02x}")).collect())
+        },
+        introspects: false,
         compute_units: None,
         index,
         program,

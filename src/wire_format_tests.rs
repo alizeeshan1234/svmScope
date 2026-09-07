@@ -143,6 +143,8 @@ fn account_info_wire_shape() {
 #[test]
 fn cpi_entry_wire_shape() {
     let full = CpiEntry {
+        discriminator: None,
+        introspects: false,
         compute_units: None,
         index: 0,
         program: "Prog111".into(),
@@ -174,6 +176,8 @@ fn cpi_entry_wire_shape() {
     );
     // Undecodable instruction: name/accounts/args are omitted entirely.
     let minimal = CpiEntry {
+        discriminator: None,
+        introspects: false,
         compute_units: None,
         index: 1,
         program: "Prog111".into(),

@@ -1659,6 +1659,8 @@ mod frame_name_tests {
 
     fn entry(program: &str, name: &str, h: u64) -> crate::CpiEntry {
         crate::CpiEntry {
+            discriminator: None,
+            introspects: false,
             compute_units: None,
             index: 0,
             program: program.into(),

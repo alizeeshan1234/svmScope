@@ -246,6 +246,7 @@ impl Scope {
                 e.accounts = accounts;
             }
         }
+        cpi_tree::mark_introspection(&mut cpi_tree);
         Ok(Analysis {
             overview: build_overview(&tx, &cpi_tree, account_keys.len()),
             cpi_tree,

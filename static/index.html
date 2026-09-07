@@ -626,6 +626,13 @@ body::after {
 .tnode .tail { margin-left: auto; display: flex; gap: var(--s-3); align-items: center; flex: 0 0 auto; }
 .tnode .depth { font-size: 10.5px; color: var(--text-3); font-family: var(--font-mono); }
 .tnode .cu { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3); white-space: nowrap; min-width: 72px; text-align: right; }
+.introspect { font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--cyan); background: var(--bg-2); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; white-space: nowrap; }
+.intro-note { font-size: 12.5px; color: var(--text-2); line-height: 1.5; margin: 6px 0 10px; }
+.intro-view { width: 100%; border-collapse: collapse; font-size: 12px; }
+.intro-view th { text-align: left; color: var(--text-3); font-weight: 600; font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; padding: 4px 8px; }
+.intro-view td { padding: 4px 8px; border-top: 1px solid var(--border); font-family: var(--font-mono); }
+.intro-view td.disc { color: var(--text-3); }
+.intro-view tr.reader td { background: var(--bg-2); }
 .tnode .ixname {
   font-size: 11.5px; font-weight: 600; color: var(--brand-strong);
   background: var(--brand-soft); border: 1px solid var(--brand-border);
@@ -1716,6 +1723,7 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
 
       <div class="grid">
         <div class="card"><h2>Instruction call tree <span id="treeCount" class="count"></span></h2><div id="tree" class="tree"></div></div>
+        <div class="card" id="introspectionCard" hidden><h2>Instruction introspection <span id="introspectCount" class="count"></span></h2><div id="introspection"></div></div>
         <div class="card"><h2>Compute units <span id="cuCount" class="count"></span><a class="cu-link" id="cuProfileLink" title="Every BPF instruction this transaction executed, by function, as a flamegraph">🔥 see where it went →</a></h2><div id="compute" class="rows"></div></div>
         <div class="card"><h2>SOL balance changes <span id="diffCount" class="count"></span></h2><div id="diffs" class="rows"></div></div>
         <div class="card"><h2>Token balance changes <span id="tokCount" class="count"></span></h2><div id="tokens" class="rows"></div></div>
@@ -2132,8 +2140,9 @@ function renderTree(entries) {
     const hasDetail = (e.args && e.args.length) || (e.accounts && e.accounts.length);
     const caret = hasDetail ? `<span class="ix-caret">▸</span>` : '';
     const cu = e.compute_units != null ? `<span class="cu">${fmt(e.compute_units)} CU</span>` : '';
+    const intro = e.introspects ? `<span class="introspect" title="This instruction is handed the Instructions sysvar: the program reads the other instructions of this transaction.">introspects</span>` : '';
     const head = `<div class="tnode${hasDetail ? ' expandable' : ''}"${hasDetail ? ` data-ix="${i}"` : ''}>` +
-      `${ix}<span class="rail">${rail}</span>${caret}${progChip(e.program)}${nm}` +
+      `${ix}<span class="rail">${rail}</span>${caret}${progChip(e.program)}${nm}${intro}` +
       `<span class="tail">${depth > 1 ? `<span class="depth">depth ${depth}</span>` : ''}${cu}</span></div>`;
     return head + (hasDetail ? renderIxDetail(e, i) : '');
   }).join('');
@@ -2144,6 +2153,27 @@ function renderTree(entries) {
     if (panel) { panel.classList.toggle('open'); n.classList.toggle('on'); }
   }));
   wireCopy($('tree'));
+  renderIntrospection(entries);
+}
+
+// What a program that reads the Instructions sysvar actually sees: the
+// transaction's top-level instructions in order, each as program + data
+// discriminator — the list a flash-loan repay check or a precompile
+// signature check scans. Shown only when some instruction reads it.
+function renderIntrospection(entries) {
+  const readers = entries.filter(e => e.introspects);
+  const card = $('introspectionCard');
+  if (!readers.length) { card.hidden = true; return; }
+  card.hidden = false;
+  $('introspectCount').textContent = readers.length;
+  const tops = entries.filter(e => e.stack_height === 1);
+  const readerTop = new Set(readers.map(r => r.index));
+  const who = readers.map(r => `<b>${esc(r.name || 'instruction')}</b> (${esc(progInfo(r.program).known ? progInfo(r.program).name : short(r.program))}${r.stack_height > 1 ? `, inside #${r.index}` : `, #${r.index}`})`);
+  let html = `<div class="intro-note">${who.join(', ')} ${readers.length === 1 ? 'is' : 'are'} handed the Instructions sysvar, so the program reads the other instructions of this transaction — how a flash loan proves its repay is present, how a program checks an Ed25519 or secp256k1 precompile ran, how a guard rejects being sandwiched. This is the list it sees:</div>`;
+  html += '<div style="overflow-x:auto"><table class="intro-view"><thead><tr><th>#</th><th>program</th><th>instruction</th><th>discriminator</th><th>accounts</th></tr></thead><tbody>'
+    + tops.map(e => `<tr class="${readerTop.has(e.index) ? 'reader' : ''}"><td>${e.index}</td><td>${esc(progInfo(e.program).known ? progInfo(e.program).name : short(e.program))}</td><td>${esc(e.name || '?')}${readerTop.has(e.index) ? ' <span class="introspect">reads</span>' : ''}</td><td class="disc">${esc(e.discriminator || '—')}</td><td>${(e.accounts || []).length}</td></tr>`).join('')
+    + '</tbody></table></div>';
+  $('introspection').innerHTML = html;
 }
 
 // The developer payload: an instruction's decoded arguments and named accounts,
@@ -4131,6 +4161,9 @@ function plainStep(s) {
   return `${who} ${verb}${n ? `, changing ${n} account${n === 1 ? '' : 's'}` : ''}${s.cu_consumed != null ? ` (${fmt(s.cu_consumed)} compute units)` : ''}.`;
 }
 
+const INSTRUCTIONS_SYSVAR = 'Sysvar1nstructions1111111111111111111111111';
+function stepIntrospects(s) { return (s.accounts || []).some(a => a.address === INSTRUCTIONS_SYSVAR); }
+
 // The story at the top: outcome, who did what, and the net effect on the sender.
 function renderStory(tr) {
   const ok = tr.result.success;
@@ -4382,11 +4415,12 @@ function renderTrace(tr) {
     const mark = cls === 'fail' ? '✗' : cls === 'artifact' ? '~' : cls === 'skip' ? '·' : '✓';
     const rail = s.depth > 1 ? '│   '.repeat(s.depth - 2) + '└── ' : '';
     const nm = s.name ? `<span class="ixname">${esc(s.name)}</span>` : '';
+    const intro = stepIntrospects(s) ? `<span class="introspect" title="reads the other instructions of this transaction">introspects</span>` : '';
     const nchg = s.diffs && s.diffs.length ? `<span class="nchg" title="accounts changed">${s.diffs.length} Δ</span>` : '';
     const cu = s.cu_consumed != null ? `<span class="cu">${fmt(s.cu_consumed)} CU</span>` : '<span class="cu"></span>';
     return `<div class="step ${cls} d${s.depth}" data-i="${i}" title="${esc(s.program)}">` +
       `<span class="mark">${mark}</span><span class="path">${esc(s.path)}</span><span class="rail">${rail}</span>` +
-      `${progChip(s.program)}${nm}${nchg}${cu}` +
+      `${progChip(s.program)}${nm}${intro}${nchg}${cu}` +
       `<span class="plain">${esc(plainStep(s))}</span></div>`;
   }).join('');
   $('dbgTree').querySelectorAll('.step').forEach(n => n.addEventListener('click', ev => {
@@ -4463,8 +4497,12 @@ function selectStep(i) {
   const isFail = trace.failed_step === i;
   const byAddrAll = Object.fromEntries((s.state || []).map(x => [x.address, x]));
   const open = dbgMode === 'expert' ? ' open' : '';
+  const introNote = stepIntrospects(s) ? (() => {
+    const tops = trace.steps.filter(x => x.depth === 1);
+    return `<div class="intro-note"><span class="introspect">introspects</span> This instruction is handed the Instructions sysvar: the program reads the other instructions of this transaction. It sees ${tops.length} top-level instructions: ${tops.map((x, k) => `<b>${k}</b> ${esc(x.name || short(x.program))}`).join(' · ')}.</div>`;
+  })() : '';
   const head = `<div class="card"><h2>${progChip(s.program)}${s.name ? `<span class="ixname">${esc(s.name)}</span>` : ''}</h2>
-    <div class="dbg-plain">${esc(plainStep(s))}</div>
+    <div class="dbg-plain">${esc(plainStep(s))}</div>${introNote}
     <div class="kv">step <b>${esc(s.path)}</b>${s.depth > 1 ? ` · an inner call, ${s.depth - 1} level${s.depth > 2 ? 's' : ''} deep` : ''}` +
     (s.cu_consumed != null ? ` · <b>${fmt(s.cu_consumed)}</b> compute units` : '') +
     (s.prefix_artifact ? ` · <span style="color:var(--amber)">failed as a prefix but the whole transaction passed (mid-transaction state a later step fixes)</span>` : '') +
