@@ -793,86 +793,7 @@ async fn trace_handler(
                 replay.set_features(features);
                 return replay.trace(&mutations);
             };
-            let build = |tier: &str| -> Result<svmscope::Trace, svmscope::Error> {
-                // The captured world is cached per (rpc, signature, tier), so a
-                // mutated re-run compares against exactly the state its base
-                // trace saw, not a fresh reconstruction that may have moved on.
-                let key = format!("{}|{sig}|{tier}", scope.rpc_url());
-                let mut replay = match world_get(&key) {
-                    Some(r) => r,
-                    None => {
-                        let r = if tier == "now" {
-                            scope.replay(&sig)?
-                        } else {
-                            scope.replay_at_slot(&sig)?
-                        };
-                        world_put(key, r.clone());
-                        r
-                    }
-                };
-                replay.set_time_travel(tt.clone());
-                replay.set_features(features.clone());
-                let mut t = replay.trace(&mutations)?;
-                t.tier = Some(tier.to_string());
-                // A failure the chain did not have: name the failing step's
-                // accounts that could not be rewound, with their last write.
-                let cert = replay.certificate();
-                let slot = match cert.fidelity {
-                    svmscope::Fidelity::Reconstructed { slot } | svmscope::Fidelity::Exact { slot } => Some(slot),
-                    _ => None,
-                };
-                t.state_slot = slot;
-                let diverged = t.onchain_success.is_some_and(|on| on != t.result.success);
-                if let (true, Some(fi), Some(slot)) = (diverged, t.failed_step, slot) {
-                    if let Some(step) = t.steps.get(fi) {
-                        let drifted: std::collections::HashSet<&str> =
-                            cert.drifted.iter().map(String::as_str).collect();
-                        let mut seen = std::collections::HashSet::new();
-                        let mut out = Vec::new();
-                        for acc in &step.accounts {
-                            if !drifted.contains(acc.address.as_str()) || !seen.insert(acc.address.clone()) {
-                                continue;
-                            }
-                            if out.len() >= 16 {
-                                break;
-                            }
-                            let last = scope.last_write_slot(&acc.address);
-                            out.push(svmscope::DriftedAccount {
-                                address: acc.address.clone(),
-                                role: acc.name.clone(),
-                                last_write_slot: last,
-                                changed_since_slot: last.is_some_and(|l| l > slot),
-                            });
-                        }
-                        t.drifted = out;
-                    }
-                }
-                Ok(t)
-            };
-            if let Some(t) = pinned.as_deref() {
-                return build(t);
-            }
-            // Best of two tiers: reconstructed state at the slot first; if its
-            // outcome disagrees with the chain and current state reproduces the
-            // on-chain outcome, current state is the more faithful replay.
-            let at_slot = build("at_slot")?;
-            let diverged = at_slot
-                .onchain_success
-                .is_some_and(|on| on != at_slot.result.success);
-            if diverged && mutations.is_empty() && tt.is_noop() {
-                if let Ok(now) = build("now") {
-                    if now.onchain_success == Some(now.result.success) {
-                        let mut now = now;
-                        now.tier_note = Some(format!(
-                            "State reconstructed at the transaction's slot {} where the chain {}; current state reproduces the on-chain outcome, so this trace ran against current state.",
-                            if at_slot.result.success { "succeeded" } else { "failed" },
-                            if at_slot.onchain_success == Some(true) { "succeeded" } else { "failed" }
-                        ));
-                        return Ok(now);
-                    }
-                }
-            }
-            Ok(at_slot)
+            trace_with_world(&scope, &sig, &mutations, &tt, &features, pinned.as_deref())
         })
         .await
         .map_err(|e| {
@@ -890,6 +811,105 @@ async fn trace_handler(
 /// link opens instantly long after the short response cache has expired. A
 /// landed transaction's as-it-happened trace does not change, so the only
 /// reason to expire is memory.
+/// The trace of `sig` against the cached world for its tier: reconstructed
+/// state first; if that verdict disagrees with the chain and current state
+/// alone reproduces the on-chain outcome, current state. `pinned` forces a
+/// tier (a mutated re-run must use the tier of its base trace). Both the GET
+/// and the POST handlers go through here, so an initial trace and its re-runs
+/// share one captured world.
+fn trace_with_world(
+    scope: &Scope,
+    sig: &str,
+    mutations: &[Mutation],
+    tt: &TimeTravel,
+    features: &[svmscope::FeatureToggle],
+    pinned: Option<&str>,
+) -> Result<svmscope::Trace, svmscope::Error> {
+    let build = |tier: &str| -> Result<svmscope::Trace, svmscope::Error> {
+        // The captured world is cached per (rpc, signature, tier), so a
+        // mutated re-run compares against exactly the state its base
+        // trace saw, not a fresh reconstruction that may have moved on.
+        let key = format!("{}|{sig}|{tier}", scope.rpc_url());
+        let mut replay = match world_get(&key) {
+            Some(r) => r,
+            None => {
+                let r = if tier == "now" {
+                    scope.replay(&sig)?
+                } else {
+                    scope.replay_at_slot(&sig)?
+                };
+                world_put(key, r.clone());
+                r
+            }
+        };
+        replay.set_time_travel(tt.clone());
+        replay.set_features(features.to_vec());
+        let mut t = replay.trace(mutations)?;
+        t.tier = Some(tier.to_string());
+        // A failure the chain did not have: name the failing step's
+        // accounts that could not be rewound, with their last write.
+        let cert = replay.certificate();
+        let slot = match cert.fidelity {
+            svmscope::Fidelity::Reconstructed { slot } | svmscope::Fidelity::Exact { slot } => {
+                Some(slot)
+            }
+            _ => None,
+        };
+        t.state_slot = slot;
+        let diverged = t.onchain_success.is_some_and(|on| on != t.result.success);
+        if let (true, Some(fi), Some(slot)) = (diverged, t.failed_step, slot) {
+            if let Some(step) = t.steps.get(fi) {
+                let drifted: std::collections::HashSet<&str> =
+                    cert.drifted.iter().map(String::as_str).collect();
+                let mut seen = std::collections::HashSet::new();
+                let mut out = Vec::new();
+                for acc in &step.accounts {
+                    if !drifted.contains(acc.address.as_str()) || !seen.insert(acc.address.clone())
+                    {
+                        continue;
+                    }
+                    if out.len() >= 16 {
+                        break;
+                    }
+                    let last = scope.last_write_slot(&acc.address);
+                    out.push(svmscope::DriftedAccount {
+                        address: acc.address.clone(),
+                        role: acc.name.clone(),
+                        last_write_slot: last,
+                        changed_since_slot: last.is_some_and(|l| l > slot),
+                    });
+                }
+                t.drifted = out;
+            }
+        }
+        Ok(t)
+    };
+    if let Some(t) = pinned {
+        return build(t);
+    }
+    // Best of two tiers: reconstructed state at the slot first; if its
+    // outcome disagrees with the chain and current state reproduces the
+    // on-chain outcome, current state is the more faithful replay.
+    let at_slot = build("at_slot")?;
+    let diverged = at_slot
+        .onchain_success
+        .is_some_and(|on| on != at_slot.result.success);
+    if diverged && mutations.is_empty() && tt.is_noop() {
+        if let Ok(now) = build("now") {
+            if now.onchain_success == Some(now.result.success) {
+                let mut now = now;
+                now.tier_note = Some(format!(
+                    "State reconstructed at the transaction's slot {} where the chain {}; current state reproduces the on-chain outcome, so this trace ran against current state.",
+                    if at_slot.result.success { "succeeded" } else { "failed" },
+                    if at_slot.onchain_success == Some(true) { "succeeded" } else { "failed" }
+                ));
+                return Ok(now);
+            }
+        }
+    }
+    Ok(at_slot)
+}
+
 type WorldStore = std::collections::HashMap<String, (std::time::Instant, svmscope::Replay)>;
 static WORLDS: std::sync::LazyLock<std::sync::Mutex<WorldStore>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -943,7 +963,14 @@ async fn trace_get_handler(
     }
     let result =
         tokio::task::spawn_blocking(move || -> Result<svmscope::Trace, svmscope::Error> {
-            scope_for(url).replay_at_slot(&signature)?.trace(&[])
+            trace_with_world(
+                &scope_for(url),
+                &signature,
+                &[],
+                &TimeTravel::default(),
+                &[],
+                None,
+            )
         })
         .await
         .map_err(|e| {

@@ -1490,6 +1490,14 @@ impl Replay {
                     .get(rank)
                     .map(|s| s.accounts.iter().cloned().collect())
             };
+            // The state an inner instruction started from: its own entry
+            // snapshot, so the caller's changes before the call are never
+            // credited to the call.
+            let inner_entry = |rank: usize| -> Option<HashMap<Address, Account>> {
+                run.inner_posts
+                    .get(rank)
+                    .map(|s| s.entry.iter().cloned().collect())
+            };
             // Diffs of `addrs` between a before-lookup and an after-state.
             let diffs_between = |before_of: &dyn Fn(&Address) -> Option<Account>,
                                  after: &HashMap<Address, Account>,
@@ -1620,15 +1628,15 @@ impl Replay {
                     p
                 };
 
-                // A CPI with its own snapshot: state as it stood when this
-                // inner instruction finished, and its changes since the inner
-                // instruction that finished before it (or the step's start).
+                // A CPI with its own snapshots: state as it stood when this
+                // inner instruction finished, and its changes measured from
+                // the state it started with.
                 let (node_post, node_diffs): (Option<HashMap<Address, Account>>, Vec<AccountDiff>) =
                     if i > 0 && inner_exact {
                         let rank = completion[i];
                         match inner_map(rank) {
                             Some(after) => {
-                                let prev = if rank > 0 { inner_map(rank - 1) } else { None };
+                                let prev = inner_entry(rank);
                                 let before_of = |a: &Address| -> Option<Account> {
                                     prev.as_ref()
                                         .and_then(|m| m.get(a).cloned())

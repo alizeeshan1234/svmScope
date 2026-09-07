@@ -17,8 +17,17 @@ pub mod instruction_hook {
     use crate::invoke_context::InvokeContext;
     use std::cell::RefCell;
 
+    /// Whether the instruction is about to run or has just finished.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Phase {
+        /// The frame is pushed; nothing of the instruction has executed yet.
+        Enter,
+        /// The instruction has executed; `ok` says whether it succeeded.
+        Exit,
+    }
+
     /// The observer signature.
-    pub type Hook = Box<dyn for<'a, 'b> FnMut(&InvokeContext<'a, 'b>, bool)>;
+    pub type Hook = Box<dyn for<'a, 'b> FnMut(&InvokeContext<'a, 'b>, Phase, bool)>;
 
     thread_local! {
         static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
@@ -34,11 +43,11 @@ pub mod instruction_hook {
         HOOK.with(|h| *h.borrow_mut() = None);
     }
 
-    pub(crate) fn fire(ctx: &InvokeContext<'_, '_>, ok: bool) {
+    pub(crate) fn fire(ctx: &InvokeContext<'_, '_>, phase: Phase, ok: bool) {
         HOOK.with(|h| {
             if let Ok(mut guard) = h.try_borrow_mut() {
                 if let Some(f) = guard.as_mut() {
-                    f(ctx, ok);
+                    f(ctx, phase, ok);
                 }
             }
         });

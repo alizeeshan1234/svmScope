@@ -540,11 +540,12 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
     ) -> Result<(), InstructionError> {
         *compute_units_consumed = 0;
         self.push()?;
+        // svmscope: observe every instruction at every depth on entry (state
+        // it starts from) and on exit (state it produced), while the
+        // transaction context still holds its frame.
+        crate::instruction_hook::fire(self, crate::instruction_hook::Phase::Enter, true);
         let result = self.process_executable_chain(compute_units_consumed, timings);
-        // svmscope: observe every instruction at every depth once it has run,
-        // before its frame pops, while the transaction context still holds
-        // its frame and the account state it produced.
-        crate::instruction_hook::fire(self, result.is_ok());
+        crate::instruction_hook::fire(self, crate::instruction_hook::Phase::Exit, result.is_ok());
         // MUST pop if and only if `push` succeeded, independent of `result`.
         // Thus, the `.and()` instead of an `.and_then()`.
         result.and(self.pop())

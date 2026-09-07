@@ -4561,7 +4561,9 @@ function selectStep(i) {
   $('dbgDetail').querySelectorAll('.old.editable').forEach(el => el.addEventListener('click', () => {
     const address = el.dataset.addr, field = el.dataset.field;
     inlineEdit(el, el.dataset.val, v => {
-      const n = Number(v); if (!Number.isFinite(n)) return;
+      v = String(v).trim();
+      const big = /^-?\d+$/.test(v) && !Number.isSafeInteger(Number(v));
+      const n = big ? v : Number(v); if (!big && !Number.isFinite(n)) return;
       const warn = writtenEarlier(address, dbgSel) ? 'an earlier step also writes this account, so the edit applies to the initial state, not exactly to this step' : '';
       stageMutation({ kind: 'field', address, field, value: n, _label: `${short(address)}.${field} = ${v}`, _warn: warn });
     });
@@ -4654,7 +4656,9 @@ function renderInspector(s) {
   $('dbgDetail').querySelectorAll('.st-row .ed').forEach(el => el.addEventListener('click', () => {
     const address = el.dataset.addr, field = el.dataset.field;
     inlineEdit(el, el.dataset.val, v => {
-      const n = Number(v); if (!Number.isFinite(n) && !/^(true|false)$/.test(v)) return;
+      v = String(v).trim();
+      const big = /^-?\d+$/.test(v) && !Number.isSafeInteger(Number(v));
+      const n = big ? v : Number(v); if (!big && !Number.isFinite(n) && !/^(true|false)$/.test(v)) return;
       const val = /^(true|false)$/.test(v) ? (v === 'true' ? 1 : 0) : n;
       const warn = writtenEarlier(address, dbgSel) ? 'an earlier step also writes this account, so the edit applies to the initial state, not exactly to this step' : '';
       stageMutation({ kind: 'field', address, field, value: val, _label: `${short(address)}.${field} = ${v}`, _warn: warn });

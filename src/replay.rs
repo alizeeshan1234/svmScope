@@ -2468,29 +2468,41 @@ impl ReplayContext {
         // so far is the top-level index an inner snapshot belongs to.
         let inner: Arc<Mutex<Vec<(usize, InnerSnapshot)>>> = Arc::new(Mutex::new(Vec::new()));
         {
+            use solana_program_runtime::instruction_hook::Phase;
             let inner = Arc::clone(&inner);
             let mut tops = 0usize;
-            solana_program_runtime::instruction_hook::set(Box::new(move |ctx, ok| {
+            // Entry snapshots of the inner instructions currently open, innermost last.
+            let mut open: Vec<Vec<(Address, Account)>> = Vec::new();
+            solana_program_runtime::instruction_hook::set(Box::new(move |ctx, phase, ok| {
                 let height = ctx.get_stack_height();
                 if height <= 1 {
-                    tops += 1;
+                    if phase == Phase::Exit {
+                        tops += 1;
+                    }
                     return;
                 }
-                let program = ctx
-                    .transaction_context
-                    .get_current_instruction_context()
-                    .ok()
-                    .and_then(|ic| ic.get_program_key().ok())
-                    .map(|k| k.to_string())
-                    .unwrap_or_default();
-                let snap = InnerSnapshot {
-                    height: height as u8,
-                    program,
-                    ok,
-                    accounts: snapshot_accounts(ctx),
-                };
-                if let Ok(mut v) = inner.lock() {
-                    v.push((tops, snap));
+                match phase {
+                    Phase::Enter => open.push(snapshot_accounts(ctx)),
+                    Phase::Exit => {
+                        let entry = open.pop().unwrap_or_default();
+                        let program = ctx
+                            .transaction_context
+                            .get_current_instruction_context()
+                            .ok()
+                            .and_then(|ic| ic.get_program_key().ok())
+                            .map(|k| k.to_string())
+                            .unwrap_or_default();
+                        let snap = InnerSnapshot {
+                            height: height as u8,
+                            program,
+                            ok,
+                            accounts: snapshot_accounts(ctx),
+                            entry,
+                        };
+                        if let Ok(mut v) = inner.lock() {
+                            v.push((tops, snap));
+                        }
+                    }
                 }
             }));
         }
@@ -2624,6 +2636,9 @@ pub(crate) struct InnerSnapshot {
     pub(crate) ok: bool,
     /// Every transaction account as it stood when this instruction finished.
     pub(crate) accounts: Vec<(Address, Account)>,
+    /// Every transaction account as it stood when this instruction started —
+    /// the baseline its own changes are measured from.
+    pub(crate) entry: Vec<(Address, Account)>,
 }
 
 /// Account state after one top-level instruction, from the single-run hook.
