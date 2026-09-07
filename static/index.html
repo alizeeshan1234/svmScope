@@ -535,6 +535,7 @@ body::after {
 }
 
 /* ---------- cards ---------- */
+.grid > .col { display: flex; flex-direction: column; gap: var(--s-4, 16px); min-width: 0; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-4); }
 @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
 
@@ -1724,10 +1725,12 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
 
       <div class="grid">
         <div class="card"><h2>Instruction call tree <span id="treeCount" class="count"></span></h2><div id="tree" class="tree"></div></div>
-        <div class="card"><h2>Compute units <span id="cuCount" class="count"></span><a class="cu-link" id="cuProfileLink" title="Every BPF instruction this transaction executed, by function, as a flamegraph">🔥 see where it went →</a></h2><div id="compute" class="rows"></div></div>
+        <div class="col">
+          <div class="card"><h2>Compute units <span id="cuCount" class="count"></span><a class="cu-link" id="cuProfileLink" title="Every BPF instruction this transaction executed, by function, as a flamegraph">🔥 see where it went →</a></h2><div id="compute" class="rows"></div></div>
+          <div class="card"><h2>SOL balance changes <span id="diffCount" class="count"></span></h2><div id="diffs" class="rows"></div></div>
+          <div class="card"><h2>Token balance changes <span id="tokCount" class="count"></span></h2><div id="tokens" class="rows"></div></div>
+        </div>
         <div class="card" id="introspectionCard" style="grid-column: 1 / -1" hidden><h2>Instruction introspection <span id="introspectCount" class="count"></span></h2><div id="introspection"></div></div>
-        <div class="card"><h2>SOL balance changes <span id="diffCount" class="count"></span></h2><div id="diffs" class="rows"></div></div>
-        <div class="card"><h2>Token balance changes <span id="tokCount" class="count"></span></h2><div id="tokens" class="rows"></div></div>
       </div>
 
       <!-- The logs the transaction actually produced on-chain, shown immediately. -->
