@@ -5,3 +5,9 @@ sdk/dist/
 *.md
 TODO.md
 fly.toml
+static/.env.local
+static/.vercel
+**/.env
+**/.env.*
+.vercel
+web/

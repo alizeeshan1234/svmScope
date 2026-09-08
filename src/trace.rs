@@ -121,7 +121,8 @@ pub struct Step {
     /// `[start, end)` into `Trace::result.logs` — the lines this step produced,
     /// including its CPIs' lines.
     pub logs: (usize, usize),
-    /// Accounts this step changed, before → after. Top-level steps only.
+    /// Accounts this step changed, before → after. Present on inner steps
+    /// too when the runtime observer supplied their entry and exit state.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub diffs: Vec<AccountDiff>,
     /// Whether `diffs` is authoritative. False for CPI rows (structure known,
@@ -310,7 +311,7 @@ impl Trace {
         self.failed_step.and_then(|i| self.steps.get(i))
     }
 
-    /// Top-level steps only.
+    /// Top-level steps, and inner steps when the runtime observer ran.
     pub fn top_level(&self) -> impl Iterator<Item = &Step> {
         self.steps.iter().filter(|s| s.depth == 1)
     }
@@ -377,6 +378,11 @@ pub(crate) fn spans_from_logs(logs: &[String], from: usize) -> Vec<LogSpan> {
         let Some(rest) = line.strip_prefix("Program ") else {
             continue;
         };
+        // `Program log:` / `data:` / `return:` carry program-chosen payloads;
+        // a program that logs the text " invoke [1]" must not open a span.
+        if rest.starts_with("log: ") || rest.starts_with("data: ") || rest.starts_with("return: ") {
+            continue;
+        }
         if let Some(pos) = rest.find(" invoke [") {
             let program = rest[..pos].to_string();
             let depth = rest[pos + 9..]

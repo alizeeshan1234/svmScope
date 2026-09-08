@@ -2,7 +2,7 @@
 name = "svmscope"
 version = "0.5.2"
 edition = "2021"
-# Verified: the full test suite and all targets compile on 1.91, and the
+# Verified: the full test suite and all targets compile on 1.93, and the
 # dependency tree requires nothing newer.
 rust-version = "1.93"
 description = "Transaction autopsy for Solana — decode any mainnet transaction, replay it locally in an embedded SVM, and mutate state to see what happens."
@@ -59,6 +59,7 @@ solana-clock = "=3.1.1"
 solana-client = "=4.2.1"
 solana-pubkey = "=4.2.1"
 solana-transaction = { version = "=4.1.6", features = ["wincode"] }
+solana-transaction-error = "=3.3.2"
 # Not used directly: caps resolution for consumers. solana-reward-info 6.3+
 # switched to wincode 0.6 while solana-transaction-status-client-types 4.2.1
 # (via solana-client) still derives wincode 0.5 traits, so a fresh `cargo add

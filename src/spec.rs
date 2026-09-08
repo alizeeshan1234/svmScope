@@ -121,7 +121,7 @@ pub enum MutationInput {
 }
 
 /// Decode a hex string, tolerating `0x`, spaces, and underscores.
-fn hex_decode(s: &str) -> Result<Vec<u8>> {
+pub(crate) fn hex_decode(s: &str) -> Result<Vec<u8>> {
     let s = s.trim().trim_start_matches("0x").replace([' ', '_'], "");
     // Guard ASCII before byte-slicing below: a multi-byte char would otherwise
     // pass the even-length check and panic on a non-char-boundary slice.

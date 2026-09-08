@@ -489,13 +489,31 @@ fn enrich_with(
                     .into_iter()
                     .map(|(name, ty, value)| IxArg { name, ty, value })
                     .collect();
-                // Top-level entries only (groups keep their group name), exactly
-                // like the old flat read of the instruction's `accounts` array.
-                let named: Vec<Option<String>> = ix
-                    .accounts
-                    .iter()
-                    .map(|acc| acc.name.as_deref().map(titleize))
-                    .collect();
+                // An Anchor account *group* (nested `accounts`) occupies one
+                // position per leaf in the real account list, so flatten to
+                // leaves with the group name as a prefix — otherwise every
+                // account after a group is named after the wrong entry.
+                fn leaves(
+                    nodes: &[crate::idl_model::AccountNode],
+                    prefix: &str,
+                    out: &mut Vec<Option<String>>,
+                ) {
+                    for n in nodes {
+                        let own = n.name.as_deref().map(titleize);
+                        match &n.children {
+                            Some(kids) => {
+                                let p = match &own {
+                                    Some(g) => format!("{prefix}{g} · "),
+                                    None => prefix.to_string(),
+                                };
+                                leaves(kids, &p, out);
+                            }
+                            None => out.push(own.map(|o| format!("{prefix}{o}"))),
+                        }
+                    }
+                }
+                let mut named: Vec<Option<String>> = Vec::new();
+                leaves(&ix.accounts, "", &mut named);
                 (name, args, named)
             }
             None => (None, vec![], vec![]),

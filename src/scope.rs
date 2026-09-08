@@ -1290,7 +1290,7 @@ impl Replay {
         use solana_account::Account;
         use std::collections::HashMap;
 
-        // A prefix replay per instruction: bound it so a pathological 60-instruction
+        // Prefix mode replays once per instruction: bound it so a pathological 60-instruction
         // transaction can't turn one request into a minute of CPU.
         const MAX_TRACE_INSTRUCTIONS: usize = 64;
         let n_ix = self.ctx.transaction().message.instructions().len();
@@ -1315,9 +1315,24 @@ impl Replay {
                 _ => None,
             })
             .collect();
-        let original_of: Vec<usize> = (0..self.ctx.transaction().message.instructions().len())
-            .filter(|i| !skipped.contains(i))
-            .collect();
+        // Original position of each instruction of the mutated transaction:
+        // drop the skipped ones, then apply the moves in order — exactly the
+        // sequence `tx_with_mutations` performs on the instruction list.
+        let original_of: Vec<usize> = {
+            let mut order: Vec<usize> = (0..self.ctx.transaction().message.instructions().len())
+                .filter(|i| !skipped.contains(i))
+                .collect();
+            for m in mutations {
+                if let Mutation::MoveIx { from, to } = m {
+                    if *from < order.len() && *to < order.len() {
+                        let v = order.remove(*from);
+                        order.insert(*to, v);
+                    }
+                }
+            }
+            order
+        };
+        let reordered = original_of.iter().enumerate().any(|(i, &o)| i != o);
         let n = top_ixs.len();
 
         // The whole transaction is the last prefix. Its logs are the canonical
@@ -1339,12 +1354,9 @@ impl Replay {
         // whole run got past it. Introspecting instructions are the usual
         // case — a flash loan's repay search cannot see instructions the
         // prefix does not contain.
-        let whole_failed_at: Option<usize> = result
-            .error
-            .as_deref()
-            .and_then(|e| e.split("InstructionError(").nth(1))
-            .and_then(|r| r.split(',').next())
-            .and_then(|i| i.trim().parse().ok());
+        let whole_failed_at: Option<usize> = runs
+            .last()
+            .and_then(|r| crate::replay::failed_instruction_index(&r.result));
 
         // Every invocation the full run logged, pre-order. Depth-1 spans are the
         // top-level instructions in message order; the spans that follow a
@@ -1403,11 +1415,10 @@ impl Replay {
         // The world the first step actually ran against: initial accounts with
         // the mutations applied, so a "before" value is the mutated one.
         let initial: HashMap<Address, Account> = {
-            let mut svm = self.ctx.fresh_svm();
-            self.ctx.apply_mutations_to(&mut svm, mutations)?;
+            let prepared = self.ctx.prepare(mutations, false)?;
             keys.iter()
                 .filter_map(|k| Address::from_str(k).ok())
-                .filter_map(|a| svm.get_account(&a).map(|acc| (a, acc)))
+                .filter_map(|a| prepared.svm.get_account(&a).map(|acc| (a, acc)))
                 .collect()
         };
         // Which step's post-state the diffs are relative to; a prefix that
@@ -1452,58 +1463,23 @@ impl Replay {
             // previous prefix's (or the pre-transaction state for k == 0).
             let post: Option<HashMap<Address, Account>> =
                 run.post.as_ref().map(|p| p.iter().cloned().collect());
-            let mut diffs = Vec::new();
-            if let Some(post) = &post {
-                let mut raw = Vec::new();
-                for key in &keys {
-                    let Ok(addr) = Address::from_str(key) else {
-                        continue;
+            let mut diffs = match &post {
+                Some(post) => {
+                    let before_of = |a: &Address| -> Option<Account> {
+                        prev_post
+                            .as_ref()
+                            .and_then(|m| m.get(a).cloned())
+                            .or_else(|| initial.get(a).cloned())
                     };
-                    let before = prev_post
-                        .as_ref()
-                        .and_then(|m| m.get(&addr).cloned())
-                        .or_else(|| initial.get(&addr).cloned());
-                    let after = post.get(&addr).cloned().or_else(|| before.clone());
-                    // A newly created account has no "before": diff it against
-                    // an empty one rather than dropping it.
-                    let before = before.or_else(|| after.as_ref().map(|_| Account::default()));
-                    let (Some(b), Some(a)) = (&before, &after) else {
-                        continue;
-                    };
-                    if b.lamports == a.lamports && b.data == a.data && b.owner == a.owner {
-                        continue;
-                    }
-                    raw.push(crate::replay::RawAccountDiff {
-                        address: key.clone(),
-                        owner: a.owner.to_string(),
-                        lamports_before: b.lamports,
-                        lamports_after: a.lamports,
-                        data_before: b.data.clone(),
-                        data_after: a.data.clone(),
-                    });
+                    diffs_of(&before_of, post, &keys, idls)
                 }
-                diffs = decode_diffs(raw, idls);
-            }
+                None => Vec::new(),
+            };
 
             // Completion order of the nodes (post-order): a CPI finishes before
             // its caller, so the runtime observer's inner snapshots line up with
             // nodes in this order. Exact only when every inner node has one.
-            let mut completion = vec![usize::MAX; nodes.len()];
-            {
-                let mut open: Vec<usize> = Vec::new();
-                let mut rank = 0usize;
-                for (i, (d, _)) in nodes.iter().enumerate() {
-                    while open.last().is_some_and(|&t| nodes[t].0 >= *d) {
-                        completion[open.pop().unwrap()] = rank;
-                        rank += 1;
-                    }
-                    open.push(i);
-                }
-                while let Some(t) = open.pop() {
-                    completion[t] = rank;
-                    rank += 1;
-                }
-            }
+            let completion = completion_ranks(nodes.iter().map(|(d, _)| *d));
             // Exact only when every inner node has a snapshot whose program
             // and depth agree with it — otherwise no CPI borrows a snapshot.
             let inner_exact = nodes.len() > 1
@@ -1529,36 +1505,11 @@ impl Replay {
                     .get(rank)
                     .map(|s| s.entry.iter().cloned().collect())
             };
-            // Diffs of `addrs` between a before-lookup and an after-state.
-            let diffs_between = |before_of: &dyn Fn(&Address) -> Option<Account>,
-                                 after: &HashMap<Address, Account>,
-                                 addrs: &[String]|
-             -> Vec<AccountDiff> {
-                let mut raw = Vec::new();
-                for key in addrs {
-                    let Ok(addr) = Address::from_str(key) else {
-                        continue;
-                    };
-                    let before = before_of(&addr);
-                    let after_acc = after.get(&addr).cloned().or_else(|| before.clone());
-                    let before = before.or_else(|| after_acc.as_ref().map(|_| Account::default()));
-                    let (Some(b), Some(a)) = (&before, &after_acc) else {
-                        continue;
-                    };
-                    if b.lamports == a.lamports && b.data == a.data && b.owner == a.owner {
-                        continue;
-                    }
-                    raw.push(crate::replay::RawAccountDiff {
-                        address: key.clone(),
-                        owner: a.owner.to_string(),
-                        lamports_before: b.lamports,
-                        lamports_after: a.lamports,
-                        data_before: b.data.clone(),
-                        data_after: a.data.clone(),
-                    });
-                }
-                decode_diffs(raw, idls)
-            };
+            let diffs_between =
+                |before_of: &dyn Fn(&Address) -> Option<Account>,
+                 after: &HashMap<Address, Account>,
+                 addrs: &[String]|
+                 -> Vec<AccountDiff> { diffs_of(before_of, after, addrs, idls) };
 
             // State after this prefix, for the accounts each node names.
             let changed: std::collections::HashSet<String> =
@@ -1569,48 +1520,7 @@ impl Replay {
                             role: Option<String>,
                             decode_fields: bool|
              -> StepAccountState {
-                let acc = map
-                    .and_then(|m| {
-                        Address::from_str(addr)
-                            .ok()
-                            .and_then(|a| m.get(&a).cloned())
-                    })
-                    .or_else(|| self.ctx.pre_account_owned(addr));
-                match acc {
-                    Some(a) => {
-                        let owner = a.owner.to_string();
-                        let decoded = if decode_fields || changed.contains(addr) {
-                            decode::decode_bytes(&owner, &a.data).or_else(|| {
-                                idls.get(&owner)
-                                    .and_then(|i| idl::decode_with_idl(i, &a.data))
-                            })
-                        } else {
-                            None
-                        };
-                        StepAccountState {
-                            address: addr.to_string(),
-                            role,
-                            owner,
-                            lamports: a.lamports,
-                            data_len: a.data.len(),
-                            type_name: decoded.as_ref().map(|d| d.type_name.clone()),
-                            fields: decoded.map(|d| d.fields).unwrap_or_default(),
-                            changed: changed.contains(addr),
-                            exists: true,
-                        }
-                    }
-                    None => StepAccountState {
-                        address: addr.to_string(),
-                        role,
-                        owner: String::new(),
-                        lamports: 0,
-                        data_len: 0,
-                        type_name: None,
-                        fields: Vec::new(),
-                        changed: changed.contains(addr),
-                        exists: false,
-                    },
-                }
+                account_state(&self.ctx, idls, map, changed, addr, role, decode_fields)
             };
             let return_data = (!meta.return_data.data.is_empty()).then(|| ReturnData {
                 program: meta.return_data.program_id.to_string(),
@@ -1620,8 +1530,7 @@ impl Replay {
 
             // Emit the nodes.
             let base_index = steps.len();
-            let mut next: Vec<usize> = Vec::new(); // next child index per depth
-            let mut lineage: Vec<usize> = Vec::new(); // indexes of this node's ancestors
+            let mut paths = PathBuilder::default();
             let mut innermost_failure: Option<usize> = None;
             for (i, (depth, ix)) in nodes.iter().enumerate() {
                 let program = keys
@@ -1632,32 +1541,7 @@ impl Replay {
                 let (name, args, accounts) =
                     ixname::enrich_offline(idls, &program, &ix.data, &account_indexes, &keys);
 
-                // Path: "k" for the top, then "k.c0", "k.c0.c1", … `next` holds
-                // the next child index per depth; `lineage` the indexes assigned
-                // to this node's ancestors (and itself), so a child of "k.0" is
-                // "k.0.0" — the parent's counter advances only for its siblings.
-                let d = *depth as usize;
-                let path = if d <= 1 {
-                    next.clear();
-                    lineage.clear();
-                    k.to_string()
-                } else {
-                    let level = d - 2;
-                    next.truncate(level + 1);
-                    while next.len() <= level {
-                        next.push(0);
-                    }
-                    let idx = next[level];
-                    next[level] += 1;
-                    lineage.truncate(level);
-                    lineage.push(idx);
-                    let mut p = k.to_string();
-                    for c in &lineage {
-                        p.push('.');
-                        p.push_str(&c.to_string());
-                    }
-                    p
-                };
+                let path = paths.next(k, *depth as usize);
 
                 // A CPI with its own snapshots: state as it stood when this
                 // inner instruction finished, and its changes measured from
@@ -1742,10 +1626,28 @@ impl Replay {
                             .collect()
                     })
                     .unwrap_or_default();
-                let node_return = return_data
-                    .as_ref()
-                    .filter(|r| r.program == program && i == 0 || r.program == program)
-                    .cloned();
+                // Return data set by *this* invocation: the runtime logs
+                // `Program return: <program> <base64>` inside the span. The
+                // transaction-level return data is only the last one set, so it
+                // is attributed to a step only when nothing in the span says
+                // otherwise and the step is the last of its program.
+                let node_return = result.logs[logs.0..logs.1]
+                    .iter()
+                    .rev()
+                    .find_map(|l| {
+                        let rest = l.strip_prefix("Program return: ")?;
+                        let (p, b64) = rest.split_once(' ')?;
+                        (p == program).then(|| ReturnData {
+                            program: p.to_string(),
+                            data_base64: b64.trim().to_string(),
+                        })
+                    })
+                    .or_else(|| {
+                        return_data
+                            .as_ref()
+                            .filter(|r| r.program == program && k + 1 == n && i == 0)
+                            .cloned()
+                    });
                 steps.push(Step {
                     path,
                     depth: *depth,
@@ -1755,9 +1657,7 @@ impl Replay {
                         .flatten(),
                     data_hex: (*depth == 1)
                         .then(|| top_ixs[k].data.iter().map(|b| format!("{b:02x}")).collect()),
-                    original_index: (!skipped.is_empty())
-                        .then(|| original_of.get(k).copied())
-                        .flatten(),
+                    original_index: reordered.then(|| original_of.get(k).copied()).flatten(),
                     program,
                     name,
                     args,
@@ -2566,5 +2466,173 @@ mod preflight_input_tests {
         assert!(err.to_string().contains("base64 message"), "got: {err}");
         // Not base64 at all.
         assert!(parse_unsigned("%%%not-base64%%%").is_err());
+    }
+}
+
+/// Diffs of `addrs` between a before-lookup and an after-state. A newly
+/// created account (no "before") is diffed against an empty account rather
+/// than dropped; an account absent from `after` is treated as unchanged.
+fn diffs_of(
+    before_of: &dyn Fn(&Address) -> Option<solana_account::Account>,
+    after: &HashMap<Address, solana_account::Account>,
+    addrs: &[String],
+    idls: &HashMap<String, serde_json::Value>,
+) -> Vec<AccountDiff> {
+    let mut raw = Vec::new();
+    for key in addrs {
+        let Ok(addr) = Address::from_str(key) else {
+            continue;
+        };
+        let before = before_of(&addr);
+        let after_acc = after.get(&addr).cloned().or_else(|| before.clone());
+        let before = before.or_else(|| {
+            after_acc
+                .as_ref()
+                .map(|_| solana_account::Account::default())
+        });
+        let (Some(b), Some(a)) = (&before, &after_acc) else {
+            continue;
+        };
+        if b.lamports == a.lamports && b.data == a.data && b.owner == a.owner {
+            continue;
+        }
+        raw.push(crate::replay::RawAccountDiff {
+            address: key.clone(),
+            owner: a.owner.to_string(),
+            lamports_before: b.lamports,
+            lamports_after: a.lamports,
+            data_before: b.data.clone(),
+            data_after: a.data.clone(),
+        });
+    }
+    decode_diffs(raw, idls)
+}
+
+/// Post-order completion rank of each node of a pre-order tree given by
+/// depth: a CPI finishes before its caller, so the runtime observer's inner
+/// snapshots (recorded at completion) line up with nodes in this order.
+fn completion_ranks(depths: impl Iterator<Item = u8>) -> Vec<usize> {
+    let depths: Vec<u8> = depths.collect();
+    let mut completion = vec![usize::MAX; depths.len()];
+    let mut open: Vec<usize> = Vec::new();
+    let mut rank = 0usize;
+    for (i, d) in depths.iter().enumerate() {
+        while open.last().is_some_and(|&t| depths[t] >= *d) {
+            completion[open.pop().unwrap()] = rank;
+            rank += 1;
+        }
+        open.push(i);
+    }
+    while let Some(t) = open.pop() {
+        completion[t] = rank;
+        rank += 1;
+    }
+    completion
+}
+
+#[cfg(test)]
+mod trace_helper_tests {
+    use super::completion_ranks;
+
+    #[test]
+    fn completion_is_post_order() {
+        // top(1) → a(2) → a.0(3), a.1(3); b(2)
+        assert_eq!(
+            completion_ranks([1u8, 2, 3, 3, 2].into_iter()),
+            vec![4, 2, 0, 1, 3]
+        );
+    }
+}
+
+/// Assigns step paths in pre-order: "k" for a top-level instruction, then
+/// "k.c0", "k.c0.c1", … for its CPIs. `next` holds the next child index per
+/// depth and `lineage` the indexes assigned to the current node's ancestors,
+/// so a child of "k.0" is "k.0.0": a parent's counter advances only for its
+/// own siblings.
+#[derive(Default)]
+struct PathBuilder {
+    next: Vec<usize>,
+    lineage: Vec<usize>,
+}
+
+impl PathBuilder {
+    fn next(&mut self, k: usize, depth: usize) -> String {
+        if depth <= 1 {
+            self.next.clear();
+            self.lineage.clear();
+            return k.to_string();
+        }
+        let level = depth - 2;
+        self.next.truncate(level + 1);
+        while self.next.len() <= level {
+            self.next.push(0);
+        }
+        let idx = self.next[level];
+        self.next[level] += 1;
+        self.lineage.truncate(level);
+        self.lineage.push(idx);
+        let mut p = k.to_string();
+        for c in &self.lineage {
+            p.push('.');
+            p.push_str(&c.to_string());
+        }
+        p
+    }
+}
+
+/// One account as a step shows it: from `map` (the state after the step)
+/// when present, else the loaded pre-state; decoded through the owner's
+/// layout or IDL when asked or when the step changed it.
+fn account_state(
+    ctx: &crate::replay::ReplayContext,
+    idls: &HashMap<String, serde_json::Value>,
+    map: Option<&HashMap<Address, solana_account::Account>>,
+    changed: &std::collections::HashSet<String>,
+    addr: &str,
+    role: Option<String>,
+    decode_fields: bool,
+) -> crate::trace::StepAccountState {
+    use crate::trace::StepAccountState;
+    let acc = map
+        .and_then(|m| {
+            Address::from_str(addr)
+                .ok()
+                .and_then(|a| m.get(&a).cloned())
+        })
+        .or_else(|| ctx.pre_account_owned(addr));
+    match acc {
+        Some(a) => {
+            let owner = a.owner.to_string();
+            let decoded = if decode_fields || changed.contains(addr) {
+                decode::decode_bytes(&owner, &a.data).or_else(|| {
+                    idls.get(&owner)
+                        .and_then(|i| idl::decode_with_idl(i, &a.data))
+                })
+            } else {
+                None
+            };
+            StepAccountState {
+                address: addr.to_string(),
+                role,
+                owner,
+                lamports: a.lamports,
+                data_len: a.data.len(),
+                type_name: decoded.as_ref().map(|d| d.type_name.clone()),
+                fields: decoded.map(|d| d.fields).unwrap_or_default(),
+                changed: changed.contains(addr),
+                exists: true,
+            }
+        }
+        None => StepAccountState {
+            address: addr.to_string(),
+            role,
+            owner: String::new(),
+            lamports: 0,
+            data_len: 0,
+            type_name: None,
+            fields: Vec::new(),
+            changed: changed.contains(addr),
+            exists: false,
+        },
     }
 }

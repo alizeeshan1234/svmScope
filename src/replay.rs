@@ -662,12 +662,6 @@ impl ReplayContext {
         self.time_travel.describe(&clock)
     }
 
-    /// A pristine SVM loaded with the reconstructed state, its clock advanced to
-    /// the transaction's slot (and then by any requested time travel).
-    pub(crate) fn fresh_svm(&self) -> LiteSVM {
-        self.fresh_svm_with(false)
-    }
-
     /// [`Self::fresh_svm`], optionally with BPF register tracing enabled.
     pub(crate) fn fresh_svm_with(&self, tracing: bool) -> LiteSVM {
         let mut svm = svm_from_loaded_with(
@@ -1518,24 +1512,11 @@ fn encode_field_value(f: &crate::decode::Field, value: i128) -> Result<Vec<u8>> 
             0 | 1 => Ok(vec![value as u8]),
             _ => Err(out_of_range()),
         },
-        ("u8" | "u16" | "u32" | "u64", n @ 1..=8) => {
-            let v = u64::try_from(value).map_err(|_| out_of_range())?;
-            if n < 8 && (v >> (8 * n)) != 0 {
-                return Err(out_of_range());
-            }
-            Ok(v.to_le_bytes()[..n].to_vec())
+        ("u8" | "u16" | "u32" | "u64" | "u128", n @ 1..=16) => {
+            crate::idl_encode::int_bytes(value, n, false).ok_or_else(out_of_range)
         }
-        ("i8" | "i16" | "i32" | "i64", n @ 1..=8) => {
-            let v = i64::try_from(value).map_err(|_| out_of_range())?;
-            if n < 8 {
-                let bound = 1i64 << (8 * n - 1);
-                if v < -bound || v >= bound {
-                    return Err(out_of_range());
-                }
-            }
-            // Two's-complement truncation: the low n bytes of the i64 are the
-            // iN encoding for any value already checked to be in range.
-            Ok((v as u64).to_le_bytes()[..n].to_vec())
+        ("i8" | "i16" | "i32" | "i64" | "i128", n @ 1..=16) => {
+            crate::idl_encode::int_bytes(value, n, true).ok_or_else(out_of_range)
         }
         (ty, _) => Err(Error::NonNumericField {
             field: f.name.clone(),
@@ -1549,14 +1530,9 @@ fn encode_field_value(f: &crate::decode::Field, value: i128) -> Result<Vec<u8>> 
 /// never folded into a "failed replay" — a typo'd address must not satisfy an
 /// `expect: revert` scenario.
 fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
-    if matches!(
-        m,
-        Mutation::IxArg { .. }
-            | Mutation::IxData { .. }
-            | Mutation::SkipIx { .. }
-            | Mutation::IxDataReplace { .. }
-            | Mutation::MoveIx { .. }
-    ) {
+    // Instruction mutations rewrite the transaction, not an account; see
+    // `ReplayContext::tx_with_mutations`.
+    if m.address().is_empty() {
         return Ok(());
     }
     let address = m.address();
@@ -1593,8 +1569,7 @@ fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
             account.owner =
                 Address::from_str(owner).map_err(|_| Error::InvalidAddress(owner.to_string()))?;
         }
-        // Instruction mutations rewrite the transaction, not an account; see
-        // `ReplayContext::tx_with_mutations`.
+        // Instruction mutations were returned above.
         Mutation::IxArg { .. }
         | Mutation::IxData { .. }
         | Mutation::SkipIx { .. }
@@ -2153,19 +2128,6 @@ impl ReplayContext {
         self.tx_with_mutations(&resolved)
     }
 
-    /// Apply `mutations` to `svm` (the profiler's copy of [`Self::run_full`]'s
-    /// setup without executing).
-    pub(crate) fn apply_mutations_to(
-        &self,
-        svm: &mut LiteSVM,
-        mutations: &[Mutation],
-    ) -> Result<()> {
-        for m in mutations {
-            apply_mutation(svm, &self.resolve_mutation(m)?)?;
-        }
-        Ok(())
-    }
-
     /// Run mutations and keep the post-replay SVM so state can be inspected.
     /// A mutation that can't be applied is a hard `Err`, never a failed replay.
     fn run_full(&self, mutations: &[Mutation]) -> Result<(ReplayResult, LiteSVM)> {
@@ -2183,7 +2145,16 @@ impl ReplayContext {
         &self,
         mutations: &[Mutation],
     ) -> Result<(ReplayResult, LiteSVM, HashMap<Address, Account>)> {
-        let mut svm = self.fresh_svm();
+        let Prepared { mut svm, tx, .. } = self.prepare(mutations, false)?;
+        let pre = self.loaded_state_of(&svm);
+        let result = to_replay_result(svm.send_transaction(tx));
+        Ok((result, svm, pre))
+    }
+
+    /// A fresh SVM with every mutation applied, and the transaction as
+    /// mutated — the one setup every run, trace and profile starts from.
+    pub(crate) fn prepare(&self, mutations: &[Mutation], tracing: bool) -> Result<Prepared> {
+        let mut svm = self.fresh_svm_with(tracing);
         let resolved: Vec<Mutation> = mutations
             .iter()
             .map(|m| self.resolve_mutation(m))
@@ -2191,17 +2162,19 @@ impl ReplayContext {
         for m in &resolved {
             apply_mutation(&mut svm, m)?;
         }
-        let pre: HashMap<Address, Account> = self
-            .loaded
+        let tx = self.tx_with_mutations(&resolved)?;
+        Ok(Prepared { svm, tx, resolved })
+    }
+
+    /// Every loaded data account as `svm` currently holds it.
+    pub(crate) fn loaded_state_of(&self, svm: &LiteSVM) -> HashMap<Address, Account> {
+        self.loaded
             .iter()
             .filter_map(|(a, l)| match l {
                 Loaded::Data(_) => svm.get_account(a).map(|acc| (*a, acc)),
                 _ => None,
             })
-            .collect();
-        let tx = self.tx_with_mutations(&resolved)?;
-        let result = to_replay_result(svm.send_transaction(tx));
-        Ok((result, svm, pre))
+            .collect()
     }
 
     /// Check every mutation against the loaded state without running anything:
@@ -2487,15 +2460,7 @@ impl ReplayContext {
     #[cfg(feature = "single-run-trace")]
     fn trace_raw_single_run(&self, mutations: &[Mutation]) -> Result<Vec<RawStepRun>> {
         use std::sync::{Arc, Mutex};
-        let mut svm = self.fresh_svm();
-        let resolved: Vec<Mutation> = mutations
-            .iter()
-            .map(|m| self.resolve_mutation(m))
-            .collect::<Result<_>>()?;
-        for m in &resolved {
-            apply_mutation(&mut svm, m)?;
-        }
-        let tx = self.tx_with_mutations(&resolved)?;
+        let Prepared { mut svm, tx, .. } = self.prepare(mutations, false)?;
         let n = tx.message.instructions().len();
         let snaps: Arc<Mutex<Vec<InstructionSnapshot>>> = Arc::new(Mutex::new(Vec::new()));
         let inner_for_count: Arc<Mutex<Vec<InnerSnapshot>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2567,14 +2532,12 @@ impl ReplayContext {
         let failed_at: Option<usize> = match &result {
             Ok(_) => None,
             Err(failed) => {
-                // `InstructionError(<idx>, ..)` carries the instruction; the
-                // error type is not a direct dependency, so read the index the
-                // same way the rest of the crate does, from its formatting.
-                let text = format!("{:?}", failed.err);
-                let by_index = text
-                    .strip_prefix("InstructionError(")
-                    .and_then(|r| r.split(',').next())
-                    .and_then(|i| i.trim().parse::<usize>().ok());
+                let by_index = match &failed.err {
+                    solana_transaction_error::TransactionError::InstructionError(i, _) => {
+                        Some(*i as usize)
+                    }
+                    _ => None,
+                };
                 Some(by_index.unwrap_or_else(|| {
                     snaps
                         .iter()
@@ -2619,15 +2582,7 @@ impl ReplayContext {
 
     #[cfg_attr(feature = "single-run-trace", allow(dead_code))]
     fn trace_raw_prefixes(&self, mutations: &[Mutation]) -> Result<Vec<RawStepRun>> {
-        let mut svm = self.fresh_svm();
-        let resolved: Vec<Mutation> = mutations
-            .iter()
-            .map(|m| self.resolve_mutation(m))
-            .collect::<Result<_>>()?;
-        for m in &resolved {
-            apply_mutation(&mut svm, m)?;
-        }
-        let base = self.tx_with_mutations(&resolved)?;
+        let Prepared { svm, tx: base, .. } = self.prepare(mutations, false)?;
         let keys = base.message.static_account_keys();
         let n = base.message.instructions().len();
         let is_cb: Vec<bool> = base
@@ -2772,6 +2727,28 @@ fn snapshot_accounts(
         ));
     }
     accounts
+}
+
+/// A run's starting point: the SVM with mutations applied, the mutated
+/// transaction, and the resolved mutations that produced both.
+pub(crate) struct Prepared {
+    pub(crate) svm: LiteSVM,
+    pub(crate) tx: VersionedTransaction,
+    #[allow(dead_code)]
+    pub(crate) resolved: Vec<Mutation>,
+}
+
+/// The top-level instruction a failed transaction result names, if any.
+pub(crate) fn failed_instruction_index(
+    result: &litesvm::types::TransactionResult,
+) -> Option<usize> {
+    match result {
+        Err(f) => match &f.err {
+            solana_transaction_error::TransactionError::InstructionError(i, _) => Some(*i as usize),
+            _ => None,
+        },
+        Ok(_) => None,
+    }
 }
 
 pub(crate) fn replay_result_of(result: &litesvm::types::TransactionResult) -> ReplayResult {

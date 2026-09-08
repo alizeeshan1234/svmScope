@@ -27,10 +27,43 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build (library alone, as consumers see it)
         run: cargo build -p svmscope
+      - name: Build (no default features — profiler off)
+        run: cargo build -p svmscope --no-default-features
+      - name: Test (single-run debugger, fork + vendored runtime)
+        run: cargo test -p svmscope --features single-run-trace
+      - name: Build server (single-run, as deployed)
+        run: cargo build -p svmscope-server --features single-run
+      - name: Build as a registry consumer (no patch section)
+        run: |
+          # A consumer never sees `[patch.crates-io]`: strip it and build the
+          # default feature set against upstream crates.
+          cp Cargo.toml /tmp/Cargo.toml.bak
+          python3 - <<'PY'
+          import re
+          s = open('Cargo.toml').read()
+          s = re.sub(r'\n\[patch\.crates-io\][\s\S]*$', '\n', s)
+          open('Cargo.toml', 'w').write(s)
+          PY
+          cargo build -p svmscope
+          cp /tmp/Cargo.toml.bak Cargo.toml
       - name: Package (crates.io dry run)
         run: cargo publish -p svmscope --dry-run
+      - name: Docker image builds
+        run: docker build -t svmscope-ci .
       - name: SDK build
         run: |
           cd sdk
           npm ci || npm install
           npx tsc --noEmit
+
+  msrv:
+    name: MSRV (rust-version)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build on the declared minimum
+        run: cargo build -p svmscope

@@ -24,7 +24,7 @@
 //!
 //! ```toml
 //! [dev-dependencies]
-//! svmscope = "0.4"
+//! svmscope = "0.5"
 //! ```
 //!
 //! # Quickstart
@@ -110,9 +110,18 @@
 //!
 //! # Feature flags
 //!
-//! None — the crate is a plain library. The HTTP API server lives in a
-//! separate (unpublished) workspace crate, so library consumers never compile
-//! axum/tokio.
+//! - `profiler` (default): the compute profiler — traces every BPF
+//!   instruction a replay executes and attributes it to functions and
+//!   syscalls. Turns on LiteSVM's register tracing. `default-features = false`
+//!   drops it and the tracing dependency.
+//! - `single-run-trace`: the step debugger records account state after every
+//!   instruction and CPI from one execution instead of replaying prefixes.
+//!   Needs a runtime hook that is not yet upstream — it builds only from a
+//!   checkout carrying the `[patch.crates-io]` entries, so the published
+//!   crate keeps prefix replays.
+//!
+//! The HTTP API server lives in a separate (unpublished) workspace crate, so
+//! library consumers never compile axum/tokio.
 //!
 //! This same library powers the svmscope CLI, the HTTP API, and the hosted UI
 //! at <https://svmscope.vercel.app> — identical results in all four.

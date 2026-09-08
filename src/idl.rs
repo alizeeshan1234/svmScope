@@ -448,6 +448,13 @@ const MAX_ARRAY_ELEMS: u64 = 1024;
 /// inline (that's the recursion). Returns `false` the moment it hits something
 /// variable-length or unknown — the caller stops too, because every offset after
 /// that point would be wrong.
+/// Total field visits one decode may perform, across every level of
+/// recursion. Depth and per-array caps alone do not bound work: an array of
+/// a struct that is itself an array of an empty struct multiplies visits
+/// without consuming a byte of account data. A hostile on-chain IDL is
+/// untrusted input; past this budget the decode stops and reports what it has.
+const MAX_WALK_VISITS: usize = 20_000;
+
 fn walk_fields(
     fields: &[FieldDef],
     model: &IdlModel,
@@ -457,10 +464,29 @@ fn walk_fields(
     out: &mut Vec<Field>,
     depth: usize,
 ) -> bool {
+    let mut budget = MAX_WALK_VISITS;
+    walk_fields_budgeted(fields, model, data, offset, prefix, out, depth, &mut budget)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_fields_budgeted(
+    fields: &[FieldDef],
+    model: &IdlModel,
+    data: &[u8],
+    offset: &mut usize,
+    prefix: &str,
+    out: &mut Vec<Field>,
+    depth: usize,
+    budget: &mut usize,
+) -> bool {
     if depth > MAX_WALK_DEPTH {
         return false;
     }
     for f in fields {
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
         // The field's display name, e.g. "bump" at the top level or
         // "flat_fees.numerator" inside a nested struct.
         let fname = match &f.name {
@@ -475,7 +501,7 @@ fn walk_fields(
         // here at the current cursor, by calling ourselves with a dotted prefix.
         if let IdlType::Defined(tname) = ty {
             if let Some(sub) = model.struct_fields(tname) {
-                if !walk_fields(
+                if !walk_fields_budgeted(
                     sub,
                     model,
                     data,
@@ -483,6 +509,7 @@ fn walk_fields(
                     &format!("{fname}."),
                     out,
                     depth + 1,
+                    budget,
                 ) {
                     return false; // the nested struct hit something variable
                 }
@@ -526,7 +553,7 @@ fn walk_fields(
                             }
                         })
                         .collect();
-                    if !walk_fields(
+                    if !walk_fields_budgeted(
                         &named,
                         model,
                         data,
@@ -534,6 +561,7 @@ fn walk_fields(
                         &format!("{fname}."),
                         out,
                         depth + 1,
+                        budget,
                     ) {
                         return false;
                     }
@@ -554,7 +582,7 @@ fn walk_fields(
                     return false;
                 }
                 for i in 0..*len {
-                    if !walk_fields(
+                    if !walk_fields_budgeted(
                         sub,
                         model,
                         data,
@@ -562,6 +590,7 @@ fn walk_fields(
                         &format!("{fname}[{i}]."),
                         out,
                         depth + 1,
+                        budget,
                     ) {
                         return false;
                     }
@@ -620,7 +649,7 @@ fn walk_fields(
                 name: Some(fname),
                 ty: Some((**inner).clone()),
             }];
-            if !walk_fields(&one, model, data, offset, "", out, depth + 1) {
+            if !walk_fields_budgeted(&one, model, data, offset, "", out, depth + 1, budget) {
                 return false;
             }
             continue;
@@ -652,7 +681,7 @@ fn walk_fields(
                     name: Some(format!("{fname}[{i}]")),
                     ty: Some((**inner).clone()),
                 }];
-                if !walk_fields(&one, model, data, offset, "", out, depth + 1) {
+                if !walk_fields_budgeted(&one, model, data, offset, "", out, depth + 1, budget) {
                     return false;
                 }
             }
@@ -772,23 +801,8 @@ pub(crate) fn encode_fixed(label: &str, size: usize, value: &Value) -> Option<Ve
             let s = value.as_str()?;
             Address::from_str(s).ok()?.to_bytes().to_vec()
         }
-        l if l.starts_with('u') => {
-            let n = as_i128(value)?;
-            if n < 0 || (size < 16 && n >= (1i128 << (size * 8))) {
-                return None;
-            }
-            (n as u128).to_le_bytes()[..size].to_vec()
-        }
-        l if l.starts_with('i') => {
-            let n = as_i128(value)?;
-            if size < 16 {
-                let lim = 1i128 << (size * 8 - 1);
-                if n < -lim || n >= lim {
-                    return None;
-                }
-            }
-            n.to_le_bytes()[..size].to_vec()
-        }
+        l if l.starts_with('u') => crate::idl_encode::int_bytes(as_i128(value)?, size, false)?,
+        l if l.starts_with('i') => crate::idl_encode::int_bytes(as_i128(value)?, size, true)?,
         _ => return None,
     })
 }

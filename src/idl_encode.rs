@@ -154,13 +154,47 @@ fn encode_value(
 
 /// Encode an unsigned integer of `width` bytes, range-checked exactly like the
 /// old per-type `try_from` (no silent truncation).
+/// The little-endian bytes of an integer that fits `width` bytes as
+/// unsigned (`signed == false`) or two's-complement signed — or `None` when
+/// it does not. The single range-check-and-emit used by every encoder in the
+/// crate (instruction arguments, account fields, fixed IDL scalars).
+pub(crate) fn int_bytes(value: i128, width: usize, signed: bool) -> Option<Vec<u8>> {
+    if signed {
+        int_bytes_i(value, width)
+    } else {
+        int_bytes_u(u128::try_from(value).ok()?, width)
+    }
+}
+
+/// Little-endian bytes of an unsigned integer that fits `width` bytes.
+pub(crate) fn int_bytes_u(value: u128, width: usize) -> Option<Vec<u8>> {
+    if width == 0 || width > 16 {
+        return None;
+    }
+    if width < 16 && value >= (1u128 << (width * 8)) {
+        return None;
+    }
+    Some(value.to_le_bytes()[..width].to_vec())
+}
+
+/// Little-endian two's-complement bytes of a signed integer that fits `width` bytes.
+pub(crate) fn int_bytes_i(value: i128, width: usize) -> Option<Vec<u8>> {
+    if width == 0 || width > 16 {
+        return None;
+    }
+    if width < 16 {
+        let bound = 1i128 << (width * 8 - 1);
+        if value < -bound || value >= bound {
+            return None;
+        }
+    }
+    Some(value.to_le_bytes()[..width].to_vec())
+}
+
 fn encode_unsigned(path: &str, width: usize, value: &Value, output: &mut Vec<u8>) -> Result<()> {
     let expected = || encoding_error(path, format!("expected u{}", width * 8));
     let parsed = parse_u128(value).ok_or_else(expected)?;
-    if width < 16 && (parsed >> (width * 8)) != 0 {
-        return Err(expected());
-    }
-    output.extend_from_slice(&parsed.to_le_bytes()[..width]);
+    output.extend_from_slice(&int_bytes_u(parsed, width).ok_or_else(expected)?);
     Ok(())
 }
 
@@ -169,13 +203,7 @@ fn encode_unsigned(path: &str, width: usize, value: &Value, output: &mut Vec<u8>
 fn encode_signed(path: &str, width: usize, value: &Value, output: &mut Vec<u8>) -> Result<()> {
     let expected = || encoding_error(path, format!("expected i{}", width * 8));
     let parsed = parse_i128(value).ok_or_else(expected)?;
-    if width < 16 {
-        let bound = 1i128 << (width * 8 - 1);
-        if parsed < -bound || parsed >= bound {
-            return Err(expected());
-        }
-    }
-    output.extend_from_slice(&parsed.to_le_bytes()[..width]);
+    output.extend_from_slice(&int_bytes_i(parsed, width).ok_or_else(expected)?);
     Ok(())
 }
 
@@ -349,21 +377,11 @@ fn json_bytes(path: &str, value: &Value) -> Result<Vec<u8>> {
             })
             .collect();
     }
-    if let Some(hex) = value.as_str().and_then(|value| value.strip_prefix("0x")) {
-        // Guard ASCII before byte-slicing: a multi-byte char would otherwise
-        // pass the even-length check and panic on a non-char-boundary slice.
-        if hex.len() % 2 != 0 || !hex.is_ascii() {
-            return Err(encoding_error(path, "hex bytes must have an even length"));
-        }
-        let bytes = hex.as_bytes();
-        return (0..bytes.len())
-            .step_by(2)
-            .map(|index| {
-                let pair =
-                    std::str::from_utf8(&bytes[index..index + 2]).expect("ascii checked above");
-                u8::from_str_radix(pair, 16).map_err(|_| encoding_error(path, "invalid hex bytes"))
-            })
-            .collect();
+    if let Some(text) = value.as_str() {
+        // One hex reader for the whole crate: `0x` optional, spaces and
+        // underscores tolerated, same as suite files.
+        return crate::spec::hex_decode(text)
+            .map_err(|e| encoding_error(path, format!("invalid hex bytes: {e}")));
     }
     Err(encoding_error(
         path,

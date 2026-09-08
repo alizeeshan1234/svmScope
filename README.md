@@ -21,7 +21,7 @@ cargo add --dev svmscope
 
 ```toml
 [dev-dependencies]
-svmscope = "0.4"
+svmscope = "0.5"
 ```
 
 Then point it at a real transaction and replay it locally — no validator, no
@@ -52,9 +52,11 @@ That's the whole loop: **reconstruct once, replay and mutate forever.** The rest
 of this README goes deeper — building and submitting transactions, freezing
 offline fixtures, and the full assertion DSL.
 
-The library has no features to configure — the HTTP API server lives in its
-own workspace crate ([`server/`](./server)), so library consumers never
-compile axum/tokio.
+Two feature flags: `profiler` (default; `default-features = false` drops
+it) and `single-run-trace` (the step debugger's single-execution mode, which
+depends on a runtime hook not yet upstream and therefore builds only from a
+checkout — see `Cargo.toml`). The HTTP API server lives in its own workspace
+crate ([`server/`](./server)), so library consumers never compile axum/tokio.
 
 ## Library quickstart
 
@@ -176,7 +178,7 @@ initialize that state/PDA first and put its address in
 
 ```toml
 [dev-dependencies]
-svmscope = "0.4"
+svmscope = "0.5"
 serde_json = "1"
 solana-address = "2.6"
 solana-keypair = "3.1"

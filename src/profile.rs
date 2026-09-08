@@ -229,8 +229,13 @@ pub fn stripped_sha256(elf: &[u8]) -> String {
 /// Build an [`ExactSymbols`] from a build's `.so` (hashed) and its `.debug`
 /// (symbol table). Fails when the two are not the same build.
 pub fn exact_from_build(program: &str, so: &[u8], debug: &[u8]) -> crate::Result<ExactSymbols> {
-    let symbols = elf_function_symbols(debug)
+    let symbols_sized: FunctionSymbols = elf_parse(debug)
+        .map(|(_, s)| s)
         .ok_or_else(|| crate::Error::InvalidSpec("not an ELF with a symbol table".into()))?;
+    let symbols: BTreeMap<usize, String> = symbols_sized
+        .iter()
+        .map(|(pc, (name, _))| (*pc, name.clone()))
+        .collect();
     if !symbols.values().any(|n| n == "entrypoint") {
         return Err(crate::Error::InvalidSpec(
             "the .debug ELF has no entrypoint symbol".into(),
@@ -238,7 +243,12 @@ pub fn exact_from_build(program: &str, so: &[u8], debug: &[u8]) -> crate::Result
     }
     let (_, so_syms) =
         elf_parse(so).ok_or_else(|| crate::Error::InvalidSpec("not an ELF".into()))?;
-    // The stripped .so keeps `entrypoint`; it must sit at the same address.
+    // The stripped .so keeps `entrypoint`; it must sit at the same address
+    // and compile to the same code, or the two are not one build.
+    let (so_text, _) =
+        elf_parse(so).ok_or_else(|| crate::Error::InvalidSpec("not an ELF".into()))?;
+    let (dbg_text, _) =
+        elf_parse(debug).ok_or_else(|| crate::Error::InvalidSpec("not an ELF".into()))?;
     let so_entry = so_syms
         .iter()
         .find(|(_, (n, _))| n == "entrypoint")
@@ -251,6 +261,15 @@ pub fn exact_from_build(program: &str, so: &[u8], debug: &[u8]) -> crate::Result
         return Err(crate::Error::InvalidSpec(
             ".so and .debug are not the same build".into(),
         ));
+    }
+    if let (Some(pc), Some((_, size))) = (dbg_entry, symbols_sized.get(&dbg_entry.unwrap_or(0))) {
+        let a = Shape::of(&so_text, pc, pc + size);
+        let b = Shape::of(&dbg_text, pc, pc + size);
+        if a.full != b.full {
+            return Err(crate::Error::InvalidSpec(
+                ".so and .debug are not the same build (entrypoint differs)".into(),
+            ));
+        }
     }
     Ok(ExactSymbols {
         program: program.to_string(),
@@ -1026,21 +1045,21 @@ fn function_map(exe: &Executable) -> FunctionMap {
     static CACHE: std::sync::LazyLock<Mutex<std::collections::HashMap<u64, FunctionMap>>> =
         std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
     let (_, text) = exe.get_text_bytes();
+    // The whole text, hashed: two programs that differ anywhere get different
+    // maps. FNV over a few MB is well under a millisecond, and the map is
+    // built once per program per process anyway.
     let key = {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        text.len().hash(&mut h);
-        // Length plus 64 evenly spaced words tells programs apart without
-        // hashing 10 MB per frame.
-        let step = (text.len() / 64).max(1);
-        for i in 0..64 {
-            text.get(i * step..i * step + 8).hash(&mut h);
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in text {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
         }
-        h.finish()
+        h ^ (text.len() as u64)
     };
     if let Some(m) = CACHE.lock().unwrap().get(&key) {
         return Arc::clone(m);
     }
+    const CACHE_MAX: usize = 256;
     let mut functions: BTreeMap<usize, String> = BTreeMap::new();
     for (_, (name, pc)) in exe.get_function_registry().iter() {
         functions.insert(pc, String::from_utf8_lossy(name).to_string());
@@ -1060,7 +1079,13 @@ fn function_map(exe: &Executable) -> FunctionMap {
         }
     }
     let map = Arc::new(functions);
-    CACHE.lock().unwrap().insert(key, Arc::clone(&map));
+    {
+        let mut c = CACHE.lock().unwrap();
+        if c.len() >= CACHE_MAX {
+            c.clear();
+        }
+        c.insert(key, Arc::clone(&map));
+    }
     map
 }
 
@@ -1094,7 +1119,9 @@ fn profile_frame(program: String, exe: &Executable, trace: &RegisterTrace) -> Op
     let mut total_insns: BTreeMap<usize, u64> = BTreeMap::new();
     let mut calls: BTreeMap<usize, u64> = BTreeMap::new();
     let mut syscalls: BTreeMap<String, u64> = BTreeMap::new();
-    let mut stacks: BTreeMap<String, u64> = BTreeMap::new();
+    // Folded stacks keyed on function *starts*; the names are rendered once
+    // per distinct stack at the end, not once per executed instruction.
+    let mut stacks: BTreeMap<Vec<usize>, u64> = BTreeMap::new();
     let mut events: Vec<(usize, String)> = Vec::new();
 
     let first_pc = trace[0][11] as usize;
@@ -1121,8 +1148,7 @@ fn profile_frame(program: String, exe: &Executable, trace: &RegisterTrace) -> Op
         for &f in &stack {
             *total_insns.entry(f).or_default() += 1;
         }
-        let key: Vec<String> = stack.iter().map(|&f| name_of(f)).collect();
-        *stacks.entry(key.join(";")).or_default() += 1;
+        *stacks.entry(stack.clone()).or_default() += 1;
 
         let insn = ebpf::get_insn_unchecked(text, pc);
         match insn.opc {
@@ -1179,7 +1205,19 @@ fn profile_frame(program: String, exe: &Executable, trace: &RegisterTrace) -> Op
     fns.sort_by_key(|f| std::cmp::Reverse(f.self_insns));
     let mut sys: Vec<_> = syscalls.into_iter().collect();
     sys.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-    let mut folded: Vec<_> = stacks.into_iter().collect();
+    let mut folded: Vec<(String, u64)> = stacks
+        .into_iter()
+        .map(|(starts, n)| {
+            (
+                starts
+                    .iter()
+                    .map(|&f| name_of(f))
+                    .collect::<Vec<_>>()
+                    .join(";"),
+                n,
+            )
+        })
+        .collect();
     folded.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     Some(FrameProfile {
         name: None,
@@ -1334,13 +1372,11 @@ impl crate::Replay {
         &self,
         mutations: &[crate::Mutation],
     ) -> crate::Result<(crate::ReplayResult, Profile)> {
-        let mut svm = self.ctx.fresh_svm_with(true);
+        let crate::replay::Prepared { mut svm, tx, .. } = self.ctx.prepare(mutations, true)?;
         let frames = Arc::new(Mutex::new(Vec::new()));
         svm.set_invocation_inspect_callback(Collector {
             frames: Arc::clone(&frames),
         });
-        self.ctx.apply_mutations_to(&mut svm, mutations)?;
-        let tx = self.ctx.tx_for(mutations)?;
         let result = crate::replay::replay_result_of(&svm.send_transaction(tx));
         let frames = std::mem::take(&mut *frames.lock().unwrap());
         let mut profile = Profile {

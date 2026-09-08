@@ -25,7 +25,7 @@ jobs:
       - name: Clone sources
         run: |
           mkdir -p src
-          git clone --depth 1 https://github.com/alizeeshan1234/svmscope_example.git src/example
+          git clone --depth 1 "${{ vars.CORPUS_EXAMPLE_REPO || 'https://github.com/alizeeshan1234/svmscope_example.git' }}" src/example
           git clone --depth 1 https://github.com/marinade-finance/liquid-staking-program.git src/marinade
           git clone --depth 1 https://github.com/solana-program/token.git src/spl-token
           git clone --depth 1 https://github.com/solana-program/token-2022.git src/spl-token-2022

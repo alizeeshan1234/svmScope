@@ -1,5 +1,7 @@
 # Keeps the hosted demo awake.
 #
+# Only runs when the repository variable KEEPALIVE_URL is set (a deployment's
+# health URL); forks without one do nothing.
 # Render's free tier spins a service down after ~15 minutes without traffic, and
 # the next request then pays a ~50s cold start. Pinging the lightweight /api
 # endpoint on a schedule keeps it warm at no cost (Actions minutes are free for
@@ -16,12 +18,13 @@ on:
 jobs:
   ping:
     runs-on: ubuntu-latest
+    if: ${{ vars.KEEPALIVE_URL != '' }}
     steps:
       - name: Ping the demo API
         run: |
           for i in 1 2 3; do
             code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 \
-              https://svmscope.onrender.com/api || echo 000)
+              ${{ vars.KEEPALIVE_URL }} || echo 000)
             echo "attempt $i → HTTP $code"
             [ "$code" = "200" ] && exit 0
             sleep 20

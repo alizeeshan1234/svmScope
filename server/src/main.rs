@@ -97,8 +97,14 @@ fn vet_custom_rpc(url: &str) -> Option<String> {
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
-    // host[:port] is everything up to the first '/', '?' or '#'.
-    let hostport = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // authority is everything up to the first '/', '?' or '#'; drop any
+    // userinfo (`user:pass@`) first, or `evil.com:80@127.0.0.1` reads as
+    // `evil.com` here while the client connects to 127.0.0.1.
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
     let host = hostport
         .rsplit_once(':')
         .map(|(h, _)| h)
@@ -830,18 +836,21 @@ fn trace_with_world(
         // mutated re-run compares against exactly the state its base
         // trace saw, not a fresh reconstruction that may have moved on.
         let key = format!("{}|{sig}|{tier}", scope.rpc_url());
-        let mut replay = match world_get(&key) {
+        let world = match world_get(&key) {
             Some(r) => r,
             None => {
-                let r = if tier == "now" {
+                let r = std::sync::Arc::new(if tier == "now" {
                     scope.replay(sig)?
                 } else {
                     scope.replay_at_slot(sig)?
-                };
-                world_put(key, r.clone());
+                });
+                world_put(key, std::sync::Arc::clone(&r));
                 r
             }
         };
+        // Time travel and feature toggles are per request: they go on a copy
+        // of the shared world's handle, never on the cached world itself.
+        let mut replay = (*world).clone();
         replay.set_time_travel(tt.clone());
         replay.set_features(features.to_vec());
         let mut t = replay.trace(mutations)?;
@@ -910,19 +919,20 @@ fn trace_with_world(
     Ok(at_slot)
 }
 
-type WorldStore = std::collections::HashMap<String, (std::time::Instant, svmscope::Replay)>;
+type WorldStore =
+    std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<svmscope::Replay>)>;
 static WORLDS: std::sync::LazyLock<std::sync::Mutex<WorldStore>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 const WORLD_TTL: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 const WORLD_MAX: usize = 48;
-fn world_get(key: &str) -> Option<svmscope::Replay> {
+fn world_get(key: &str) -> Option<std::sync::Arc<svmscope::Replay>> {
     let store = WORLDS.lock().ok()?;
     store
         .get(key)
         .filter(|(t, _)| t.elapsed() < WORLD_TTL)
-        .map(|(_, r)| r.clone())
+        .map(|(_, r)| std::sync::Arc::clone(r))
 }
-fn world_put(key: String, replay: svmscope::Replay) {
+fn world_put(key: String, replay: std::sync::Arc<svmscope::Replay>) {
     if let Ok(mut store) = WORLDS.lock() {
         store.retain(|_, (t, _)| t.elapsed() < WORLD_TTL);
         if store.len() >= WORLD_MAX {

@@ -6396,6 +6396,7 @@ dependencies = [
  "solana-system-interface 3.2.0",
  "solana-transaction",
  "solana-transaction-context",
+ "solana-transaction-error",
  "thiserror 2.0.20",
 ]
 
