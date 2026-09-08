@@ -215,3 +215,34 @@ fn unknown_fields_error_with_the_available_names() {
     assert!(!out.pass);
     assert!(out.asserts[0].description.contains("count"), "{out:?}");
 }
+
+#[test]
+fn delta_asserts_measure_from_the_mutated_start_not_the_original_load() {
+    // The counter is loaded at 1. A mutation sets it to 99 before the run and
+    // the program increments it to 100. The transaction's own effect is +1;
+    // a delta of +99 would be crediting the mutation to the program.
+    let mutation = Mutation::patch(COUNTER_PDA, 8, 99u64.to_le_bytes().to_vec());
+    let real = replay()
+        .verify(
+            "delta is the increment",
+            std::slice::from_ref(&mutation),
+            &[Check::account(COUNTER_PDA)
+                .field_delta("count", Cmp::eq(1))
+                .build()],
+        )
+        .unwrap();
+    assert!(real.pass, "{real:?}");
+    let wrong = replay()
+        .verify(
+            "delta must not include the mutation",
+            std::slice::from_ref(&mutation),
+            &[Check::account(COUNTER_PDA)
+                .field_delta("count", Cmp::eq(99))
+                .build()],
+        )
+        .unwrap();
+    assert!(
+        !wrong.pass,
+        "a +99 delta credits the mutation to the program: {wrong:?}"
+    );
+}

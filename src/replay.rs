@@ -1838,7 +1838,20 @@ impl AccountAssert {
 
     /// Evaluate against the post-replay `svm`; `ctx` supplies pre-transaction values
     /// for the delta checks.
-    fn eval(&self, svm: &LiteSVM, ctx: &ReplayContext) -> Result<bool> {
+    fn eval(
+        &self,
+        svm: &LiteSVM,
+        ctx: &ReplayContext,
+        pre: &HashMap<Address, Account>,
+    ) -> Result<bool> {
+        // The state the transaction started from: mutated where a mutation
+        // applied, loaded otherwise.
+        let pre_of = |address: &str| -> Option<Account> {
+            Address::from_str(address)
+                .ok()
+                .and_then(|a| pre.get(&a).cloned())
+                .or_else(|| ctx.pre_account(address).cloned())
+        };
         let addr = Address::from_str(&self.address)
             .map_err(|_| Error::InvalidAddress(self.address.clone()))?;
         let acc = svm.get_account(&addr);
@@ -1870,16 +1883,12 @@ impl AccountAssert {
                 Ok(op.test_i128(read_u64_at(&acc.data, *offset) as i128, *value))
             }
             StateCheck::LamportsDelta { op, value } => {
-                let pre = ctx
-                    .pre_account(&self.address)
-                    .map(|a| a.lamports)
-                    .unwrap_or(0) as i128;
+                let pre = pre_of(&self.address).map(|a| a.lamports).unwrap_or(0) as i128;
                 let post = acc.map(|a| a.lamports).unwrap_or(0) as i128;
                 Ok(op.test_i128(post - pre, *value))
             }
             StateCheck::TokenDelta { op, value } => {
-                let pre = ctx
-                    .pre_account(&self.address)
+                let pre = pre_of(&self.address)
                     .map(|a| read_u64_at(&a.data, 64))
                     .unwrap_or(0) as i128;
                 let post = acc.map(|a| read_u64_at(&a.data, 64)).unwrap_or(0) as i128;
@@ -1892,15 +1901,21 @@ impl AccountAssert {
                 Ok(op.test_i128(read_field_int(&acc.data, f)?, *value))
             }
             StateCheck::FieldDelta { name, op, value } => {
-                let (dec, pre) = ctx.decode_pre(&self.address)?;
+                let (dec, _) = ctx.decode_pre(&self.address)?;
                 let f = find_field(&dec, name)?;
+                let pre = pre_of(&self.address).ok_or_else(|| {
+                    Error::AccountNotFound(format!("{} (no pre-state)", self.address))
+                })?;
                 let acc = acc.ok_or_else(|| Error::AccountNotFound(self.address.clone()))?;
                 let delta = read_field_int(&acc.data, f)? - read_field_int(&pre.data, f)?;
                 Ok(op.test_i128(delta, *value))
             }
             StateCheck::FieldUnchanged { name } => {
-                let (dec, pre) = ctx.decode_pre(&self.address)?;
+                let (dec, _) = ctx.decode_pre(&self.address)?;
                 let f = find_field(&dec, name)?;
+                let pre = pre_of(&self.address).ok_or_else(|| {
+                    Error::AccountNotFound(format!("{} (no pre-state)", self.address))
+                })?;
                 let acc = acc.ok_or_else(|| Error::AccountNotFound(self.address.clone()))?;
                 Ok(field_bytes(&acc.data, f)? == field_bytes(&pre.data, f)?)
             }
@@ -2152,6 +2167,20 @@ impl ReplayContext {
     /// Run mutations and keep the post-replay SVM so state can be inspected.
     /// A mutation that can't be applied is a hard `Err`, never a failed replay.
     fn run_full(&self, mutations: &[Mutation]) -> Result<(ReplayResult, LiteSVM)> {
+        let (result, svm, _) = self.run_full_with_pre(mutations)?;
+        Ok((result, svm))
+    }
+
+    /// [`run_full`] that also returns the world the transaction actually
+    /// started from — the loaded accounts with every mutation applied. Delta
+    /// and "unchanged" assertions must be measured from this, not from the
+    /// unmutated load, or a scenario that edits a balance before the run
+    /// reports the edit as the transaction's effect (and a loss check passes
+    /// on a transaction that lost funds).
+    fn run_full_with_pre(
+        &self,
+        mutations: &[Mutation],
+    ) -> Result<(ReplayResult, LiteSVM, HashMap<Address, Account>)> {
         let mut svm = self.fresh_svm();
         let resolved: Vec<Mutation> = mutations
             .iter()
@@ -2160,9 +2189,17 @@ impl ReplayContext {
         for m in &resolved {
             apply_mutation(&mut svm, m)?;
         }
+        let pre: HashMap<Address, Account> = self
+            .loaded
+            .iter()
+            .filter_map(|(a, l)| match l {
+                Loaded::Data(_) => svm.get_account(a).map(|acc| (*a, acc)),
+                _ => None,
+            })
+            .collect();
         let tx = self.tx_with_mutations(&resolved)?;
         let result = to_replay_result(svm.send_transaction(tx));
-        Ok((result, svm))
+        Ok((result, svm, pre))
     }
 
     /// Check every mutation against the loaded state without running anything:
@@ -2237,7 +2274,7 @@ pub(crate) fn run_suite(
     scenarios
         .iter()
         .map(|s| {
-            let (actual, svm) = ctx.run_full(&s.mutations)?;
+            let (actual, svm, pre) = ctx.run_full_with_pre(&s.mutations)?;
 
             // Transaction-level outcome: every Outcome check must hold; a
             // scenario that declares none implicitly asserts success — unless it
@@ -2305,7 +2342,7 @@ pub(crate) fn run_suite(
                     }),
                     CheckKind::Account(list) => {
                         for a in list {
-                            asserts.push(match a.eval(&svm, ctx) {
+                            asserts.push(match a.eval(&svm, ctx, &pre) {
                                 Ok(pass) => AssertOutcome {
                                     description: a.describe(),
                                     pass,
