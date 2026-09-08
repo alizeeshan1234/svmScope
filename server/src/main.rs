@@ -942,7 +942,9 @@ fn world_put(key: String, replay: std::sync::Arc<svmscope::Replay>) {
     }
 }
 
-type TraceStore = std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<String>)>;
+// `Bytes` is reference-counted: a cache hit hands out a view of the stored
+// buffer, never a copy of a multi-megabyte trace.
+type TraceStore = std::collections::HashMap<String, (std::time::Instant, axum::body::Bytes)>;
 static TRACE_STORE: std::sync::LazyLock<std::sync::Mutex<TraceStore>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 const TRACE_STORE_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
@@ -953,10 +955,10 @@ async fn trace_get_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
     use axum::response::IntoResponse;
-    let json_response = |body: std::sync::Arc<String>| {
+    let json_response = |body: axum::body::Bytes| {
         (
             [(axum::http::header::CONTENT_TYPE, "application/json")],
-            body.as_str().to_owned(),
+            body,
         )
             .into_response()
     };
@@ -990,7 +992,7 @@ async fn trace_get_handler(
             )
         })?;
     let trace = result.map_err(lib_err)?;
-    let body = std::sync::Arc::new(
+    let body = axum::body::Bytes::from(
         serde_json::to_string(&trace)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?,
     );
@@ -1346,7 +1348,19 @@ async fn api_index() -> Json<serde_json::Value> {
             "GET  /trace/{signature}":    "The same trace with no mutations, cacheable.",
             "POST /profile":              "{ signature, mutations[]?, time_travel?, features?, symbols[{program, elf_b64}]? } — compute profiler: every BPF instruction attributed to functions, syscalls and call stacks per program frame; symbols name a program's functions from its .debug file.",
             "GET  /profile/{signature}":  "The as-it-happened compute profile, no symbols, cacheable.",
-            "GET  /freeze/{signature}":   "Capture a self-contained fixture for deterministic, offline replay."
+            "GET  /freeze/{signature}":   "Capture a self-contained fixture for deterministic, offline replay.",
+            "POST /preflight_report":     "{ transaction, mutations[] } — preflight as an HTML report.",
+            "POST /replay_report":        "{ signature, scenarios[] } — a suite run as an HTML report.",
+            "GET  /replay_at_slot/{signature}": "Replay against state reconstructed at the transaction's slot, with a per-account fidelity certificate.",
+            "GET  /counterfactual/{signature}?account&lo&hi": "Binary-search the lamport balance at which the outcome flips.",
+            "GET  /scan/{signature}":     "Which accounts, when drained, change the outcome.",
+            "GET  /diagnose/{signature}": "A failure explained: error name, docs, the step and accounts involved.",
+            "GET  /account/{address}":    "An account decoded through its program's layout or IDL.",
+            "GET  /signatures/{address}": "Recent signatures for an address.",
+            "GET  /instructions/{program}": "The instructions a program's on-chain IDL declares.",
+            "POST /idl_instructions":     "{ idl } — the same, for an IDL supplied in the request.",
+            "POST /decode_account":       "{ owner, data_b64 } — decode raw account bytes.",
+            "GET  /stats":                "Usage counters (token-gated)."
         }
     }))
 }
