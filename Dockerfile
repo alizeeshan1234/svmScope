@@ -25,7 +25,7 @@ COPY symbols ./symbols
 COPY idls ./idls
 COPY vendor ./vendor
 
-RUN cargo build --release -p svmscope-server
+RUN cargo build --release -p svmscope-server --features single-run
 
 # ---- runtime ----
 FROM debian:bookworm-slim

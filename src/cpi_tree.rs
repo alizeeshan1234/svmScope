@@ -69,6 +69,19 @@ pub struct CpiEntry {
     pub(crate) account_indexes: Vec<usize>,
 }
 
+/// Programs the runtime executes natively as precompiles. They enter no VM,
+/// emit no `Program … invoke` log line, and never reach the instruction
+/// observer, so anything that pairs message instructions with logged or
+/// observed execution must skip them.
+pub(crate) fn is_precompile(program: &str) -> bool {
+    matches!(
+        program,
+        "Ed25519SigVerify111111111111111111111111111"
+            | "KeccakSecp256k11111111111111111111111111111"
+            | "Secp256r1SigVerify1111111111111111111111111"
+    )
+}
+
 /// The Instructions sysvar: a program given this account reads the
 /// transaction's other instructions.
 pub(crate) const INSTRUCTIONS_SYSVAR: &str = "Sysvar1nstructions1111111111111111111111111";

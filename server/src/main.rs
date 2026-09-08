@@ -1178,6 +1178,12 @@ async fn counterfactual_handler(
     let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
     let lo = q.lo.unwrap_or(0);
     let hi = q.hi.unwrap_or(100_000_000);
+    if lo > hi {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("lo ({lo}) must not exceed hi ({hi})"),
+        ));
+    }
     let account = q.account.clone();
 
     let out =
@@ -1196,15 +1202,24 @@ async fn counterfactual_handler(
                     high_success: t.high_success,
                     evaluations: t.evaluations,
                 },
-                None => CounterfactualResponse {
-                    account,
-                    lo,
-                    hi,
-                    flips_at: None,
-                    low_success: false,
-                    high_success: false,
-                    evaluations: 2,
-                },
+                // No crossing: both bounds had the same outcome. Report that
+                // outcome rather than inventing a double failure.
+                None => {
+                    let acct = account.clone();
+                    let same = replay
+                        .simulate(&[Mutation::lamports(acct, lo)])?
+                        .result
+                        .success;
+                    CounterfactualResponse {
+                        account,
+                        lo,
+                        hi,
+                        flips_at: None,
+                        low_success: same,
+                        high_success: same,
+                        evaluations: 3,
+                    }
+                }
             })
         })
         .await
@@ -1334,13 +1349,30 @@ async fn api_index() -> Json<serde_json::Value> {
 /// the client itself. Taking the leftmost would let a client send a random
 /// `X-Forwarded-For` per request and mint a fresh identity each time, defeating
 /// the rate limiter (the only DoS defense on the unauthenticated endpoints).
+/// Whether the instance sits behind a proxy that sets `X-Forwarded-For`
+/// (`SVMSCOPE_TRUST_PROXY=1`, as on Render). Without it the header is
+/// client-controlled and must not become the rate-limit identity.
+fn trust_proxy() -> bool {
+    static TRUST: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var("SVMSCOPE_TRUST_PROXY")
+            .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    });
+    *TRUST
+}
+
 fn client_id(req: &Request, peer: Option<SocketAddr>) -> String {
-    req.headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next_back())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    let forwarded = if trust_proxy() {
+        req.headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next_back())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    } else {
+        None
+    };
+    forwarded
         .or_else(|| peer.map(|p| p.ip().to_string()))
         .unwrap_or_else(|| "unknown".into())
 }
@@ -1395,6 +1427,16 @@ fn endpoint_label(path: &str) -> Option<&'static str> {
         Some("account")
     } else if path.starts_with("/signatures") {
         Some("signatures")
+    } else if path.starts_with("/scan") {
+        Some("scan")
+    } else if path.starts_with("/counterfactual") {
+        Some("counterfactual")
+    } else if path.starts_with("/diagnose") {
+        Some("diagnose")
+    } else if path.starts_with("/decode_account") {
+        Some("decode_account")
+    } else if path.starts_with("/instructions") || path.starts_with("/idl_instructions") {
+        Some("instructions")
     } else {
         None
     }
@@ -1505,7 +1547,12 @@ async fn main() {
         .route("/replay_report", post(replay_report_handler))
         .route("/trace", post(trace_handler))
         .route("/trace/{signature}", get(trace_get_handler))
-        .route("/profile", post(profile_handler))
+        .route(
+            "/profile",
+            post(profile_handler).layer(axum::extract::DefaultBodyLimit::max(
+                MAX_SYMBOL_BYTES * 2 + 1024 * 1024,
+            )),
+        )
         .route("/profile/{signature}", get(profile_get_handler))
         .route("/debug/{signature}", get(index))
         .route("/flame/{signature}", get(index))

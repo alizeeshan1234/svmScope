@@ -165,6 +165,10 @@ pub struct CorpusEntry {
     pub opcodes: Option<u64>,
 }
 
+/// Shortest function the corpus will name: below this, shapes are generic
+/// (a two-slot getter, a thunk) and identical across unrelated programs.
+pub const MIN_CORPUS_LEN: usize = 8;
+
 /// Dump every named function of a build (its `.so` for code, its `.debug` for
 /// symbols) as corpus entries. Functions whose shape is shared by several
 /// names in this build are dropped as ambiguous.
@@ -176,8 +180,11 @@ pub fn corpus_from_build(so: &[u8], debug: &[u8]) -> crate::Result<Vec<CorpusEnt
         })?;
     let mut by_full: BTreeMap<u64, Option<CorpusEntry>> = BTreeMap::new();
     for (&pc, (name, size)) in &symbols {
-        if *size < 2 {
-            continue; // one-instruction stubs collide constantly
+        if *size < MIN_CORPUS_LEN {
+            // Tiny functions (a getter is `ldxdw; exit`) are the same bytes in
+            // every program; naming them from a corpus mislabels far more than
+            // it names.
+            continue;
         }
         let sh = Shape::of(&text, pc, pc + size);
         let pretty = strip_hash(&rustc_demangle::demangle(name).to_string());
@@ -756,8 +763,22 @@ impl Profile {
     /// named. Real symbols and behavioural labels are left alone; a corpus
     /// name lands in `name`, so it shows everywhere a symbol would.
     pub fn symbolize_from_corpus(&mut self, corpus: &[CorpusEntry]) -> usize {
-        let index: std::collections::HashMap<u64, &CorpusEntry> =
-            corpus.iter().map(|e| (e.full, e)).collect();
+        // Exact tier: a shape hash carried by two different names (shapes are
+        // register-and-immediate exact but drop call targets, so thunks can
+        // collide across builds) is ambiguous and never applied; nor is any
+        // entry shorter than the corpus floor, whatever the file says.
+        let mut index: std::collections::HashMap<u64, Option<&CorpusEntry>> =
+            std::collections::HashMap::new();
+        for e in corpus.iter().filter(|e| e.len >= MIN_CORPUS_LEN) {
+            index
+                .entry(e.full)
+                .and_modify(|v| {
+                    if v.is_some_and(|x| x.name != e.name) {
+                        *v = None;
+                    }
+                })
+                .or_insert(Some(e));
+        }
         // Approximate tier: opcode sequence + length. A hash shared by two
         // different names is ambiguous and never used.
         let mut by_opcodes: std::collections::HashMap<(u64, usize), Option<&str>> =
@@ -781,7 +802,11 @@ impl Profile {
                 if !f.name.starts_with("function_") {
                     continue;
                 }
-                let exact = index.get(&f.shape.full).filter(|e| e.len == f.shape.len);
+                let exact = index
+                    .get(&f.shape.full)
+                    .copied()
+                    .flatten()
+                    .filter(|e| e.len == f.shape.len);
                 let new_name = match exact {
                     Some(e) => Some(e.name.clone()),
                     None => by_opcodes

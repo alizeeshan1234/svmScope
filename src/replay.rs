@@ -2048,47 +2048,49 @@ impl ReplayContext {
     fn tx_with_mutations(&self, resolved: &[Mutation]) -> Result<VersionedTransaction> {
         use solana_message::VersionedMessage;
         let mut tx = self.tx.clone();
+        // Data edits (offset patches and whole replacements) apply in the
+        // order they were listed, so a patch after a replace lands on the new
+        // bytes and a replace after a patch overrides it — never silently the
+        // other way round.
         for m in resolved {
-            let Mutation::IxData {
-                index,
-                offset,
-                bytes,
-            } = m
-            else {
-                continue;
-            };
-            let ixs: &mut Vec<_> = match &mut tx.message {
-                VersionedMessage::Legacy(m) => &mut m.instructions,
-                VersionedMessage::V0(m) => &mut m.instructions,
-                VersionedMessage::V1(m) => &mut m.instructions,
-            };
-            let ix = ixs.get_mut(*index).ok_or_else(|| {
-                Error::InvalidSpec(format!("instruction index {index} out of range"))
-            })?;
-            let end = offset
-                .checked_add(bytes.len())
-                .filter(|&e| e <= ix.data.len())
-                .ok_or_else(|| {
-                    Error::InvalidSpec(format!(
-                        "instruction {index}: patch at {offset}+{} exceeds data length {}",
-                        bytes.len(),
-                        ix.data.len()
-                    ))
-                })?;
-            ix.data[*offset..end].copy_from_slice(bytes);
-        }
-        // Whole-data replacements, by original position.
-        for m in resolved {
-            if let Mutation::IxDataReplace { index, bytes } = m {
-                let ixs: &mut Vec<_> = match &mut tx.message {
-                    VersionedMessage::Legacy(m) => &mut m.instructions,
-                    VersionedMessage::V0(m) => &mut m.instructions,
-                    VersionedMessage::V1(m) => &mut m.instructions,
-                };
-                let ix = ixs.get_mut(*index).ok_or_else(|| {
-                    Error::InvalidSpec(format!("instruction index {index} out of range"))
-                })?;
-                ix.data = bytes.clone();
+            match m {
+                Mutation::IxData {
+                    index,
+                    offset,
+                    bytes,
+                } => {
+                    let ixs: &mut Vec<_> = match &mut tx.message {
+                        VersionedMessage::Legacy(m) => &mut m.instructions,
+                        VersionedMessage::V0(m) => &mut m.instructions,
+                        VersionedMessage::V1(m) => &mut m.instructions,
+                    };
+                    let ix = ixs.get_mut(*index).ok_or_else(|| {
+                        Error::InvalidSpec(format!("instruction index {index} out of range"))
+                    })?;
+                    let end = offset
+                        .checked_add(bytes.len())
+                        .filter(|&e| e <= ix.data.len())
+                        .ok_or_else(|| {
+                            Error::InvalidSpec(format!(
+                                "instruction {index}: patch at {offset}+{} exceeds data length {}",
+                                bytes.len(),
+                                ix.data.len()
+                            ))
+                        })?;
+                    ix.data[*offset..end].copy_from_slice(bytes);
+                }
+                Mutation::IxDataReplace { index, bytes } => {
+                    let ixs: &mut Vec<_> = match &mut tx.message {
+                        VersionedMessage::Legacy(m) => &mut m.instructions,
+                        VersionedMessage::V0(m) => &mut m.instructions,
+                        VersionedMessage::V1(m) => &mut m.instructions,
+                    };
+                    let ix = ixs.get_mut(*index).ok_or_else(|| {
+                        Error::InvalidSpec(format!("instruction index {index} out of range"))
+                    })?;
+                    ix.data = bytes.clone();
+                }
+                _ => {}
             }
         }
         // Skips next, so every index above still meant the original position.
@@ -2496,39 +2498,35 @@ impl ReplayContext {
         let tx = self.tx_with_mutations(&resolved)?;
         let n = tx.message.instructions().len();
         let snaps: Arc<Mutex<Vec<InstructionSnapshot>>> = Arc::new(Mutex::new(Vec::new()));
+        let inner_for_count: Arc<Mutex<Vec<InnerSnapshot>>> = Arc::new(Mutex::new(Vec::new()));
         svm.set_invocation_inspect_callback(StateCollector {
             snaps: Arc::clone(&snaps),
+            inner_count: {
+                let c = Arc::clone(&inner_for_count);
+                Arc::new(move || c.lock().map(|v| v.len()).unwrap_or(0))
+            },
         });
-        // Inner instructions: the runtime observer fires after every
-        // instruction at every depth, in completion order. Height-1 firings
-        // mark the end of a top-level instruction, so the count of those seen
-        // so far is the top-level index an inner snapshot belongs to.
-        let inner: Arc<Mutex<Vec<(usize, InnerSnapshot)>>> = Arc::new(Mutex::new(Vec::new()));
-        {
+        // Inner instructions: the runtime observer fires on entry and exit of
+        // every instruction at every depth. Inner snapshots are collected in
+        // completion order and assigned to a top-level index by LiteSVM's
+        // `after_instruction`, which reports the true message index (so a
+        // precompile, which never reaches either hook, cannot shift them).
+        let inner = inner_for_count;
+        let hook_guard = {
             use solana_program_runtime::instruction_hook::Phase;
             let inner = Arc::clone(&inner);
-            let mut tops = 0usize;
             // Entry snapshots of the inner instructions currently open, innermost last.
             let mut open: Vec<Vec<(Address, Account)>> = Vec::new();
-            solana_program_runtime::instruction_hook::set(Box::new(move |ctx, phase, ok| {
-                let height = ctx.get_stack_height();
+            solana_program_runtime::instruction_hook::install(Box::new(move |ctx, phase, frame| {
+                let height = frame.stack_height;
                 if height <= 1 {
-                    if phase == Phase::Exit {
-                        tops += 1;
-                    }
                     return;
                 }
                 match phase {
                     Phase::Enter => open.push(snapshot_accounts(ctx)),
-                    Phase::Exit => {
+                    Phase::Exit { ok } => {
                         let entry = open.pop().unwrap_or_default();
-                        let program = ctx
-                            .transaction_context
-                            .get_current_instruction_context()
-                            .ok()
-                            .and_then(|ic| ic.get_program_key().ok())
-                            .map(|k| k.to_string())
-                            .unwrap_or_default();
+                        let program = frame.program.map(|k| k.to_string()).unwrap_or_default();
                         let snap = InnerSnapshot {
                             height: height as u8,
                             program,
@@ -2537,16 +2535,29 @@ impl ReplayContext {
                             entry,
                         };
                         if let Ok(mut v) = inner.lock() {
-                            v.push((tops, snap));
+                            v.push(snap);
                         }
                     }
                 }
-            }));
-        }
+            }))
+        };
         let result = svm.simulate_transaction(tx);
-        solana_program_runtime::instruction_hook::clear();
-        let inner = std::mem::take(&mut *inner.lock().unwrap());
+        drop(hook_guard);
+        let inner_all = std::mem::take(&mut *inner.lock().unwrap());
         let snaps = std::mem::take(&mut *snaps.lock().unwrap());
+        // Partition inner snapshots by top-level index: each top-level
+        // snapshot records how many inner snapshots existed when it fired.
+        let mut inner_by_top: Vec<Vec<InnerSnapshot>> = vec![Vec::new(); n];
+        {
+            let mut taken = 0usize;
+            for s in &snaps {
+                let upto = s.inner_seen.min(inner_all.len());
+                if let Some(bucket) = inner_by_top.get_mut(s.index) {
+                    bucket.extend(inner_all[taken..upto].iter().cloned());
+                }
+                taken = upto;
+            }
+        }
         // The transaction's own verdict is authoritative. A failure tied to an
         // instruction is that instruction's; a failure with no instruction
         // index (a rent check after the last instruction, a rejection before
@@ -2595,11 +2606,7 @@ impl ReplayContext {
                 (Err(failed), true) => Ok(failed.meta.clone()),
                 (Err(failed), false) => Err(failed.clone()),
             };
-            let inner_posts: Vec<InnerSnapshot> = inner
-                .iter()
-                .filter(|(top, _)| *top == k)
-                .map(|(_, s)| s.clone())
-                .collect();
+            let inner_posts: Vec<InnerSnapshot> = inner_by_top.get(k).cloned().unwrap_or_default();
             runs.push(RawStepRun {
                 keep: keep.clone(),
                 inner_posts,
@@ -2684,12 +2691,16 @@ struct InstructionSnapshot {
     index: usize,
     ok: bool,
     accounts: Vec<(Address, Account)>,
+    /// How many inner snapshots the runtime observer had recorded when this
+    /// top-level instruction finished — the boundary of its CPIs.
+    inner_seen: usize,
 }
 
 /// Snapshots the transaction context after every top-level instruction.
 #[cfg(feature = "single-run-trace")]
 struct StateCollector {
     snaps: std::sync::Arc<std::sync::Mutex<Vec<InstructionSnapshot>>>,
+    inner_count: std::sync::Arc<dyn Fn() -> usize + Send + Sync>,
 }
 
 #[cfg(feature = "single-run-trace")]
@@ -2721,11 +2732,13 @@ impl litesvm::InvocationInspectCallback for StateCollector {
         ok: bool,
     ) {
         let accounts = snapshot_accounts(invoke_context);
+        let inner_seen = (self.inner_count)();
         if let Ok(mut s) = self.snaps.lock() {
             s.push(InstructionSnapshot {
                 index,
                 ok,
                 accounts,
+                inner_seen,
             });
         }
     }

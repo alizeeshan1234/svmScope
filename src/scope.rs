@@ -1356,10 +1356,41 @@ impl Replay {
             .filter(|(_, s)| s.depth == 1)
             .map(|(i, _)| i)
             .collect();
+        // Precompiles (Ed25519, secp256k1, secp256r1) run natively and log
+        // nothing, so the n-th depth-1 span is not instruction n once one of
+        // them is in the message. Map each message index to its logged span,
+        // skipping precompiles, and give a precompile no span at all.
+        let is_precompile: Vec<bool> = top_ixs
+            .iter()
+            .map(|ix| {
+                keys.get(ix.program_id_index as usize)
+                    .is_some_and(|p| crate::cpi_tree::is_precompile(p))
+            })
+            .collect();
+        let span_slot: Vec<Option<usize>> = {
+            let mut next = 0usize;
+            is_precompile
+                .iter()
+                .map(|&pre| {
+                    if pre {
+                        None
+                    } else {
+                        let s = next;
+                        next += 1;
+                        Some(s)
+                    }
+                })
+                .collect()
+        };
         let spans_for = |k: usize| -> &[LogSpan] {
-            match top_span_idx.get(k) {
-                Some(&start) => {
-                    let end = top_span_idx.get(k + 1).copied().unwrap_or(full_spans.len());
+            match span_slot
+                .get(k)
+                .copied()
+                .flatten()
+                .and_then(|s| top_span_idx.get(s).map(|&i| (s, i)))
+            {
+                Some((s, start)) => {
+                    let end = top_span_idx.get(s + 1).copied().unwrap_or(full_spans.len());
                     &full_spans[start..end]
                 }
                 None => &[],

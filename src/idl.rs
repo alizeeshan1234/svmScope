@@ -665,7 +665,10 @@ fn walk_fields(
             None => return false, // unknown type → stop
         };
         let size = kind.size();
-        if *offset + size > data.len() {
+        let Some(end) = offset.checked_add(size) else {
+            return false;
+        };
+        if end > data.len() {
             return false;
         }
         out.push(Field {
@@ -673,11 +676,11 @@ fn walk_fields(
             offset: *offset,
             ty: kind.label(),
             size,
-            value: read_value(&data[*offset..*offset + size], kind),
+            value: read_value(&data[*offset..end], kind),
             editable: kind.editable(),
             note: None,
         });
-        *offset += size;
+        *offset = end;
     }
     true
 }
@@ -744,7 +747,7 @@ pub(crate) fn ix_arg_span(idl_ix: &IxDef, arg: &str) -> Option<(usize, usize, St
         if a.name.as_deref() == Some(arg) {
             return Some((off, kind.size(), kind.label()));
         }
-        off += kind.size();
+        off = off.checked_add(kind.size())?;
     }
     None
 }

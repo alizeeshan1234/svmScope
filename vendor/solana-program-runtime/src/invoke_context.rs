@@ -540,15 +540,34 @@ impl<'a, 'ix_data> InvokeContext<'a, 'ix_data> {
     ) -> Result<(), InstructionError> {
         *compute_units_consumed = 0;
         self.push()?;
-        // svmscope: observe every instruction at every depth on entry (state
-        // it starts from) and on exit (state it produced), while the
-        // transaction context still holds its frame.
-        crate::instruction_hook::fire(self, crate::instruction_hook::Phase::Enter, true);
+        // svmscope: observe every instruction at every depth. `Enter` fires
+        // with the frame pushed (the state it starts from). `Exit` fires after
+        // `pop`, because `pop` is where an unbalanced instruction or an
+        // outstanding borrow is raised: the verdict handed to the observer is
+        // the instruction's real one. The frame is gone by then, so the
+        // observer is told which frame just finished (its stack height and
+        // program), captured before the pop.
+        let frame = crate::instruction_hook::Frame {
+            stack_height: self.get_stack_height(),
+            program: self
+                .transaction_context
+                .get_current_instruction_context()
+                .ok()
+                .and_then(|ic| ic.get_program_key().ok().copied()),
+        };
+        crate::instruction_hook::fire(self, crate::instruction_hook::Phase::Enter, frame);
         let result = self.process_executable_chain(compute_units_consumed, timings);
-        crate::instruction_hook::fire(self, crate::instruction_hook::Phase::Exit, result.is_ok());
         // MUST pop if and only if `push` succeeded, independent of `result`.
         // Thus, the `.and()` instead of an `.and_then()`.
-        result.and(self.pop())
+        let result = result.and(self.pop());
+        crate::instruction_hook::fire(
+            self,
+            crate::instruction_hook::Phase::Exit {
+                ok: result.is_ok(),
+            },
+            frame,
+        );
+        result
     }
 
     /// Processes a precompile instruction
