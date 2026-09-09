@@ -24,7 +24,7 @@
 //!
 //! ```toml
 //! [dev-dependencies]
-//! svmscope = "0.5"
+//! svmscope = "0.6"
 //! ```
 //!
 //! # Quickstart

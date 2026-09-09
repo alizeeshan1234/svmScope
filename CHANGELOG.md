@@ -4,6 +4,65 @@ All notable changes to svmscope are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — 2026-09-09
+
+### Added
+
+- **Edit the transaction itself, not just its state.** Three new mutations:
+  `SkipIx` runs the transaction as if an instruction were not there,
+  `MoveIx` moves an instruction earlier or later, and `IxDataReplace` swaps an
+  instruction's data wholesale. Steps in a trace carry `original_index`, so
+  comparison rows line up across a skipped instruction, and `data_hex`, the
+  raw bytes each step ran with.
+- **Two-tier fidelity.** A replay first reconstructs the transaction's state
+  at its slot; when only current state reproduces the on-chain outcome, it
+  says so and uses that instead. The tier is pinned across re-runs and the
+  profiler, and every trace names it (`Trace::tier`, `tier_note`,
+  `state_slot`).
+- **When a reconstructed replay fails where the chain did not**, the failing
+  step now lists the accounts that moved since the slot
+  (`Trace::drifted`, `DriftedAccount`: address, role, last write slot), and
+  `Scope::last_write_slot` answers that question for any account.
+- **Instruction introspection.** Instructions handed the Instructions sysvar
+  are flagged in the CPI tree (`CpiEntry::introspects`), every entry carries
+  its 8-byte `discriminator`, and the trace warns when a skipped or moved
+  instruction changes what an introspecting program sees.
+- **Per-instruction compute units** in the CPI tree (`CpiEntry::compute_units`)
+  and, in the profiler, on-chain compute beside replay compute for every frame
+  (`onchain_compute_units`, `onchain_frames`), plus `Profile::attach_names`,
+  which names frames from the instructions they ran.
+- **Exact symbol maps.** `profile::exact_from_build` derives a map from a
+  program's `.so` and `.debug`, `apply_exact` applies one when the on-chain
+  ELF hash matches, and a bundled set ships in `symbols/exact.jsonl.gz`.
+  The shape corpus gained an approximate tier (opcode-sequence match, shown
+  as ≈) and a floor of `MIN_CORPUS_LEN` instructions per shape.
+- Each trace step records its return data and `diffs_since`, the step whose
+  state its diff is measured from.
+
+### Fixed
+
+- **Delta and unchanged assertions measured from the original load, not the
+  mutated pre-state.** A scenario that mutated an account and then asserted
+  `delta` or `unchanged` compared against the unmutated value, so a loss
+  invariant could pass on a transaction that lost funds. Both now read the
+  state the replay actually started from.
+- Trace steps for CPIs measure their diff from the enclosing instruction's
+  entry state, not from the previous top-level step.
+- Nested CPI paths, created-account diffs and big-integer field values in
+  step diffs; integers above 2^53 are serialised as strings.
+- The IDL walker bounds total visits, not only depth, so a nested array of
+  empty structs can no longer take a request over a million leaf visits.
+- `counterfactual` and `scan` return a real "no crossing" outcome instead of
+  an error when the balance never flips the result.
+- Precompile instructions (Ed25519, secp256k1) are skipped when pairing log
+  spans with instructions, so the steps after one line up.
+
+### Changed
+
+- The trace builder is split into named pieces (`ReplayContext::prepare`,
+  `diffs_of`, `completion_ranks`, `PathBuilder`) and is 130 lines shorter.
+- Allocator shim names lose the rustc crate disambiguator.
+
 ## [0.5.2] — 2026-09-06
 
 ### Added
