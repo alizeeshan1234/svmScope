@@ -1373,6 +1373,14 @@ struct ReplayAtSlotResponse {
     drifted: Vec<String>,
     /// Whether a recorded on-chain outcome exists to verify against.
     verifiable: bool,
+    /// How many accounts came from each source (`Recorded`, `MetadataRewind`,
+    /// `Unchanged`, `Reconstructed`, `Program`, `CurrentRpc`, ...).
+    sources: std::collections::BTreeMap<String, usize>,
+    /// Every account with its source, for the UI's per-account view.
+    accounts: Vec<svmscope::AccountProvenance>,
+    /// The slot this instance's recordings begin at, when it records.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recorded_from: Option<u64>,
 }
 
 /// GET /replay_at_slot/:signature — replay against the transaction's slot at the
@@ -1392,6 +1400,12 @@ async fn replay_at_slot_handler(
             let replay = scope.replay_at_slot(&signature)?;
             let cert = replay.certificate();
             let result = replay.run()?.result;
+            let mut sources = std::collections::BTreeMap::new();
+            for a in &cert.accounts {
+                let label = format!("{:?}", a.source);
+                let label = label.split([' ', '{']).next().unwrap_or("").to_string();
+                *sources.entry(label).or_insert(0) += 1;
+            }
             Ok(ReplayAtSlotResponse {
                 result,
                 fidelity: cert.fidelity.label(),
@@ -1399,6 +1413,9 @@ async fn replay_at_slot_handler(
                 clock: cert.clock.clone(),
                 drifted: cert.drifted.clone(),
                 verifiable: cert.verifiable,
+                sources,
+                accounts: cert.accounts.clone(),
+                recorded_from: cert.recorded_from,
             })
         })
         .await

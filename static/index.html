@@ -2593,16 +2593,30 @@ function renderCertificate(d) {
   const errText = r.error ? (r.error_name ? `${r.error_name} — ${r.error}` : r.error) : '';
   const err = errText ? `<div class="err-box">${esc(errText)}</div>` : '';
   const n = (d.drifted || []).length;
+  const recording = d.recorded_from != null;
+  const fixNote = recording
+    ? `They weren't being recorded before this transaction landed; they are now, so later transactions that touch them replay exactly.`
+    : `This engine isn't recording state, so accounts that changed since can't be rewound — the SOL &amp; token balances and the clock are already correct.`;
   const drift = n
-    ? `<div class="drift-inline"><b>${n}</b> account${n === 1 ? '' : 's'} still use <b>today's data</b>, so those parts may differ from back then
-         (<a href="#" id="driftToggle">show which</a>). Getting them exactly right needs a paid history archive — but the SOL &amp; token balances and the clock are already correct.
+    ? `<div class="drift-inline"><b>${n}</b> account${n === 1 ? '' : 's'} still ${n === 1 ? 'uses' : 'use'} <b>today's data</b>, so those parts may differ from back then
+         (<a href="#" id="driftToggle">show which</a>). ${fixNote}
          <div id="driftList" class="drift-list hidden">${d.drifted.map(esc).join('<br>')}</div></div>`
-    : `<div class="drift-inline">Every account was rebuilt correctly — this replay is fully faithful to that moment.</div>`;
+    : `<div class="drift-inline">Every account is as it was at that moment — this replay is exact.</div>`;
   const verify = d.verifiable ? ' · matches the real on-chain result' : '';
+  // Where each account's bytes came from, in plain words.
+  const names = {
+    Recorded: 'recorded as it was', MetadataRewind: 'balance from the transaction', Unchanged: 'unchanged since',
+    Reconstructed: 'rebuilt from history', Program: 'program code', HistoricalArchive: 'archive', CurrentRpc: "today's data", Fixture: 'fixture',
+  };
+  const src = Object.entries(d.sources || {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `<b>${v}</b> ${esc(names[k] || k)}`).join(' · ');
+  const sources = src ? `<div class="cu-note" style="margin:4px 0 2px">Where the state came from: ${src}</div>` : '';
+  const window = recording ? `<div class="cu-note" style="margin:2px 0 2px">This engine has recorded account state since slot <span class="mono">${fmt(d.recorded_from)}</span>; transactions after that replay exactly for every recorded account.</div>` : '';
   return `<div class="cert-card">
     <div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>
     <div class="cu-note" style="margin:6px 0 2px">Replayed as of the moment it landed — <span class="mono">${esc(d.clock)}</span>${verify}</div>
-    ${err}${drift}
+    ${sources}${window}${err}${drift}
   </div>`;
 }
 
