@@ -562,7 +562,11 @@ impl Scope {
             Cut::Slot
         };
         let mut provenance = HashMap::new();
-        if self.reconstruct_budget == 0 {
+        // Without a replay budget and without recordings there is nothing to
+        // do. With recordings, covered accounts are exact by lookup at no
+        // RPC cost, and every asked-about account joins the watched set, so
+        // the loop runs even at budget zero.
+        if self.reconstruct_budget == 0 && self.records.is_none() {
             return provenance;
         }
         let ledger = RpcLedger::new(self.rpc_url());
@@ -612,28 +616,6 @@ impl Scope {
                 provenance.insert(key.clone(), Provenance::MetadataRewind);
                 continue;
             }
-            match self.last_write_slot(key) {
-                Some(newest) if newest >= slot => {}
-                other => {
-                    if trace {
-                        eprintln!(
-                            "[reconstruct {:>6.1}s] {key}: unchanged since slot (newest mention {other:?})",
-                            started.elapsed().as_secs_f64()
-                        );
-                    }
-                    continue; // unchanged since the slot (or unknown: keep current)
-                }
-            }
-            if budget_left == 0 {
-                provenance.insert(key.clone(), Provenance::CurrentRpc);
-                continue;
-            }
-            if trace {
-                eprintln!(
-                    "[reconstruct {:>6.1}s] {key}: drifted, rebuilding (budget left {budget_left})",
-                    started.elapsed().as_secs_f64(),
-                );
-            }
             let Ok(addr) = Address::from_str(key) else {
                 continue;
             };
@@ -674,6 +656,33 @@ impl Scope {
                     provenance.insert(key.clone(), Provenance::Recorded { slot: v.slot });
                     continue;
                 }
+            }
+            // Past the lookups, everything costs RPC calls and replays.
+            if budget_left == 0 {
+                provenance.insert(key.clone(), Provenance::CurrentRpc);
+                continue;
+            }
+            // Path 2: one signature lookup. If the newest mention is before
+            // the target, current bytes are the bytes at the target. (At the
+            // transaction's own slot the transaction itself is a mention, so
+            // this only ever fires for a later target slot.)
+            match self.last_write_slot(key) {
+                Some(newest) if newest >= slot => {}
+                other => {
+                    if trace {
+                        eprintln!(
+                            "[reconstruct {:>6.1}s] {key}: unchanged since slot (newest mention {other:?})",
+                            started.elapsed().as_secs_f64()
+                        );
+                    }
+                    continue; // unchanged since the slot (or unknown: keep current)
+                }
+            }
+            if trace {
+                eprintln!(
+                    "[reconstruct {:>6.1}s] {key}: drifted, rebuilding (budget left {budget_left})",
+                    started.elapsed().as_secs_f64(),
+                );
             }
             if let (true, Some(v)) = (trace, start.as_ref()) {
                 eprintln!(
