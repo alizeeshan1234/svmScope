@@ -332,6 +332,11 @@ fn provenance_label(p: &Provenance, is_program: bool) -> &'static str {
         return "program";
     }
     match p {
+        Provenance::Program {
+            upgraded_since: Some(true),
+        } => "program-upgraded",
+        Provenance::Program { .. } => "program",
+        Provenance::Unchanged { .. } => "unchanged",
         Provenance::Recorded { .. } => "recorded",
         Provenance::MetadataRewind => "metadata",
         Provenance::Reconstructed { exact: true, .. } => "reconstructed",

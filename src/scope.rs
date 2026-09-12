@@ -523,6 +523,28 @@ impl Scope {
         Ok(replay)
     }
 
+    /// Whether an upgradeable program was upgraded after `slot`: the loader
+    /// stamps its programdata account with the slot of the last deploy, so
+    /// this is one read of an account the context usually already holds.
+    /// `Some(false)` for programs under loaders that cannot upgrade; `None`
+    /// when the programdata could not be read.
+    fn program_upgraded_since(&self, ctx: &ReplayContext, key: &str, slot: u64) -> Option<bool> {
+        const UPGRADEABLE: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
+        let program = ctx.pre_account_owned(key)?;
+        if program.owner.to_string() != UPGRADEABLE {
+            return Some(false);
+        }
+        let pd_bytes: [u8; 32] = program.data.get(4..36)?.try_into().ok()?;
+        let pd_addr = Address::from(pd_bytes).to_string();
+        let pd = match ctx.pre_account_owned(&pd_addr) {
+            Some(a) => a.data,
+            None => self.account_raw(&pd_addr).ok().flatten()?.3,
+        };
+        // ProgramData: [0..4]=variant, [4..12]=slot of the last deploy.
+        let deployed = u64::from_le_bytes(pd.get(4..12)?.try_into().ok()?);
+        Some(deployed > slot)
+    }
+
     /// The free historical tier's core: decide, per account, whether current
     /// bytes are still the bytes at `slot`, and rebuild the ones that are not.
     ///
@@ -591,7 +613,16 @@ impl Scope {
         let trace = std::env::var_os("SVMSCOPE_TRACE_RECONSTRUCT").is_some();
         let started = std::time::Instant::now();
         for (index, key) in account_keys.iter().enumerate() {
-            if is_infra(key) || programs.contains(key) {
+            // Programs first: the well-known ones are infrastructure too, but
+            // some of them (Token-2022, the associated-token program) are
+            // upgradeable, and the upgrade check is one read.
+            if programs.contains(key) {
+                let upgraded_since = self.program_upgraded_since(ctx, key, slot);
+                provenance.insert(key.clone(), Provenance::Program { upgraded_since });
+                continue;
+            }
+            if is_infra(key) {
+                provenance.insert(key.clone(), Provenance::Unchanged { last_write: None });
                 continue;
             }
             // Signers are wallets: their history is endless, only their balance
@@ -668,14 +699,26 @@ impl Scope {
             // this only ever fires for a later target slot.)
             match self.last_write_slot(key) {
                 Some(newest) if newest >= slot => {}
-                other => {
+                Some(newest) => {
                     if trace {
                         eprintln!(
-                            "[reconstruct {:>6.1}s] {key}: unchanged since slot (newest mention {other:?})",
+                            "[reconstruct {:>6.1}s] {key}: unchanged since slot (newest mention {newest})",
                             started.elapsed().as_secs_f64()
                         );
                     }
-                    continue; // unchanged since the slot (or unknown: keep current)
+                    provenance.insert(
+                        key.clone(),
+                        Provenance::Unchanged {
+                            last_write: Some(newest),
+                        },
+                    );
+                    continue;
+                }
+                None => {
+                    // Unknown (lookup failed or no history at all): keep
+                    // current bytes, say so.
+                    provenance.insert(key.clone(), Provenance::CurrentRpc);
+                    continue;
                 }
             }
             if trace {
@@ -1288,6 +1331,22 @@ pub enum Provenance {
         /// Whether the whole dependency cone was rebuilt exactly.
         exact: bool,
     },
+    /// An executable program, loaded as its current ELF. A program's bytes
+    /// only change on an upgrade, which the loader stamps with its slot.
+    Program {
+        /// `Some(true)`: upgraded after the target slot, so the ELF that ran
+        /// then differs from the one loaded (an archive can supply the old
+        /// binary). `Some(false)`: checked, not upgraded since. `None`: not
+        /// checked (the replay made no lookups at all).
+        upgraded_since: Option<bool>,
+    },
+    /// Current bytes verified not written since the target slot: exact.
+    Unchanged {
+        /// The slot of the newest mention found, when a lookup established
+        /// it; `None` for sysvars and native infrastructure, which do not
+        /// change between slots.
+        last_write: Option<u64>,
+    },
 }
 
 /// One account's provenance within a replay.
@@ -1446,12 +1505,23 @@ impl Replay {
                     (Some(p), _) => *p,
                     (None, Fidelity::Exact { .. }) => Provenance::HistoricalArchive,
                     // A balance-only account (system-owned, no data) is faithfully
-                    // rewound from metadata; program ELFs and program-owned data
-                    // accounts are still current-state.
+                    // rewound from metadata; program-owned data accounts are
+                    // still current-state.
                     (None, Fidelity::Reconstructed { .. })
                         if !i.is_program && i.owner_is_system && i.data_len == 0 =>
                     {
                         Provenance::MetadataRewind
+                    }
+                    // Sysvars and native infrastructure do not change between
+                    // slots; a program is its current ELF, upgrade unchecked
+                    // when the replay made no lookups.
+                    (None, Fidelity::Reconstructed { .. }) if i.is_program => Provenance::Program {
+                        upgraded_since: None,
+                    },
+                    (None, Fidelity::Reconstructed { .. })
+                        if crate::reconstruct::is_infra(&i.address) =>
+                    {
+                        Provenance::Unchanged { last_write: None }
                     }
                     (None, Fidelity::Reconstructed { .. }) => Provenance::CurrentRpc,
                     (None, Fidelity::Current) => Provenance::CurrentRpc,
@@ -1476,7 +1546,11 @@ impl Replay {
                 .filter(|a| {
                     matches!(
                         a.source,
-                        Provenance::CurrentRpc | Provenance::Reconstructed { exact: false, .. }
+                        Provenance::CurrentRpc
+                            | Provenance::Reconstructed { exact: false, .. }
+                            | Provenance::Program {
+                                upgraded_since: Some(true)
+                            }
                     )
                 })
                 .map(|a| a.address.clone())

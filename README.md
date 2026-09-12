@@ -450,9 +450,15 @@ unless `SVMSCOPE_RECORD_DIR` is set:
 | `SVMSCOPE_RECONSTRUCT_BUDGET` | Old transactions the free tier may re-execute per drifting account that no recording covers, default 0. |
 
 The window keeps every change for 24 hours and one version per 30 seconds
-for 30 days. The fidelity certificate names the slot coverage begins at and,
-per account, whether its bytes came from a recording, the transaction's own
-metadata, a reconstruction, or current state.
+for 30 days. The fidelity certificate names the slot coverage begins at and
+labels every account: `Recorded` (a version observed before the slot with
+continuous coverage across it), `MetadataRewind` (balances from the
+transaction's own metadata), `Unchanged` (verified not written since the
+slot), `Reconstructed` (re-executed write history, `exact` or not),
+`Program` (the current ELF, with whether it was upgraded after the slot),
+`HistoricalArchive`, or `CurrentRpc` (current bytes, may differ: the only
+label the certificate counts as drift, along with an inexact reconstruction
+or an upgraded program).
 
 ## Roadmap
 

@@ -61,6 +61,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The fidelity certificate — honest provenance for the reconstructed replay.
     let cert = recon.certificate();
     println!("\nfidelity certificate: {}", cert.summary());
+    // Where each account's bytes came from, counted by label.
+    let mut by_source: std::collections::BTreeMap<String, usize> = Default::default();
+    for a in &cert.accounts {
+        let label = format!("{:?}", a.source);
+        let label = label.split([' ', '{']).next().unwrap_or("").to_string();
+        *by_source.entry(label).or_default() += 1;
+    }
+    let summary: Vec<String> = by_source.iter().map(|(k, v)| format!("{v} {k}")).collect();
+    println!("  sources: {}", summary.join(", "));
     if !cert.drifted.is_empty() {
         println!(
             "  {} account(s) on current-state data (may differ from slot {}):",
