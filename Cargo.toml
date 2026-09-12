@@ -57,6 +57,8 @@ solana-blake3-hasher = "=3.1.0"
 solana-address = { version = "=2.6.1", features = ["curve25519", "sha2"] }
 solana-clock = "=3.1.1"
 solana-client = "=4.2.1"
+# Already in the tree via solana-client; used directly by the records queue.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 solana-pubkey = "=4.2.1"
 solana-transaction = { version = "=4.1.6", features = ["wincode"] }
 solana-transaction-error = "=3.3.2"

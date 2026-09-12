@@ -5,7 +5,7 @@
 //!
 //!   RPC=<url> cargo run --example reconstruct_verify -- <address>
 
-use svmscope::reconstruct::{reconstruct_account, RpcLedger};
+use svmscope::reconstruct::{reconstruct_account, Cut, RpcLedger};
 use svmscope::Scope;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -19,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Reconstruct as-of a slot past the tip, i.e. replay the entire history.
     let tip = scope.client().get_slot()?;
     println!("reconstructing {address} up to current tip (slot {tip})…");
-    let recon = reconstruct_account(&scope, &ledger, &address, tip + 1, 80, 40)?;
+    let recon = reconstruct_account(&scope, &ledger, &address, tip + 1, Cut::Slot, 80, 40)?;
     println!(
         "  writes replayed: {}   skipped: {}   exists: {}",
         recon.writes_replayed,

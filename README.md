@@ -434,6 +434,26 @@ cargo run -p svmscope-server   # → http://127.0.0.1:3000, GET /api lists the s
 A typed TypeScript client lives in [`sdk/`](./sdk). Point it at your own RPC
 endpoint — the public mainnet RPC is heavily rate-limited.
 
+### Recording state for exact historical replay
+
+`replay_at_slot` is exact, without an archive, for every account the server
+has been recording since before the transaction landed. Recording is off
+unless `SVMSCOPE_RECORD_DIR` is set:
+
+| Variable | Meaning |
+|---|---|
+| `SVMSCOPE_RECORD_DIR` | Directory for the record store (per-account logs of compressed diffs). Turns the recorder on. |
+| `SVMSCOPE_RECORD_SEEDS` | Comma-separated addresses watched from the start; every account a replay had to rebuild is added automatically. |
+| `SVMSCOPE_RECORD_RPC_URL` | Node the recorder polls, default the public mainnet RPC (one `getMultipleAccounts` per 100 accounts per round; never a paid key). |
+| `SVMSCOPE_RECORD_INTERVAL_MS` | Polling interval, default 2000. |
+| `SVMSCOPE_RECORD_GITHUB` + `SVMSCOPE_GITHUB_TOKEN` | `owner/repo` and a token with releases write scope: the durable 30-day queue. Each hour's new versions are uploaded as an asset of that UTC day's release, releases older than 30 days are deleted, and the window is restored from the releases after a redeploy. Without it the window lives on local disk only. |
+| `SVMSCOPE_RECONSTRUCT_BUDGET` | Old transactions the free tier may re-execute per drifting account that no recording covers, default 0. |
+
+The window keeps every change for 24 hours and one version per 30 seconds
+for 30 days. The fidelity certificate names the slot coverage begins at and,
+per account, whether its bytes came from a recording, the transaction's own
+metadata, a reconstruction, or current state.
+
 ## Roadmap
 
 - [x] Decode, reconstruct, replay, mutate, time-travel, feature gates

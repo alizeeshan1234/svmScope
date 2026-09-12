@@ -39,6 +39,12 @@ use crate::search::{search_threshold, Threshold};
 use crate::trace::Trace;
 use crate::{cpi_tree, decode, diffs, idl, ixname, utils, CapturedTransaction};
 
+const SPL_TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const SPL_TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+
+/// Default replay budget for free historical reconstruction per `replay_at`.
+const DEFAULT_RECONSTRUCT_BUDGET: usize = 32;
+
 /// An RPC-backed client with caches. Everything svmscope fetches — transaction
 /// JSON, program IDLs — is fetched once per `Scope` and reused, so
 /// `analyze(sig)` followed by `replay(sig)` costs one transaction fetch, and
@@ -47,6 +53,14 @@ pub struct Scope {
     client: RpcClient,
 
     archive: Option<RpcClient>,
+
+    /// Replay budget for free historical reconstruction (see
+    /// [`Scope::with_reconstruction_budget`]); `0` disables it.
+    reconstruct_budget: usize,
+
+    /// Recorded account versions (see [`crate::records`]): the free path to
+    /// exact state for hot accounts, from the moment they were first watched.
+    records: Option<std::sync::Arc<dyn crate::records::StateStore>>,
 
     /// getTransaction (json encoding) responses by signature.
     tx_cache: Mutex<HashMap<String, serde_json::Value>>,
@@ -82,6 +96,8 @@ impl Scope {
         Scope {
             client,
             archive: None,
+            reconstruct_budget: DEFAULT_RECONSTRUCT_BUDGET,
+            records: None,
             tx_cache: Mutex::new(HashMap::new()),
             idl_cache: Mutex::new(HashMap::new()),
         }
@@ -108,6 +124,11 @@ impl Scope {
         self.client.url()
     }
 
+    /// The archival endpoint attached with [`Scope::with_archive`], if any.
+    pub fn archive_url(&self) -> Option<String> {
+        self.archive.as_ref().map(|a| a.url())
+    }
+
     /// Slot of `address`'s most recent on-chain write, or `None`.
     pub fn last_write_slot(&self, address: &str) -> Option<u64> {
         let resp: serde_json::Value = self
@@ -122,6 +143,31 @@ impl Scope {
             .or_else(|| resp.as_array())
             .and_then(|a| a.first())
             .and_then(|e| e["slot"].as_u64())
+    }
+
+    /// How many old transactions a historical replay may re-execute to rebuild
+    /// the accounts that changed since the target slot (the free tier of
+    /// [`Scope::replay_at`]). Each drifting account costs at least one replay;
+    /// a busy pool can cost many. `0` turns reconstruction off: accounts stay
+    /// at current state and the certificate says so.
+    pub fn with_reconstruction_budget(mut self, replays: usize) -> Scope {
+        self.reconstruct_budget = replays;
+        self
+    }
+
+    /// Attach a store of recorded account versions. Historical replays start
+    /// each drifting account from its newest recorded version at or before
+    /// the target slot instead of from its creation, inject recorded
+    /// co-account state into every replayed write, and add every account
+    /// they had to rebuild to the watched set so it is recorded from now on.
+    pub fn with_records(mut self, store: std::sync::Arc<dyn crate::records::StateStore>) -> Scope {
+        self.records = Some(store);
+        self
+    }
+
+    /// The attached record store, if any.
+    pub fn records(&self) -> Option<&std::sync::Arc<dyn crate::records::StateStore>> {
+        self.records.as_ref()
     }
 
     /// Attach an archival RPC that honours a historical `slot` on
@@ -327,6 +373,8 @@ impl Scope {
             ctx,
             time_travel: TimeTravel::default(),
             fidelity: Fidelity::Current,
+            provenance: HashMap::new(),
+            recorded_from: None,
         })
     }
 
@@ -357,60 +405,7 @@ impl Scope {
         let slot = tx["slot"]
             .as_u64()
             .ok_or_else(|| Error::MalformedRpcResponse("transaction has no slot".into()))?;
-        let account_keys = utils::resolve_account_keys(&tx);
-        let pre = PreState::from_meta(&tx, &account_keys);
-
-        // Exact tier: only when an archive is set AND actually honors the slot.
-        let archive = self
-            .archive
-            .as_ref()
-            .filter(|a| crate::replay::archive_honors_slot(a, slot));
-
-        let (mut ctx, fidelity) = match archive {
-            Some(archive) => {
-                // Fetch at S-1: the archive answers "≤ slot", and at S that
-                // includes this transaction's own writes (post-state). The
-                // recorded pre-balances in `pre` then correct any same-slot
-                // predecessor's balance effects on top.
-                let ctx = crate::replay::build_context_at_slot(
-                    archive,
-                    &signature,
-                    &account_keys,
-                    slot.saturating_sub(1),
-                    slot,
-                    tx["blockTime"].as_i64(),
-                    &pre,
-                )?;
-                (ctx, Fidelity::Exact { slot })
-            }
-            None => {
-                // Free reconstruction: current accounts + metadata balance rewind.
-                let ctx = crate::replay::build_context(
-                    &self.client,
-                    &signature,
-                    &account_keys,
-                    Some(slot),
-                    &pre,
-                )?;
-                (ctx, Fidelity::Reconstructed { slot })
-            }
-        };
-
-        self.preload_idls(&mut ctx);
-
-        let mut replay = Replay {
-            recorded: Some(OnchainRecord::from_tx_json(&tx)),
-            ctx,
-            time_travel: TimeTravel::default(),
-            fidelity: Fidelity::Current,
-        };
-        replay.set_fidelity(fidelity);
-        // Anchor the clock to the transaction's slot/time for both tiers.
-        replay.warp_to_slot(slot);
-        if let Some(ts) = tx["blockTime"].as_i64() {
-            replay.warp_to_timestamp(ts);
-        }
-        Ok(replay)
+        self.replay_at(&signature, slot)
     }
 
     /// Replay a transaction against archival account state at a **slot you
@@ -424,51 +419,356 @@ impl Scope {
     /// Alchemy's Account Archive). A non-archival endpoint is detected and
     /// refused rather than silently returning current state.
     pub fn replay_at(&self, input: &str, slot: u64) -> Result<Replay> {
-        let archive = self.archive.as_ref().ok_or_else(|| {
-            Error::InvalidSpec(
-                "replaying at an arbitrary slot needs historical account state — set an archival \
-                 endpoint with Scope::with_archive(url) (e.g. Alchemy PAYG)"
-                    .into(),
-            )
-        })?;
-        if !crate::replay::archive_honors_slot(archive, slot) {
-            return Err(Error::InvalidSpec(format!(
-                "the archive endpoint ignored historical slot {slot} and returned current state — \
-                 replay_at needs an endpoint with account archival; a public node or Helius will not work"
-            )));
-        }
-
         let signature = self.resolve_signature(input)?;
         let tx = self.transaction_json(&signature)?;
         let account_keys = utils::resolve_account_keys(&tx);
-        // The transaction's own metadata pre-state is only valid at its own slot;
-        // at an arbitrary slot the archive is authoritative, so pass none.
-        let pre = PreState::default();
-        let block_time = archive.get_block_time(slot).ok();
-        // An arbitrary slot means "the world as of end of slot N" — state and
-        // clock share the same boundary, no pre-balance patching.
-        let mut ctx = crate::replay::build_context_at_slot(
-            archive,
+        let own_slot = tx["slot"].as_u64() == Some(slot);
+
+        // Exact tier: only when an archive is set AND actually honours the slot.
+        let archive = self
+            .archive
+            .as_ref()
+            .filter(|a| crate::replay::archive_honors_slot(a, slot));
+        if let Some(archive) = archive {
+            // At the transaction's own slot, fetch at S-1: the archive answers
+            // "<= slot", and at S that includes this transaction's own writes
+            // (post-state); the recorded pre-balances then correct any same-slot
+            // predecessor's effects. At an arbitrary slot the archive is
+            // authoritative for "end of slot N" and no pre-balance patching applies.
+            let (state_slot, pre) = if own_slot {
+                (
+                    slot.saturating_sub(1),
+                    PreState::from_meta(&tx, &account_keys),
+                )
+            } else {
+                (slot, PreState::default())
+            };
+            let block_time = if own_slot {
+                tx["blockTime"].as_i64()
+            } else {
+                archive.get_block_time(slot).ok()
+            };
+            let mut ctx = crate::replay::build_context_at_slot(
+                archive,
+                &signature,
+                &account_keys,
+                state_slot,
+                slot,
+                block_time,
+                &pre,
+            )?;
+            self.preload_idls(&mut ctx);
+            let mut replay = Replay {
+                recorded: Some(OnchainRecord::from_tx_json(&tx)),
+                ctx,
+                time_travel: TimeTravel::default(),
+                fidelity: Fidelity::Exact { slot },
+                provenance: HashMap::new(),
+                recorded_from: None,
+            };
+            replay.warp_to_slot(slot);
+            if let Some(ts) = block_time {
+                replay.warp_to_timestamp(ts);
+            }
+            return Ok(replay);
+        }
+
+        // Free tier: current accounts, the transaction's own balance rewind when
+        // this is its own slot, then every account that was written since the
+        // target slot rebuilt from its write history.
+        let pre = if own_slot {
+            PreState::from_meta(&tx, &account_keys)
+        } else {
+            PreState::default()
+        };
+        let mut ctx = crate::replay::build_context(
+            &self.client,
             &signature,
             &account_keys,
-            slot,
-            slot,
-            block_time,
+            Some(slot),
             &pre,
         )?;
+        let num_signers = tx["transaction"]["message"]["header"]["numRequiredSignatures"]
+            .as_u64()
+            .unwrap_or(1) as usize;
+        let provenance = self.reconstruct_drift(
+            &mut ctx,
+            &account_keys,
+            num_signers,
+            slot,
+            own_slot,
+            &signature,
+        );
         self.preload_idls(&mut ctx);
-
         let mut replay = Replay {
             recorded: Some(OnchainRecord::from_tx_json(&tx)),
             ctx,
             time_travel: TimeTravel::default(),
-            fidelity: Fidelity::Exact { slot },
+            fidelity: Fidelity::Reconstructed { slot },
+            provenance,
+            recorded_from: self
+                .records
+                .as_ref()
+                .and_then(|r| r.covered_from().ok().flatten()),
         };
         replay.warp_to_slot(slot);
+        let block_time = if own_slot {
+            tx["blockTime"].as_i64()
+        } else {
+            self.client.get_block_time(slot).ok()
+        };
         if let Some(ts) = block_time {
             replay.warp_to_timestamp(ts);
         }
         Ok(replay)
+    }
+
+    /// The free historical tier's core: decide, per account, whether current
+    /// bytes are still the bytes at `slot`, and rebuild the ones that are not.
+    ///
+    /// Paths, in order, for each account the transaction touches:
+    /// 1. programs, sysvars and well-known infra: left as loaded;
+    /// 2. token accounts at the transaction's own slot: the metadata rewind
+    ///    already set the exact balance, and token account data otherwise
+    ///    changes only on rare authority operations, so left as rewound;
+    /// 3. system-owned accounts with no data (wallets): only the balance
+    ///    matters, the rewind covers it at the own slot, and replaying a
+    ///    wallet's history for a balance is never worth the budget; left as is;
+    /// 4. one `getSignaturesForAddress` page: if the newest mention is before
+    ///    `slot`, current bytes are the bytes at `slot`; left as is;
+    /// 5. otherwise rebuilt by the exact engine ([`Reconstructor`]) within the
+    ///    scope's budget and written into the context; provenance records the
+    ///    replays spent and whether the whole dependency cone was exact.
+    ///
+    /// Returns the per-account provenance overrides. Never fails: an account
+    /// that cannot be rebuilt stays at current state and is reported as such.
+    fn reconstruct_drift(
+        &self,
+        ctx: &mut ReplayContext,
+        account_keys: &[String],
+        num_signers: usize,
+        slot: u64,
+        own_slot: bool,
+        signature: &str,
+    ) -> HashMap<String, Provenance> {
+        use crate::reconstruct::{is_infra, reconstruct_account_from, Cut, RpcLedger};
+        // At the transaction's own slot the pre-state includes same-slot
+        // writes that landed earlier in the block (a bot creating an account
+        // and using it in the next transaction of the same slot). At an
+        // arbitrary slot "as of N" means the start of N.
+        let cut = if own_slot {
+            Cut::Transaction(signature)
+        } else {
+            Cut::Slot
+        };
+        let mut provenance = HashMap::new();
+        if self.reconstruct_budget == 0 {
+            return provenance;
+        }
+        let ledger = RpcLedger::new(self.rpc_url());
+        // The forward loop, not the recursive cone: replay the account's own
+        // writes oldest-first with its running state injected. Co-accounts of
+        // each write are taken at current state with that write's own balance
+        // rewind, which is exact for writes that depend on the account itself,
+        // the instruction data and balances (most), and approximate otherwise.
+        // The recursive exact engine explores every co-account's history first
+        // and never finishes on a hot cone; it stays available as
+        // `Reconstructor` for callers that want it.
+        let mut budget_left = self.reconstruct_budget;
+        const PAGES_PER_ACCOUNT: usize = 10;
+        let programs: std::collections::HashSet<String> = ctx
+            .loaded_info()
+            .into_iter()
+            .filter(|i| i.is_program)
+            .map(|i| i.address)
+            .collect();
+        // Diagnostics for tuning the free tier: one line per account decision,
+        // on stderr, only when SVMSCOPE_TRACE_RECONSTRUCT is set.
+        let trace = std::env::var_os("SVMSCOPE_TRACE_RECONSTRUCT").is_some();
+        let started = std::time::Instant::now();
+        for (index, key) in account_keys.iter().enumerate() {
+            if is_infra(key) || programs.contains(key) {
+                continue;
+            }
+            // Signers are wallets: their history is endless, only their balance
+            // matters, and the rewind covers that at the own slot.
+            if index < num_signers {
+                continue;
+            }
+            // An account absent or empty *now* may have been a live program
+            // account at the slot and closed since (a Squads proposal, an
+            // executed order, a burned position): a short, cold history that
+            // reconstructs cheaply. Only signers get the wallet shortcut above.
+            let current = ctx.pre_account_owned(key);
+            if current.as_ref().is_some_and(|c| c.executable) {
+                continue;
+            }
+            let owner = current
+                .as_ref()
+                .map(|c| c.owner.to_string())
+                .unwrap_or_default();
+            let is_token = owner == SPL_TOKEN || owner == SPL_TOKEN_2022;
+            if own_slot && is_token {
+                provenance.insert(key.clone(), Provenance::MetadataRewind);
+                continue;
+            }
+            match self.last_write_slot(key) {
+                Some(newest) if newest >= slot => {}
+                other => {
+                    if trace {
+                        eprintln!(
+                            "[reconstruct {:>6.1}s] {key}: unchanged since slot (newest mention {other:?})",
+                            started.elapsed().as_secs_f64()
+                        );
+                    }
+                    continue; // unchanged since the slot (or unknown: keep current)
+                }
+            }
+            if budget_left == 0 {
+                provenance.insert(key.clone(), Provenance::CurrentRpc);
+                continue;
+            }
+            if trace {
+                eprintln!(
+                    "[reconstruct {:>6.1}s] {key}: drifted, rebuilding (budget left {budget_left})",
+                    started.elapsed().as_secs_f64(),
+                );
+            }
+            let Ok(addr) = Address::from_str(key) else {
+                continue;
+            };
+            let store = self.records.as_deref();
+            // Asked about: record it from now on, whatever happens below.
+            if let Some(store) = store {
+                let _ = store.watch(key);
+            }
+            // Path 3: a recorded version at or before the target. Strictly
+            // before the target slot at the own slot (a version taken during
+            // slot N may already include this transaction's own writes).
+            let floor_slot = if own_slot {
+                slot.saturating_sub(1)
+            } else {
+                slot
+            };
+            let start = store.and_then(|s| s.latest_at_or_before(key, floor_slot).ok().flatten());
+            // Continuous coverage across the target: the newest version at or
+            // before it is exact, no history walk needed. This is what makes
+            // hot accounts exact for free once they are being recorded.
+            if let (Some(s), Some(v)) = (store, start.as_ref()) {
+                if s.covers(floor_slot).unwrap_or(false) {
+                    let account = v.state.clone().map(|st| solana_account::Account {
+                        lamports: st.lamports,
+                        data: st.data,
+                        owner: Address::from_str(&st.owner).unwrap_or_default(),
+                        executable: false,
+                        rent_epoch: 0,
+                    });
+                    if trace {
+                        eprintln!(
+                            "[reconstruct {:>6.1}s] {key}: exact from recording at slot {} (coverage)",
+                            started.elapsed().as_secs_f64(),
+                            v.slot
+                        );
+                    }
+                    ctx.set_loaded_data(addr, account);
+                    provenance.insert(key.clone(), Provenance::Recorded { slot: v.slot });
+                    continue;
+                }
+            }
+            if let (true, Some(v)) = (trace, start.as_ref()) {
+                eprintln!(
+                    "[reconstruct {:>6.1}s] {key}: recorded version at slot {} ({})",
+                    started.elapsed().as_secs_f64(),
+                    v.slot,
+                    if v.state.is_some() {
+                        "present"
+                    } else {
+                        "absent"
+                    }
+                );
+            }
+            match reconstruct_account_from(
+                self,
+                &ledger,
+                store,
+                key,
+                slot,
+                cut,
+                start.clone(),
+                budget_left,
+                PAGES_PER_ACCOUNT,
+            ) {
+                Ok(recon) => {
+                    let writes = recon.writes_replayed;
+                    if let (Some(v), 0, 0) = (start.as_ref(), writes, recon.writes_skipped) {
+                        // Nothing was written between the recording and the
+                        // target: the recorded bytes are the bytes at the slot.
+                        let account = recon.state.map(|st| solana_account::Account {
+                            lamports: st.lamports,
+                            data: st.data,
+                            owner: Address::from_str(&st.owner).unwrap_or_default(),
+                            executable: false,
+                            rent_epoch: 0,
+                        });
+                        if trace {
+                            eprintln!(
+                                "[reconstruct {:>6.1}s] {key}: exact from recording at slot {}",
+                                started.elapsed().as_secs_f64(),
+                                v.slot
+                            );
+                        }
+                        ctx.set_loaded_data(addr, account);
+                        provenance.insert(key.clone(), Provenance::Recorded { slot: v.slot });
+                        continue;
+                    }
+                    budget_left = budget_left.saturating_sub(writes.max(1));
+                    // Exact only if every write in range replayed and the
+                    // history was walked from the account's creation (the
+                    // walk reached the slot and did not hit the write cap).
+                    let exact = recon.writes_skipped == 0 && writes < self.reconstruct_budget;
+                    let account = recon.state.map(|st| solana_account::Account {
+                        lamports: st.lamports,
+                        data: st.data,
+                        owner: Address::from_str(&st.owner).unwrap_or_else(|_| {
+                            current.as_ref().map(|c| c.owner).unwrap_or_default()
+                        }),
+                        executable: false,
+                        rent_epoch: current.as_ref().map(|c| c.rent_epoch).unwrap_or_default(),
+                    });
+                    if trace {
+                        eprintln!(
+                            "[reconstruct {:>6.1}s] {key}: rebuilt with {writes} replays ({} skipped, {} reads ignored), exact={exact} exists={}",
+                            started.elapsed().as_secs_f64(),
+                            recon.writes_skipped,
+                            recon.reads_ignored,
+                            account.is_some()
+                        );
+                    }
+                    if account.is_none() && recon.writes_skipped > 0 {
+                        // "Absent after the chain" is only trustworthy when
+                        // every write replayed. With skips, the account may
+                        // well have existed: keep what is loaded now.
+                        provenance.insert(key.clone(), Provenance::CurrentRpc);
+                        continue;
+                    }
+                    ctx.set_loaded_data(addr, account);
+                    provenance.insert(key.clone(), Provenance::Reconstructed { writes, exact });
+                }
+                Err(e) => {
+                    // Could not rebuild (history unavailable, RPC error): the
+                    // account stays at current state and the certificate lists
+                    // it as drifted.
+                    if trace {
+                        eprintln!(
+                            "[reconstruct {:>6.1}s] {key}: failed: {e}",
+                            started.elapsed().as_secs_f64()
+                        );
+                    }
+                    provenance.insert(key.clone(), Provenance::CurrentRpc);
+                }
+            }
+        }
+        provenance
     }
 
     /// Reconstruct the world for an **unsigned / not-yet-sent** transaction
@@ -495,6 +795,8 @@ impl Scope {
             ctx,
             time_travel: TimeTravel::default(),
             fidelity: Fidelity::Current,
+            provenance: HashMap::new(),
+            recorded_from: None,
         })
     }
 
@@ -938,7 +1240,7 @@ impl Fidelity {
 }
 
 /// A reconstructed account's raw state — its data bytes, lamports, and owner.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AccountState {
     /// The account's raw data bytes.
     pub data: Vec<u8>,
@@ -960,6 +1262,23 @@ pub enum Provenance {
     MetadataRewind,
     /// Loaded at current state from a normal RPC — may differ from the true slot.
     CurrentRpc,
+    /// Taken from a recorded version observed at `slot`, with no write to the
+    /// account between that observation and the target: exact.
+    Recorded {
+        /// The slot the version was observed at.
+        slot: u64,
+    },
+    /// Rebuilt as of the target slot by re-executing the account's own write
+    /// history in LiteSVM (`writes` replays). `exact` is `true` only when every
+    /// input those writes depended on was itself rebuilt within budget; `false`
+    /// means some co-account was taken at current state, so the bytes may be
+    /// approximate.
+    Reconstructed {
+        /// Old transactions re-executed to rebuild this account.
+        writes: usize,
+        /// Whether the whole dependency cone was rebuilt exactly.
+        exact: bool,
+    },
 }
 
 /// One account's provenance within a replay.
@@ -993,6 +1312,11 @@ pub struct FidelityCertificate {
     pub drifted: Vec<String>,
     /// Whether a recorded on-chain outcome exists to verify the replay against.
     pub verifiable: bool,
+    /// The slot the attached record store's continuous coverage begins at,
+    /// when a store is attached: transactions at or after it can be exact
+    /// for free, older ones only for cold accounts and balances.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded_from: Option<u64>,
 }
 
 impl FidelityCertificate {
@@ -1083,15 +1407,16 @@ pub struct Replay {
     recorded: Option<OnchainRecord>,
     time_travel: TimeTravel,
     fidelity: Fidelity,
+    /// Per-account provenance overrides set by historical reconstruction;
+    /// accounts absent here derive their provenance from `fidelity`.
+    provenance: HashMap<String, Provenance>,
+    /// Where the record store's coverage began when this replay was built.
+    recorded_from: Option<u64>,
 }
 
 impl Replay {
     pub(crate) fn set_recorded(&mut self, recorded: OnchainRecord) {
         self.recorded = Some(recorded);
-    }
-
-    pub(crate) fn set_fidelity(&mut self, fidelity: Fidelity) {
-        self.fidelity = fidelity;
     }
 
     /// How faithful this replay's starting state is to the transaction's slot.
@@ -1108,18 +1433,19 @@ impl Replay {
             .loaded_info()
             .into_iter()
             .map(|i| {
-                let source = match self.fidelity {
-                    Fidelity::Exact { .. } => Provenance::HistoricalArchive,
+                let source = match (self.provenance.get(&i.address), self.fidelity) {
+                    (Some(p), _) => *p,
+                    (None, Fidelity::Exact { .. }) => Provenance::HistoricalArchive,
                     // A balance-only account (system-owned, no data) is faithfully
                     // rewound from metadata; program ELFs and program-owned data
                     // accounts are still current-state.
-                    Fidelity::Reconstructed { .. }
+                    (None, Fidelity::Reconstructed { .. })
                         if !i.is_program && i.owner_is_system && i.data_len == 0 =>
                     {
                         Provenance::MetadataRewind
                     }
-                    Fidelity::Reconstructed { .. } => Provenance::CurrentRpc,
-                    Fidelity::Current => Provenance::CurrentRpc,
+                    (None, Fidelity::Reconstructed { .. }) => Provenance::CurrentRpc,
+                    (None, Fidelity::Current) => Provenance::CurrentRpc,
                 };
                 AccountProvenance {
                     address: i.address,
@@ -1138,7 +1464,12 @@ impl Replay {
         } else {
             accounts
                 .iter()
-                .filter(|a| a.source == Provenance::CurrentRpc)
+                .filter(|a| {
+                    matches!(
+                        a.source,
+                        Provenance::CurrentRpc | Provenance::Reconstructed { exact: false, .. }
+                    )
+                })
                 .map(|a| a.address.clone())
                 .collect()
         };
@@ -1153,6 +1484,7 @@ impl Replay {
             clock: self.ctx.describe_clock(),
             accounts,
             drifted,
+            recorded_from: self.recorded_from,
             verifiable,
         }
     }
@@ -1165,6 +1497,8 @@ impl Replay {
             recorded: fx.recorded.clone(),
             time_travel: TimeTravel::default(),
             fidelity: Fidelity::Current,
+            provenance: HashMap::new(),
+            recorded_from: None,
         })
     }
 
@@ -1738,6 +2072,29 @@ impl Replay {
         address: &str,
     ) -> Result<Option<AccountState>> {
         let (_result, acc) = self.ctx.run_and_read_account(mutations, address)?;
+        Ok(acc.map(|a| AccountState {
+            data: a.data,
+            lamports: a.lamports,
+            owner: a.owner.to_string(),
+        }))
+    }
+
+    /// [`Replay::account_after`], but `Err(Error::ReplayFailed)` when the run
+    /// itself did not succeed. Reconstruction replays writes that succeeded on
+    /// chain; a run that fails here means the replay's inputs were wrong, and
+    /// "the account is gone afterwards" must not be read as "the write closed
+    /// it".
+    pub(crate) fn account_after_success(
+        &self,
+        mutations: &[Mutation],
+        address: &str,
+    ) -> Result<Option<AccountState>> {
+        let (result, acc) = self.ctx.run_and_read_account(mutations, address)?;
+        if !result.success {
+            return Err(Error::ReplayFailed(
+                result.error.unwrap_or_else(|| "unknown error".into()),
+            ));
+        }
         Ok(acc.map(|a| AccountState {
             data: a.data,
             lamports: a.lamports,
@@ -2354,6 +2711,7 @@ mod wait_tests {
             accounts: Vec::new(),
             drifted: vec!["AccA".to_string(), "AccB".to_string()],
             verifiable: true,
+            recorded_from: None,
         };
         let s = drifted.summary();
         assert!(s.contains("reconstructed@442384762"), "{s}");
@@ -2366,6 +2724,7 @@ mod wait_tests {
             accounts: Vec::new(),
             drifted: Vec::new(),
             verifiable: false,
+            recorded_from: None,
         };
         let s = clean.summary();
         assert!(s.contains("none drifted"), "{s}");

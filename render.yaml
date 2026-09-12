@@ -15,3 +15,11 @@ services:
         value: "3000"
       - key: SVMSCOPE_RPC_URL
         sync: false # set your RPC endpoint in the Render dashboard
+      # Exact historical replay: record watched accounts and keep the 30-day
+      # window in a GitHub repository's release assets (see README).
+      - key: SVMSCOPE_RECORD_DIR
+        value: /data/records
+      - key: SVMSCOPE_RECORD_GITHUB
+        sync: false # owner/repo of the data repository
+      - key: SVMSCOPE_GITHUB_TOKEN
+        sync: false # fine-grained token, Contents read/write on that repo only

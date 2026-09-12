@@ -603,6 +603,27 @@ impl ReplayContext {
         None
     }
 
+    /// Replace one loaded data account's bytes and balance (`Some`), or remove
+    /// it from the world (`None`: it did not exist at the target slot). Used by
+    /// historical reconstruction to overwrite current-state bytes with the
+    /// state rebuilt for the slot. Programs are left alone.
+    pub(crate) fn set_loaded_data(&mut self, address: Address, account: Option<Account>) {
+        match account {
+            Some(acc) => {
+                if let Some((_, l)) = self.loaded.iter_mut().find(|(a, _)| *a == address) {
+                    if let Loaded::Data(existing) = l {
+                        *existing = acc;
+                    }
+                } else {
+                    self.loaded.push((address, Loaded::Data(acc)));
+                }
+            }
+            None => self
+                .loaded
+                .retain(|(a, l)| !(*a == address && matches!(l, Loaded::Data(_)))),
+        }
+    }
+
     /// Enumerate every loaded account with the facts a fidelity certificate
     /// needs — provenance and hashing are derived from this in the scope layer.
     pub(crate) fn loaded_info(&self) -> Vec<LoadedInfo> {

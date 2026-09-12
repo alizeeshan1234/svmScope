@@ -14,7 +14,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .expect("usage: cargo run --example replay_at_slot_demo -- <signature>");
 
-    let scope = Scope::new(&rpc);
+    let budget = std::env::var("BUDGET")
+        .ok()
+        .and_then(|b| b.parse().ok())
+        .unwrap_or(32);
+    let scope = Scope::new(&rpc).with_reconstruction_budget(budget);
+    let scope = match std::env::var("RECORD_DIR") {
+        Ok(dir) if !dir.trim().is_empty() => {
+            let store = svmscope::records::LogStore::open(dir.trim())?;
+            scope.with_records(std::sync::Arc::new(store))
+        }
+        _ => scope,
+    };
 
     // Ground truth: what actually happened on-chain.
     let recon = scope.replay_at_slot(&sig)?;

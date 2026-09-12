@@ -35,8 +35,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=build /app/target/release/server /usr/local/bin/svmscope-server
 
-# Drop root: the server needs no privileges at runtime.
-RUN useradd --system --user-group --no-create-home svmscope
+# Drop root: the server needs no privileges at runtime. /data is where the
+# record store lives when SVMSCOPE_RECORD_DIR points there (ephemeral on a
+# free plan; the GitHub queue restores the window after a redeploy).
+RUN useradd --system --user-group --no-create-home svmscope \
+    && mkdir -p /data && chown svmscope:svmscope /data
 USER svmscope
 
 # The server reads HOST/PORT/SVMSCOPE_RPC_URL from the environment.

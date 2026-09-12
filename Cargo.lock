@@ -6377,6 +6377,7 @@ dependencies = [
  "bs58",
  "flate2",
  "litesvm",
+ "reqwest",
  "rustc-demangle",
  "serde",
  "serde_json",

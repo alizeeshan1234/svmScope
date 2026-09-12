@@ -60,6 +60,8 @@ fn cluster_env_rpc(cluster: Option<&str>) -> Option<String> {
 struct ClusterQuery {
     cluster: Option<String>,
     rpc: Option<String>,
+    /// Optional archival RPC for exact historical state; vetted like `rpc`.
+    archive: Option<String>,
 }
 
 /// True if `ip` is one the public server must never be tricked into fetching —
@@ -169,15 +171,189 @@ fn localnet_alias(c: &str) -> bool {
 /// enabled AND it passes the SSRF check) > per-cluster env var > cluster's public
 /// endpoint > the generic env default. A caller `rpc` that is disabled or unsafe is
 /// ignored, falling through to trusted sources.
-/// A `Scope` for `url`, with the archival endpoint from `SVMSCOPE_ARCHIVE_URL`
-/// attached when set — every replay (analyze, trace, profile, replay_at_slot)
-/// then gets exact historical state, not just the one handler that used to.
-fn scope_for(url: String) -> Scope {
-    let scope = Scope::new(url);
-    match std::env::var("SVMSCOPE_ARCHIVE_URL") {
-        Ok(a) if !a.trim().is_empty() => scope.with_archive(a.trim().to_string()),
-        _ => scope,
+/// A `Scope` for `url`, with `archive` attached when present — every replay
+/// (analyze, trace, profile, replay_at_slot) then gets exact historical state.
+/// The record store behind this instance (see `svmscope::records`), opened
+/// from `SVMSCOPE_RECORD_DIR` at startup; `None` when recording is off.
+static RECORDS: std::sync::LazyLock<Option<std::sync::Arc<svmscope::records::LogStore>>> =
+    std::sync::LazyLock::new(|| {
+        let dir = std::env::var("SVMSCOPE_RECORD_DIR").ok()?;
+        let dir = dir.trim();
+        if dir.is_empty() {
+            return None;
+        }
+        match svmscope::records::LogStore::open(dir) {
+            Ok(store) => {
+                let store = std::sync::Arc::new(store);
+                use svmscope::records::StateStore;
+                for seed in std::env::var("SVMSCOPE_RECORD_SEEDS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    let _ = store.watch(seed);
+                }
+                Some(store)
+            }
+            Err(e) => {
+                eprintln!("record store disabled: {e}");
+                None
+            }
+        }
+    });
+
+/// The durable queue behind the record store, from
+/// `SVMSCOPE_RECORD_GITHUB=owner/repo` and `SVMSCOPE_GITHUB_TOKEN`.
+fn github_queue() -> Option<svmscope::records::github::GithubQueue> {
+    let repo = std::env::var("SVMSCOPE_RECORD_GITHUB").ok()?;
+    let (owner, name) = repo.trim().split_once('/')?;
+    let token = std::env::var("SVMSCOPE_GITHUB_TOKEN").ok()?;
+    match svmscope::records::github::GithubQueue::new(owner, name, token.trim()) {
+        Ok(q) => Some(q),
+        Err(e) => {
+            eprintln!("records queue disabled: {e}");
+            None
+        }
     }
+}
+
+/// Poll the watched set forever, recording every changed version. One
+/// blocking thread; the interval (`SVMSCOPE_RECORD_INTERVAL_MS`, default
+/// 2000) bounds how many slots a reconstruction has to replay forward from
+/// the nearest recording. Hourly: push the new versions to the durable
+/// queue, drop the day that left the window, thin the two tiers.
+fn spawn_recorder() {
+    let Some(store) = RECORDS.as_ref() else {
+        return;
+    };
+    let log_store = Some(std::sync::Arc::clone(store));
+    let store: std::sync::Arc<dyn svmscope::records::StateStore> =
+        std::sync::Arc::<svmscope::records::LogStore>::clone(store);
+    let interval = std::env::var("SVMSCOPE_RECORD_INTERVAL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(2000);
+    // The recorder polls the public node by default: one getMultipleAccounts
+    // per 100 accounts per round is well inside its limits, and it must never
+    // spend a paid plan's credits. `SVMSCOPE_RECORD_RPC_URL` overrides.
+    let url = std::env::var("SVMSCOPE_RECORD_RPC_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| "https://api.mainnet-beta.solana.com".to_string());
+    std::thread::Builder::new()
+        .name("svmscope-recorder".into())
+        .spawn(move || {
+            // The server has no direct client dependency; a Scope's is enough.
+            let scope = Scope::new(url);
+            let client = scope.client();
+            let queue = github_queue();
+            // Restore the window from the queue after a (re)deploy.
+            if let (Some(q), Some(log)) = (queue.as_ref(), log_store.as_ref()) {
+                match q.restore(log) {
+                    Ok(n) => eprintln!("records queue: restored {n} versions"),
+                    Err(e) => eprintln!("records queue: restore failed: {e}"),
+                }
+            }
+            // Push only what this process records: everything restored is
+            // already in the queue. If the slot lookup fails the first push
+            // re-sends the window once; imports dedupe by slot, so that costs
+            // bandwidth, not correctness.
+            let mut last_push_slot: u64 = client.get_slot().unwrap_or(0);
+            let mut rounds: u64 = 0;
+            loop {
+                match store.watched() {
+                    Ok(watched) if !watched.is_empty() => {
+                        if let Err(e) =
+                            svmscope::records::poll_once(client, store.as_ref(), &watched)
+                        {
+                            eprintln!("recorder: {e}");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("recorder: {e}"),
+                }
+                rounds += 1;
+                // About hourly: push this hour's pack to the durable queue, pop
+                // the day that fell out of the window, and apply the two-tier
+                // retention as of the newest slot seen.
+                if rounds.is_multiple_of((3_600_000 / interval.max(1)).max(1)) {
+                    if let Some(log) = log_store.as_ref() {
+                        if let Ok(slot) = client.get_slot() {
+                            if let Some(q) = queue.as_ref() {
+                                match q.push_hour(log, last_push_slot) {
+                                    Ok(n) => {
+                                        eprintln!("records queue: pushed {n} bytes");
+                                        last_push_slot = slot;
+                                    }
+                                    Err(e) => eprintln!("records queue: push failed: {e}"),
+                                }
+                                match q.pop_old() {
+                                    Ok(n) if n > 0 => eprintln!("records queue: popped {n} day(s)"),
+                                    Ok(_) => {}
+                                    Err(e) => eprintln!("records queue: pop failed: {e}"),
+                                }
+                            }
+                            match log.thin(slot) {
+                                Ok(n) => eprintln!("recorder: thinned {n} versions"),
+                                Err(e) => eprintln!("recorder: thin failed: {e}"),
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(interval));
+            }
+        })
+        .expect("spawn recorder thread");
+}
+
+fn scope_for(url: String, archive: Option<String>) -> Scope {
+    // Free historical reconstruction replays old transactions per drifting
+    // account; opt in with a replay budget once the RPC behind the instance can
+    // take the extra calls. `0` (default) keeps the current-state tier.
+    let budget = std::env::var("SVMSCOPE_RECONSTRUCT_BUDGET")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let scope = Scope::new(url).with_reconstruction_budget(budget);
+    let scope = match RECORDS.as_ref() {
+        Some(store) => {
+            let dynamic: std::sync::Arc<dyn svmscope::records::StateStore> =
+                std::sync::Arc::<svmscope::records::LogStore>::clone(store);
+            scope.with_records(dynamic)
+        }
+        None => scope,
+    };
+    match archive {
+        Some(a) => scope.with_archive(a),
+        None => scope,
+    }
+}
+
+/// Resolve the archival endpoint for a request. A caller-supplied `archive`
+/// is honoured only under the same opt-in and SSRF vetting as a caller `rpc`
+/// (it is a URL to an arbitrary host, so the rules are identical); otherwise
+/// the operator's `SVMSCOPE_ARCHIVE_URL`, if set; otherwise none.
+fn archive_for(caller: Option<&str>) -> Option<String> {
+    if custom_rpc_allowed() {
+        if let Some(safe) = caller.and_then(vet_custom_rpc) {
+            return Some(safe);
+        }
+    }
+    std::env::var("SVMSCOPE_ARCHIVE_URL")
+        .ok()
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+}
+
+/// Both per-request endpoints at once: the RPC (see [`rpc_for`]) and the
+/// archive (see [`archive_for`]).
+fn endpoints_for(
+    cluster: Option<&str>,
+    rpc: Option<&str>,
+    archive: Option<&str>,
+) -> (String, Option<String>) {
+    (rpc_for(cluster, rpc), archive_for(archive))
 }
 
 fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> String {
@@ -221,6 +397,12 @@ struct SimRequest {
     cluster: Option<String>,
     #[serde(default)]
     rpc: Option<String>,
+    /// Optional archival RPC (one that honours a historical `slot` on
+    /// `getAccountInfo`, e.g. Alchemy's Account Archive) for exact state at
+    /// the transaction's slot. Vetted like `rpc`; the caller's key stays in
+    /// the caller's URL and is never stored or logged.
+    #[serde(default)]
+    archive: Option<String>,
 }
 
 /// POST body for /trace — the step debugger. Exactly one of `signature`
@@ -241,6 +423,12 @@ struct TraceRequest {
     cluster: Option<String>,
     #[serde(default)]
     rpc: Option<String>,
+    /// Optional archival RPC (one that honours a historical `slot` on
+    /// `getAccountInfo`, e.g. Alchemy's Account Archive) for exact state at
+    /// the transaction's slot. Vetted like `rpc`; the caller's key stays in
+    /// the caller's URL and is never stored or logged.
+    #[serde(default)]
+    archive: Option<String>,
     /// `at_slot` or `now`: pin the state tier (a mutated re-run must use the
     /// tier its base trace used). Omit to let the server choose: at-slot
     /// first, current state if that diverges from the on-chain outcome.
@@ -278,10 +466,11 @@ async fn analyze_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Analysis>, (StatusCode, String)> {
-    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let (url, archive) =
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
     // `analyze` does blocking I/O (RPC) and heavy CPU work (replay), so run it on
     // the blocking thread pool instead of stalling the async runtime.
-    let result = tokio::task::spawn_blocking(move || scope_for(url).analyze(&signature))
+    let result = tokio::task::spawn_blocking(move || scope_for(url, archive).analyze(&signature))
         .await
         .map_err(|e| {
             (
@@ -327,9 +516,13 @@ async fn simulate_handler(
     let features = svmscope::spec::feature_toggles(req.features)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let (url, archive) = endpoints_for(
+        req.cluster.as_deref(),
+        req.rpc.as_deref(),
+        req.archive.as_deref(),
+    );
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
-        let mut replay = scope_for(url).replay(&req.signature)?;
+        let mut replay = scope_for(url, archive).replay(&req.signature)?;
         replay.set_time_travel(req.time_travel);
         replay.set_features(features);
         Ok(replay.simulate(&mutations)?.result)
@@ -369,7 +562,11 @@ async fn suite_handler(
     cap(req.scenarios.len(), MAX_SCENARIOS_PER_REQUEST, "scenarios")?;
     let total_mutations: usize = req.scenarios.iter().map(|s| s.mutations.len()).sum();
     cap(total_mutations, MAX_MUTATIONS_PER_REQUEST, "mutations")?;
-    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let (url, archive) = endpoints_for(
+        req.cluster.as_deref(),
+        req.rpc.as_deref(),
+        req.archive.as_deref(),
+    );
     let scenarios = req
         .scenarios
         .into_iter()
@@ -381,7 +578,7 @@ async fn suite_handler(
 
     let result =
         tokio::task::spawn_blocking(move || -> Result<Vec<ScenarioOutcome>, svmscope::Error> {
-            let mut replay = scope_for(url).replay(&signature)?;
+            let mut replay = scope_for(url, archive).replay(&signature)?;
             replay.set_time_travel(req.time_travel);
             replay.set_features(features);
             replay.run_suite(&scenarios)
@@ -417,6 +614,12 @@ struct PreflightRequest {
     cluster: Option<String>,
     #[serde(default)]
     rpc: Option<String>,
+    /// Optional archival RPC (one that honours a historical `slot` on
+    /// `getAccountInfo`, e.g. Alchemy's Account Archive) for exact state at
+    /// the transaction's slot. Vetted like `rpc`; the caller's key stays in
+    /// the caller's URL and is never stored or logged.
+    #[serde(default)]
+    archive: Option<String>,
 }
 
 /// POST /preflight — simulate an unsigned transaction against current state before
@@ -432,9 +635,13 @@ async fn preflight_handler(
         .collect::<Result<_, _>>()
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let (url, archive) = endpoints_for(
+        req.cluster.as_deref(),
+        req.rpc.as_deref(),
+        req.archive.as_deref(),
+    );
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
-        let replay = scope_for(url).preflight(&req.transaction)?;
+        let replay = scope_for(url, archive).preflight(&req.transaction)?;
         Ok(replay.simulate(&mutations)?.result)
     })
     .await
@@ -456,8 +663,9 @@ async fn account_handler(
     Path(address): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::AccountOverview>, (StatusCode, String)> {
-    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || scope_for(url).account(&address))
+    let (url, archive) =
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+    let result = tokio::task::spawn_blocking(move || scope_for(url, archive).account(&address))
         .await
         .map_err(|e| {
             (
@@ -477,15 +685,17 @@ async fn signatures_handler(
     Path(address): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::SigInfo>>, (StatusCode, String)> {
-    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || scope_for(url).signatures(&address, 25))
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("task error: {e}"),
-            )
-        })?;
+    let (url, archive) =
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+    let result =
+        tokio::task::spawn_blocking(move || scope_for(url, archive).signatures(&address, 25))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("task error: {e}"),
+                )
+            })?;
 
     match result {
         Ok(sigs) => Ok(Json(sigs)),
@@ -508,11 +718,15 @@ async fn preflight_report_handler(
 
     let features = svmscope::spec::feature_toggles(req.features)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let (url, archive) = endpoints_for(
+        req.cluster.as_deref(),
+        req.rpc.as_deref(),
+        req.archive.as_deref(),
+    );
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(
         move || -> Result<svmscope::SimulationReport, svmscope::Error> {
-            let scope = scope_for(url);
+            let scope = scope_for(url, archive);
             let tx = Scope::parse_unsigned_b64(&req.transaction)?;
             // Decode the pre-sign overview (size, fees, named instructions,
             // actions/warnings) before simulating — it explains the tx even
@@ -556,11 +770,15 @@ async fn replay_report_handler(
 
     let features = svmscope::spec::feature_toggles(req.features)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let (url, archive) = endpoints_for(
+        req.cluster.as_deref(),
+        req.rpc.as_deref(),
+        req.archive.as_deref(),
+    );
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(
         move || -> Result<svmscope::SimulationReport, svmscope::Error> {
-            let mut replay = scope_for(url).replay(&req.signature)?;
+            let mut replay = scope_for(url, archive).replay(&req.signature)?;
             replay.set_time_travel(tt);
             replay.set_features(features);
             Ok(replay.simulate(&mutations)?.into_report())
@@ -597,6 +815,12 @@ struct ProfileRequest {
     cluster: Option<String>,
     #[serde(default)]
     rpc: Option<String>,
+    /// Optional archival RPC (one that honours a historical `slot` on
+    /// `getAccountInfo`, e.g. Alchemy's Account Archive) for exact state at
+    /// the transaction's slot. Vetted like `rpc`; the caller's key stays in
+    /// the caller's URL and is never stored or logged.
+    #[serde(default)]
+    archive: Option<String>,
     /// `at_slot` (default) or `now`: which state to profile against.
     #[serde(default)]
     tier: Option<String>,
@@ -636,7 +860,7 @@ fn trim_profile(profile: &mut svmscope::profile::Profile) {
 }
 
 fn run_profile(
-    url: String,
+    scope: Scope,
     signature: String,
     mutations: Vec<Mutation>,
     tt: TimeTravel,
@@ -644,7 +868,6 @@ fn run_profile(
     symbols: Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
     tier: Option<String>,
 ) -> Result<ProfileResponse, svmscope::Error> {
-    let scope = scope_for(url);
     let mut replay = if tier.as_deref() == Some("now") {
         scope.replay(&signature)?
     } else {
@@ -719,12 +942,24 @@ async fn profile_handler(
         };
         symbols.push((s.program, debug, so));
     }
-    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let (url, archive) = endpoints_for(
+        req.cluster.as_deref(),
+        req.rpc.as_deref(),
+        req.archive.as_deref(),
+    );
     let tt = req.time_travel.clone();
     let tier = req.tier.clone();
     let sig = req.signature;
     tokio::task::spawn_blocking(move || {
-        run_profile(url, sig, mutations, tt, features, symbols, tier)
+        run_profile(
+            scope_for(url, archive),
+            sig,
+            mutations,
+            tt,
+            features,
+            symbols,
+            tier,
+        )
     })
     .await
     .map_err(|e| {
@@ -742,10 +977,11 @@ async fn profile_get_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<ProfileResponse>, (StatusCode, String)> {
-    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let (url, archive) =
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
     tokio::task::spawn_blocking(move || {
         run_profile(
-            url,
+            scope_for(url, archive),
             signature,
             vec![],
             TimeTravel::default(),
@@ -785,13 +1021,17 @@ async fn trace_handler(
 
     let features = svmscope::spec::feature_toggles(req.features)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let (url, archive) = endpoints_for(
+        req.cluster.as_deref(),
+        req.rpc.as_deref(),
+        req.archive.as_deref(),
+    );
     let tt = req.time_travel.clone();
     let pinned = req.tier.clone();
 
     let result =
         tokio::task::spawn_blocking(move || -> Result<svmscope::Trace, svmscope::Error> {
-            let scope = scope_for(url);
+            let scope = scope_for(url, archive);
             let (sig, b64) = (req.signature, req.transaction);
             let Some(sig) = sig else {
                 let mut replay = scope.preflight(&b64.expect("validated above"))?;
@@ -835,7 +1075,11 @@ fn trace_with_world(
         // The captured world is cached per (rpc, signature, tier), so a
         // mutated re-run compares against exactly the state its base
         // trace saw, not a fresh reconstruction that may have moved on.
-        let key = format!("{}|{sig}|{tier}", scope.rpc_url());
+        let key = format!(
+            "{}|{}|{sig}|{tier}",
+            scope.rpc_url(),
+            scope.archive_url().unwrap_or_default()
+        );
         let world = match world_get(&key) {
             Some(r) => r,
             None => {
@@ -962,8 +1206,11 @@ async fn trace_get_handler(
         )
             .into_response()
     };
-    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let key = format!("{}|{}", signature, url);
+    let (url, archive) =
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+    // Keyed by every endpoint that shaped the world: two callers with
+    // different archives must never share a cached trace.
+    let key = format!("{}|{}|{}", signature, url, archive.as_deref().unwrap_or(""));
     let hit = TRACE_STORE.lock().ok().and_then(|store| {
         store
             .get(&key)
@@ -976,7 +1223,7 @@ async fn trace_get_handler(
     let result =
         tokio::task::spawn_blocking(move || -> Result<svmscope::Trace, svmscope::Error> {
             trace_with_world(
-                &scope_for(url),
+                &scope_for(url, archive),
                 &signature,
                 &[],
                 &TimeTravel::default(),
@@ -1021,6 +1268,12 @@ struct IdlRequest {
     cluster: Option<String>,
     #[serde(default)]
     rpc: Option<String>,
+    /// Optional archival RPC (one that honours a historical `slot` on
+    /// `getAccountInfo`, e.g. Alchemy's Account Archive) for exact state at
+    /// the transaction's slot. Vetted like `rpc`; the caller's key stays in
+    /// the caller's URL and is never stored or logged.
+    #[serde(default)]
+    archive: Option<String>,
 }
 
 /// POST /decode_account — decode an account, optionally using a supplied IDL.
@@ -1032,18 +1285,23 @@ async fn decode_account_handler(
         .address
         .clone()
         .ok_or((StatusCode::BAD_REQUEST, "address is required".to_string()))?;
-    let url = rpc_for(req.cluster.as_deref(), req.rpc.as_deref());
+    let (url, archive) = endpoints_for(
+        req.cluster.as_deref(),
+        req.rpc.as_deref(),
+        req.archive.as_deref(),
+    );
     let idl = (!req.idl.is_null()).then_some(req.idl);
 
-    let result =
-        tokio::task::spawn_blocking(move || scope_for(url).decode_account(&address, idl.as_ref()))
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("task error: {e}"),
-                )
-            })?;
+    let result = tokio::task::spawn_blocking(move || {
+        scope_for(url, archive).decode_account(&address, idl.as_ref())
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
 
     result.map(Json).map_err(lib_err)
 }
@@ -1061,15 +1319,17 @@ async fn instructions_handler(
     Path(program): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::idl::IdlInstruction>>, (StatusCode, String)> {
-    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || scope_for(url).program_instructions(&program))
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("task error: {e}"),
-            )
-        })?;
+    let (url, archive) =
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+    let result =
+        tokio::task::spawn_blocking(move || scope_for(url, archive).program_instructions(&program))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("task error: {e}"),
+                )
+            })?;
 
     result.map(Json).map_err(lib_err)
 }
@@ -1079,9 +1339,10 @@ async fn replay_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<ReplayResult>, (StatusCode, String)> {
-    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let (url, archive) =
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
-        Ok(scope_for(url).replay(&signature)?.run()?.result)
+        Ok(scope_for(url, archive).replay(&signature)?.run()?.result)
     })
     .await
     .map_err(|e| {
@@ -1120,13 +1381,14 @@ async fn replay_at_slot_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<ReplayAtSlotResponse>, (StatusCode, String)> {
-    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let (url, archive) =
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
     let out =
         tokio::task::spawn_blocking(move || -> Result<ReplayAtSlotResponse, svmscope::Error> {
             // SVMSCOPE_ARCHIVE_URL (an archival endpoint honoring the `slot`
             // param, e.g. Alchemy's Account Archive) upgrades this replay from
             // Reconstructed to Exact. Unset = free reconstruction, as before.
-            let scope = scope_for(url);
+            let scope = scope_for(url, archive);
             let replay = scope.replay_at_slot(&signature)?;
             let cert = replay.certificate();
             let result = replay.run()?.result;
@@ -1162,6 +1424,8 @@ struct CounterfactualQuery {
     hi: Option<u64>,
     cluster: Option<String>,
     rpc: Option<String>,
+    /// Optional archival RPC for exact historical state; vetted like `rpc`.
+    archive: Option<String>,
 }
 
 /// The counterfactual threshold result — the balance at which the outcome flips.
@@ -1187,7 +1451,8 @@ async fn counterfactual_handler(
     Path(signature): Path<String>,
     Query(q): Query<CounterfactualQuery>,
 ) -> Result<Json<CounterfactualResponse>, (StatusCode, String)> {
-    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let (url, archive) =
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
     let lo = q.lo.unwrap_or(0);
     let hi = q.hi.unwrap_or(100_000_000);
     if lo > hi {
@@ -1200,7 +1465,7 @@ async fn counterfactual_handler(
 
     let out =
         tokio::task::spawn_blocking(move || -> Result<CounterfactualResponse, svmscope::Error> {
-            let replay = scope_for(url).replay(&signature)?;
+            let replay = scope_for(url, archive).replay(&signature)?;
             let acct = account.clone();
             let threshold = replay
                 .find_threshold(lo, hi, move |v| vec![Mutation::lamports(acct.clone(), v)])?;
@@ -1255,10 +1520,11 @@ async fn scan_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::BreakingPoint>>, (StatusCode, String)> {
-    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
+    let (url, archive) =
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
     let out = tokio::task::spawn_blocking(
         move || -> Result<Vec<svmscope::BreakingPoint>, svmscope::Error> {
-            let scope = scope_for(url);
+            let scope = scope_for(url, archive);
             let analysis = scope.analyze(&signature)?;
             let accounts: Vec<String> = analysis
                 .accounts
@@ -1293,8 +1559,9 @@ async fn diagnose_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::Diagnosis>, (StatusCode, String)> {
-    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let out = tokio::task::spawn_blocking(move || scope_for(url).diagnose(&signature))
+    let (url, archive) =
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+    let out = tokio::task::spawn_blocking(move || scope_for(url, archive).diagnose(&signature))
         .await
         .map_err(|e| {
             (
@@ -1313,8 +1580,9 @@ async fn freeze_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::Fixture>, (StatusCode, String)> {
-    let url = rpc_for(q.cluster.as_deref(), q.rpc.as_deref());
-    let result = tokio::task::spawn_blocking(move || scope_for(url).capture(&signature))
+    let (url, archive) =
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+    let result = tokio::task::spawn_blocking(move || scope_for(url, archive).capture(&signature))
         .await
         .map_err(|e| {
             (
@@ -1338,6 +1606,8 @@ async fn api_index() -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         // Lets the UI hide the custom-RPC field on instances that don't allow it.
         "custom_rpc": custom_rpc_allowed(),
+        "custom_archive": custom_rpc_allowed(),
+        "archive": "Any route that replays accepts `archive` (query or body): an archival RPC that honours a historical slot, e.g. Alchemy's Account Archive, for exact state at the transaction's slot. Same opt-in and vetting as `rpc`.",
         "endpoints": {
             "GET  /analyze/{signature}":  "Decode a transaction: CPI tree, balance & token changes, compute, and IDL-decoded accounts.",
             "GET  /replay/{signature}":   "Re-execute the transaction locally against reconstructed pre-state.",
@@ -1553,6 +1823,7 @@ fn ct_eq(a: &str, b: &str) -> bool {
 
 #[tokio::main]
 async fn main() {
+    spawn_recorder();
     // Restore any persisted usage tally before serving.
     stats::load();
 
@@ -1673,6 +1944,35 @@ mod tests {
         assert!(!custom_rpc_allowed());
         let out = rpc_for(None, Some("http://8.8.8.8:9999/evil"));
         assert_ne!(out, "http://8.8.8.8:9999/evil");
+    }
+
+    #[test]
+    fn caller_archive_ignored_when_custom_disabled() {
+        // A caller archive is a URL to an arbitrary host: same SSRF backstop as
+        // a caller rpc. With custom endpoints disabled it must never be used.
+        assert!(!custom_rpc_allowed());
+        assert_ne!(
+            archive_for(Some("https://8.8.8.8/archive")).as_deref(),
+            Some("https://8.8.8.8/archive")
+        );
+        assert!(
+            archive_for(Some("http://169.254.169.254/")).is_none()
+                || std::env::var("SVMSCOPE_ARCHIVE_URL").is_ok()
+        );
+    }
+
+    #[test]
+    fn scope_carries_the_archive_it_was_given() {
+        let with = scope_for(
+            "https://8.8.8.8/".into(),
+            Some("https://8.8.8.8/archive".into()),
+        );
+        assert_eq!(
+            with.archive_url().as_deref(),
+            Some("https://8.8.8.8/archive")
+        );
+        let without = scope_for("https://8.8.8.8/".into(), None);
+        assert!(without.archive_url().is_none() || std::env::var("SVMSCOPE_ARCHIVE_URL").is_ok());
     }
 
     #[test]

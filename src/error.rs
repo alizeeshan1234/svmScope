@@ -18,6 +18,17 @@ pub enum Error {
     #[error("rpc request failed: {0}")]
     Rpc(#[source] Box<solana_client::client_error::ClientError>),
 
+    /// A replay that had to succeed (an on-chain-successful write re-executed
+    /// during reconstruction) failed, so its result cannot be used.
+    #[error("replayed write failed: {0}")]
+    ReplayFailed(String),
+
+    /// Historical reconstruction spent its RPC call allowance (see
+    /// `Scope::with_reconstruction_budget`) before finishing an account's
+    /// dependency cone.
+    #[error("reconstruction exceeded its RPC call budget of {0}")]
+    ReconstructBudget(usize),
+
     /// The RPC answered, but not with the shape we expect.
     #[error("unexpected rpc response: {0}")]
     MalformedRpcResponse(String),

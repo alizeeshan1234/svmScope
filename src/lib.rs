@@ -146,6 +146,7 @@ mod preflight;
 pub mod profile;
 mod program;
 pub mod reconstruct;
+pub mod records;
 mod replay;
 pub mod report;
 pub mod scan;

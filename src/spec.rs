@@ -572,6 +572,10 @@ pub struct SuiteRequest {
     /// Explicit RPC URL override for the live-signature path.
     #[serde(default)]
     pub rpc: Option<String>,
+    /// Optional archival RPC (honours a historical `slot`) for exact state at
+    /// the transaction's slot; the server vets it like `rpc`.
+    #[serde(default)]
+    pub archive: Option<String>,
     /// Optional clock warp applied to every scenario in the suite.
     #[serde(default)]
     pub time_travel: TimeTravel,
