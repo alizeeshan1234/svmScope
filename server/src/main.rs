@@ -223,10 +223,44 @@ fn github_queue() -> Option<svmscope::records::github::GithubQueue> {
 /// 2000) bounds how many slots a reconstruction has to replay forward from
 /// the nearest recording. Hourly: push the new versions to the durable
 /// queue, drop the day that left the window, thin the two tiers.
+/// Set on SIGTERM / Ctrl-C: the recorder pushes its unpushed tail to the
+/// queue and stops, so a redeploy loses nothing that was recorded.
+static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set by the recorder thread once its final push is done (or it never ran).
+static RECORDER_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Resolves on SIGTERM (what Render sends before a redeploy) or Ctrl-C and
+/// flags the recorder to flush.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+    eprintln!("svmscope: shutting down");
+    STOPPING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 fn spawn_recorder() {
     let Some(store) = RECORDS.as_ref() else {
         return;
     };
+    RECORDER_DONE.store(false, std::sync::atomic::Ordering::SeqCst);
     let log_store = Some(std::sync::Arc::clone(store));
     let store: std::sync::Arc<dyn svmscope::records::StateStore> =
         std::sync::Arc::<svmscope::records::LogStore>::clone(store);
@@ -260,7 +294,9 @@ fn spawn_recorder() {
             // re-sends the window once; imports dedupe by slot, so that costs
             // bandwidth, not correctness.
             let mut last_push_slot: u64 = client.get_slot().unwrap_or(0);
-            let mut rounds: u64 = 0;
+            // Pushes happen when the UTC hour changes (not every N rounds, so
+            // restarts do not keep postponing them) and once more on shutdown.
+            let mut last_push_hour = unix_secs() / 3_600;
             loop {
                 match store.watched() {
                     Ok(watched) if !watched.is_empty() => {
@@ -273,13 +309,12 @@ fn spawn_recorder() {
                     Ok(_) => {}
                     Err(e) => eprintln!("recorder: {e}"),
                 }
-                rounds += 1;
-                // About hourly: push this hour's pack to the durable queue, pop
-                // the day that fell out of the window, and apply the two-tier
-                // retention as of the newest slot seen.
-                if rounds.is_multiple_of((3_600_000 / interval.max(1)).max(1)) {
-                    if let Some(log) = log_store.as_ref() {
-                        if let Ok(slot) = client.get_slot() {
+                let stopping = STOPPING.load(std::sync::atomic::Ordering::SeqCst);
+                let hour = unix_secs() / 3_600;
+                let hour_changed = hour != last_push_hour;
+                if let (true, Some(log)) = (stopping || hour_changed, log_store.as_ref()) {
+                    match client.get_slot() {
+                        Ok(slot) => {
                             if let Some(q) = queue.as_ref() {
                                 match q.push_hour(log, last_push_slot) {
                                     Ok(n) => {
@@ -288,20 +323,43 @@ fn spawn_recorder() {
                                     }
                                     Err(e) => eprintln!("records queue: push failed: {e}"),
                                 }
-                                match q.pop_old() {
-                                    Ok(n) if n > 0 => eprintln!("records queue: popped {n} day(s)"),
-                                    Ok(_) => {}
-                                    Err(e) => eprintln!("records queue: pop failed: {e}"),
+                            }
+                            // Hourly housekeeping, not on the way out: drop
+                            // the day that fell out of the window and apply
+                            // the two-tier retention as of the newest slot.
+                            if hour_changed && !stopping {
+                                if let Some(q) = queue.as_ref() {
+                                    match q.pop_old() {
+                                        Ok(n) if n > 0 => {
+                                            eprintln!("records queue: popped {n} day(s)")
+                                        }
+                                        Ok(_) => {}
+                                        Err(e) => eprintln!("records queue: pop failed: {e}"),
+                                    }
+                                }
+                                match log.thin(slot) {
+                                    Ok(n) => eprintln!("recorder: thinned {n} versions"),
+                                    Err(e) => eprintln!("recorder: thin failed: {e}"),
                                 }
                             }
-                            match log.thin(slot) {
-                                Ok(n) => eprintln!("recorder: thinned {n} versions"),
-                                Err(e) => eprintln!("recorder: thin failed: {e}"),
-                            }
                         }
+                        Err(e) => eprintln!("recorder: no slot, push deferred: {e}"),
                     }
+                    last_push_hour = hour;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(interval));
+                if stopping {
+                    RECORDER_DONE.store(true, std::sync::atomic::Ordering::SeqCst);
+                    eprintln!("recorder: stopped");
+                    break;
+                }
+                // Sleep in short slices so a shutdown is noticed promptly.
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_millis(interval);
+                while std::time::Instant::now() < deadline
+                    && !STOPPING.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
             }
         })
         .expect("spawn recorder thread");
@@ -1913,8 +1971,17 @@ async fn main() {
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await
     .unwrap();
+    // Give the recorder time to push its unpushed tail (a platform typically
+    // allows tens of seconds between SIGTERM and SIGKILL).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+    while !RECORDER_DONE.load(std::sync::atomic::Ordering::SeqCst)
+        && std::time::Instant::now() < deadline
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
 }
 
 #[cfg(test)]

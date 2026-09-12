@@ -446,7 +446,7 @@ unless `SVMSCOPE_RECORD_DIR` is set:
 | `SVMSCOPE_RECORD_SEEDS` | Comma-separated addresses watched from the start; every account a replay had to rebuild is added automatically. |
 | `SVMSCOPE_RECORD_RPC_URL` | Node the recorder polls, default the public mainnet RPC (one `getMultipleAccounts` per 100 accounts per round; never a paid key). |
 | `SVMSCOPE_RECORD_INTERVAL_MS` | Polling interval, default 2000. |
-| `SVMSCOPE_RECORD_GITHUB` + `SVMSCOPE_GITHUB_TOKEN` | `owner/repo` and a token with releases write scope: the durable 30-day queue. Each hour's new versions are uploaded as an asset of that UTC day's release, releases older than 30 days are deleted, and the window is restored from the releases after a redeploy. Without it the window lives on local disk only. |
+| `SVMSCOPE_RECORD_GITHUB` + `SVMSCOPE_GITHUB_TOKEN` | `owner/repo` and a token with releases write scope: the durable 30-day queue. On every hour boundary and on shutdown, the versions recorded since the previous push are uploaded as an asset of that UTC day's release; releases older than 30 days are deleted; the window is restored from the releases after a redeploy, so a redeploy loses nothing. Without it the window lives on local disk only. |
 | `SVMSCOPE_RECONSTRUCT_BUDGET` | Old transactions the free tier may re-execute per drifting account that no recording covers, default 0. |
 
 The window keeps every change for 24 hours and one version per 30 seconds

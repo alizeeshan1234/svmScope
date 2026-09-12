@@ -2,9 +2,10 @@
 //!
 //! Git history never shrinks, so a rolling window cannot live in commits.
 //! Release *assets* are stored outside the history, can be deleted freely,
-//! and cost nothing: one release per UTC day, one asset per hour holding
-//! that hour's pack of new versions ([`super::LogStore::export_since`]).
-//! Push: at the end of each hour, upload the pack to today's release. Pop:
+//! and cost nothing: one release per UTC day, one asset per push holding
+//! the versions recorded since the previous push
+//! ([`super::LogStore::export_since`]). Push: on every hour boundary and on
+//! shutdown, upload the pack to today's release. Pop:
 //! delete the release from 31 days ago. Restore after a redeploy: download
 //! the last 30 days of assets and import them.
 //!
@@ -58,9 +59,12 @@ pub fn tag_for(date: &str) -> String {
     format!("records-{date}")
 }
 
-/// The asset name for the UTC hour a Unix timestamp falls in.
+/// The asset name for the UTC time of day a Unix timestamp falls in, to
+/// the minute: pushes happen on the hour and on every shutdown, and two in
+/// the same hour must not replace each other.
 pub fn asset_for(unix_secs: u64) -> String {
-    format!("{:02}.pack", (unix_secs % 86_400) / 3_600)
+    let day = unix_secs % 86_400;
+    format!("{:02}{:02}.pack", day / 3_600, (day % 3_600) / 60)
 }
 
 fn now_secs() -> u64 {
@@ -122,7 +126,7 @@ impl GithubQueue {
         let body = serde_json::json!({
             "tag_name": tag,
             "name": format!("records {date}"),
-            "body": "svmscope recorded account versions for this UTC day; one asset per hour. Deleted after 30 days.",
+            "body": "svmscope recorded account versions for this UTC day; one asset per push (hourly and on shutdown). Deleted after 30 days.",
             "draft": false,
             "prerelease": true,
         });
@@ -344,7 +348,7 @@ mod tests {
         assert_eq!(utc_date(0), "1970-01-01");
         assert_eq!(utc_date(951_782_400), "2000-02-29"); // leap day
         assert_eq!(utc_date(1_788_691_319), "2026-09-06"); // 10:41:59 UTC
-        assert_eq!(asset_for(1_788_691_319), "10.pack");
+        assert_eq!(asset_for(1_788_691_319), "1041.pack");
         assert_eq!(tag_for("2026-09-05"), "records-2026-09-05");
     }
 
