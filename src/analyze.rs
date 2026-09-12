@@ -32,6 +32,26 @@ pub struct Analysis {
     pub accounts: Vec<decode::AccountInfo>,
 }
 
+/// A transaction analysed as it *replays* at a chosen slot, rather than as it
+/// ran on-chain: every section of [`Analysis`] is rebuilt from the replay's
+/// own execution (logs, balances, token balances, compute, call tree) against
+/// the world reconstructed as of `slot`, with the certificate saying where
+/// each account's state came from.
+#[derive(Debug, Serialize)]
+pub struct AnalysisAt {
+    /// The analysis, built from the replay.
+    #[serde(flatten)]
+    pub analysis: Analysis,
+    /// The slot the world was rebuilt as of.
+    pub slot: u64,
+    /// The slot the transaction actually landed in.
+    pub landed_slot: u64,
+    /// The clock the replay ran at, human-readable.
+    pub clock: String,
+    /// Where every account's state came from, and what may have drifted.
+    pub certificate: crate::FidelityCertificate,
+}
+
 /// Headline facts about the transaction as it actually ran on-chain.
 #[derive(Debug, Clone, Serialize)]
 pub struct Overview {

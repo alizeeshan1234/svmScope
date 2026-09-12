@@ -339,6 +339,7 @@ fn provenance_label(p: &Provenance, is_program: bool) -> &'static str {
         Provenance::Unchanged { .. } => "unchanged",
         Provenance::Recorded { .. } => "recorded",
         Provenance::MetadataRewind => "metadata",
+        Provenance::MetadataEstimate => "metadata~",
         Provenance::Reconstructed { exact: true, .. } => "reconstructed",
         Provenance::Reconstructed { exact: false, .. } => "reconstructed~",
         Provenance::HistoricalArchive => "archive",

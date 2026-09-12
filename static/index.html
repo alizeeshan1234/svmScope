@@ -713,6 +713,10 @@ body::after {
 }
 .drift-inline b { color: var(--text-1); }
 .slot-cta { margin-top: var(--s-3); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.at-slot { display: inline-flex; align-items: center; gap: 4px; }
+.ov-banner { margin: 0 0 10px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 12.5px; color: var(--text-2, inherit); background: var(--bg-2, transparent); }
+.ov-banner a { margin-left: 8px; }
+.at-slot input { width: 11ch; padding: 4px 6px; font-size: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-2, transparent); color: inherit; }
 .cert-card {
   margin-top: var(--s-3); padding: 11px var(--s-3);
   border: 1px solid var(--border); border-left: 2px solid var(--green);
@@ -1898,7 +1902,7 @@ function fmtUtc(sec) {
   return (i < 0 ? s : s.slice(0, i) + ' · ' + s.slice(i + 2)) + ' UTC';
 }
 
-let analysis = null, currentSig = '', mutations = [], mutableAccounts = [];
+let analysis = null, onchainAnalysis = null, currentSig = '', mutations = [], mutableAccounts = [];
 
 // API base. Empty = same origin (the Rust server serving this page locally).
 // When the frontend is hosted separately (e.g. Vercel), window.SVMSCOPE_API is
@@ -2113,14 +2117,27 @@ function renderOverview(o, compute) {
     ? `<div class="ov-meta">${meta.map(([l, v]) => `<div class="ov-m"><span class="l">${l}</span><span class="v">${v}</span></div>`).join('')}</div>`
     : '';
 
+  const at = analysis && analysis.slot != null;
+  let sub = ok ? 'Succeeded on-chain' : 'Failed on-chain';
+  let banner = '';
+  if (at) {
+    const own = analysis.slot === analysis.landed_slot;
+    const delta = own ? 'the moment it landed'
+      : analysis.slot > analysis.landed_slot
+        ? `slot ${fmt(analysis.slot)}, ${fmt(analysis.slot - analysis.landed_slot)} slots after it landed`
+        : `slot ${fmt(analysis.slot)}, ${fmt(analysis.landed_slot - analysis.slot)} slots before it landed`;
+    sub = `${ok ? 'Succeeds' : 'Fails'} when replayed as of ${delta}`;
+    banner = `<div class="ov-banner">Replayed as of <b>${own ? 'the moment it landed' : 'slot ' + fmt(analysis.slot)}</b> — every section below comes from that replay, not the on-chain record. <a href="#" id="backOnchain">← back to what happened on-chain</a></div>`;
+  }
   $('overview').innerHTML = `
+    ${banner}
     <div class="overview">
       <div class="ov-top">
         <div class="ov-status">
           <div class="ov-ring ${ok ? 'ok' : 'fail'}">${ok ? '✓' : '✕'}</div>
           <div>
             <div class="ov-title">${esc(title)}</div>
-            <div class="ov-sub">${ok ? 'Succeeded on-chain' : 'Failed on-chain'}</div>
+            <div class="ov-sub">${sub}</div>
           </div>
         </div>
         <div class="ov-spacer"></div>
@@ -2131,6 +2148,7 @@ function renderOverview(o, compute) {
       ${metaRow}
       <div class="ov-progs">${progs}</div>
     </div>`;
+  $('backOnchain')?.addEventListener('click', (e) => { e.preventDefault(); showOnchain(); });
   wireCopy($('overview'));
 }
 
@@ -2319,10 +2337,11 @@ function renderReplayPanel() {
     : `<div class="slot-cta">
          <button class="btn ghost sm" id="runReplay">▶ Replay now</button>
          <button class="btn ghost sm" id="reconSlot">⟲ Replay as it happened</button>
+         <span class="at-slot"><input id="atSlot" class="mono" type="number" min="1" placeholder="slot" title="Any slot: exact for every account recorded across it"><button class="btn ghost sm" id="reconAt">⟲ Replay at slot</button></span>
          <button class="btn ghost sm" id="openDebug" title="Step through every instruction and CPI">⋮ Step debugger</button>
          <button class="btn ghost sm" id="openProfile" title="Where the compute went: a flamegraph of every instruction">🔥 Profile compute</button>
        </div>
-       <span class="cu-note" style="display:block;margin-top:8px"><b>Replay now</b> re-runs this transaction against <i>today's</i> on-chain state. <b>Replay as it happened</b> rewinds the balances and clock back to the exact moment it originally landed — free, and it tells you how accurate the result is.</span>
+       <span class="cu-note" style="display:block;margin-top:8px"><b>Replay now</b> re-runs this transaction against <i>today's</i> on-chain state. <b>Replay as it happened</b> rewinds the balances and clock back to the exact moment it originally landed — free, and it tells you how accurate the result is. <b>Replay at slot</b> rebuilds the world as of any slot you type: exact for every account this engine has been recording across that slot.</span>
        <div id="certPanel"></div>
        ${cfBox()}`;
   $('replay').innerHTML = body;
@@ -2334,7 +2353,8 @@ function renderReplayPanel() {
     try { await ensureBaseline(); renderReplayPanel(); }
     catch (e) { $('replay').innerHTML = `<div class="err-box">${esc(e.message)}</div>`; }
   });
-  $('reconSlot')?.addEventListener('click', reconstructAtSlot);
+  $('reconSlot')?.addEventListener('click', () => reconstructAtSlot());
+  wireReplayAt();
   $('cfRun')?.addEventListener('click', runCounterfactual);
   $('cfScanAll')?.addEventListener('click', runScan);
   $('cfNarrate')?.addEventListener('click', runNarrate);
@@ -2402,7 +2422,8 @@ function renderReplay(r) {
   return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}
     <div class="slot-cta">
       <button class="btn ghost sm" id="reconSlot">⟲ Replay as it happened</button>
-      <span class="cu-note">Rewind the balances and clock back to the moment this transaction landed — free, with an accuracy report.</span>
+      <span class="at-slot"><input id="atSlot" class="mono" type="number" min="1" placeholder="slot" title="Any slot: exact for every account recorded across it"><button class="btn ghost sm" id="reconAt">⟲ Replay at slot</button></span>
+      <span class="cu-note">Rewind the balances and clock back to the moment this transaction landed, or rebuild the world as of any slot — free, with an accuracy report.</span>
     </div>
     <div id="certPanel"></div>
     ${cfBox()}`;
@@ -2564,48 +2585,87 @@ function renderBreakingPoints(bps) {
 // Reconstructed replay-at-slot + fidelity certificate — the honest, precise
 // version of the heuristic drift hint above. Opt-in, so the default replay
 // (clock at now) is never changed underneath the user.
-async function reconstructAtSlot() {
-  const btn = $('reconSlot');
+function wireReplayAt() {
+  const input = $('atSlot');
+  if (input && analysis?.overview?.slot != null && !input.value) input.placeholder = String(analysis.overview.slot);
+  const go = () => {
+    const v = Number(input?.value);
+    if (!Number.isInteger(v) || v < 1) { input?.focus(); return; }
+    reconstructAtSlot(v);
+  };
+  $('reconAt')?.addEventListener('click', go);
+  input?.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+}
+
+async function reconstructAtSlot(slot) {
+  const btn = slot != null ? $('reconAt') : $('reconSlot');
+  const label = slot != null ? '⟲ Replay at slot' : '⟲ Replay as it happened';
   const panel = $('certPanel');
   if (btn) { btn.disabled = true; btn.textContent = '⟲ Replaying…'; }
-  if (panel) panel.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>reconstructing at the transaction\'s slot…</div>';
+  if (panel) panel.innerHTML = `<div class="status" style="text-align:left"><span class="spinner"></span>${slot != null ? 'rebuilding the world as of slot ' + fmt(slot) : 'reconstructing at the transaction\'s slot'} and replaying…</div>`;
   try {
-    const res = await api('/replay_at_slot/' + encodeURIComponent(currentSig) + clusterQ());
+    const q = clusterQ();
+    const path = '/analyze_at/' + encodeURIComponent(currentSig) + q
+      + (slot != null ? (q ? '&' : '?') + 'slot=' + slot : '');
+    const res = await api(path);
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
-    if (panel) panel.innerHTML = renderCertificate(data);
-    $('driftToggle')?.addEventListener('click', (e) => {
-      e.preventDefault();
-      const d = $('driftList'); if (d) d.classList.toggle('hidden');
-    });
+    // The whole page now shows the transaction as it replays at that slot.
+    onchainAnalysis = onchainAnalysis || analysis;
+    analysis = data;
+    mutations = [];
+    renderAnalysis();
+    $('out').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (e) {
     if (panel) panel.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '⟲ Replay as it happened'; }
+    if (btn) { btn.disabled = false; btn.textContent = label; }
   }
+}
+
+// Back from a replay-at-slot view to the on-chain record.
+function showOnchain() {
+  if (!onchainAnalysis) { analyze(); return; }
+  analysis = onchainAnalysis; onchainAnalysis = null; mutations = [];
+  renderAnalysis();
 }
 
 function renderCertificate(d) {
   const r = d.result;
+  const atOwn = d.slot == null || d.landed_slot == null || d.slot === d.landed_slot;
   const badge = r.success
-    ? `<span class="badge ok"><span class="b-dot"></span>replayed as it happened</span>`
-    : `<span class="badge fail"><span class="b-dot"></span>replay failed</span>`;
+    ? `<span class="badge ok"><span class="b-dot"></span>${atOwn ? 'replayed as it happened' : 'succeeds at slot ' + fmt(d.slot)}</span>`
+    : `<span class="badge fail"><span class="b-dot"></span>${atOwn ? 'replay failed' : 'fails at slot ' + fmt(d.slot)}</span>`;
+  const delta = atOwn ? '' : (d.slot > d.landed_slot
+    ? `${fmt(d.slot - d.landed_slot)} slots after it landed`
+    : `${fmt(d.landed_slot - d.slot)} slots before it landed`);
+  const when = atOwn
+    ? `Replayed as of the moment it landed — <span class="mono">${esc(d.clock)}</span>`
+    : `Replayed as of slot <span class="mono">${fmt(d.slot)}</span>, ${delta} — <span class="mono">${esc(d.clock)}</span>`;
   const errText = r.error ? (r.error_name ? `${r.error_name} — ${r.error}` : r.error) : '';
   const err = errText ? `<div class="err-box">${esc(errText)}</div>` : '';
-  const n = (d.drifted || []).length;
+  const upgraded = (d.accounts || []).filter(a => a.source && a.source.Program && a.source.Program.upgraded_since === true).map(a => a.address);
+  const estimated = (d.accounts || []).filter(a => a.source === 'MetadataEstimate').map(a => a.address);
+  const stale = (d.drifted || []).filter(a => !upgraded.includes(a) && !estimated.includes(a));
+  const n = stale.length;
   const recording = d.recorded_from != null;
+  const estimateNote = estimated.length
+    ? `<div class="drift-inline"><b>${estimated.length}</b> balance${estimated.length === 1 ? ' is' : 's are'} <b>estimated from the transaction's own record</b> (its balances ${d.slot < d.landed_slot ? 'just before' : 'right after'} it landed) because something else touched ${estimated.length === 1 ? 'that account' : 'those accounts'} in between and they weren't being recorded: ${estimated.map(a => `<span class="mono">${esc(a)}</span>`).join(', ')}.</div>`
+    : '';
+  const upgradedNote = upgraded.length
+    ? `<div class="drift-inline"><b>${upgraded.length}</b> program${upgraded.length === 1 ? ' was' : 's were'} <b>upgraded after this slot</b>, so the code that ran back then differs from the code loaded now: ${upgraded.map(a => `<span class="mono">${esc(a)}</span>`).join(', ')}.</div>`
+    : '';
   const fixNote = recording
     ? `They weren't being recorded before this transaction landed; they are now, so later transactions that touch them replay exactly.`
     : `This engine isn't recording state, so accounts that changed since can't be rewound — the SOL &amp; token balances and the clock are already correct.`;
   const drift = n
     ? `<div class="drift-inline"><b>${n}</b> account${n === 1 ? '' : 's'} still ${n === 1 ? 'uses' : 'use'} <b>today's data</b>, so those parts may differ from back then
          (<a href="#" id="driftToggle">show which</a>). ${fixNote}
-         <div id="driftList" class="drift-list hidden">${d.drifted.map(esc).join('<br>')}</div></div>`
-    : `<div class="drift-inline">Every account is as it was at that moment — this replay is exact.</div>`;
-  const verify = d.verifiable ? ' · matches the real on-chain result' : '';
+         <div id="driftList" class="drift-list hidden">${stale.map(esc).join('<br>')}</div></div>`
+    : (upgraded.length || estimated.length ? '' : `<div class="drift-inline">Every account is as it was at that moment — this replay is exact.</div>`);
+  const verify = d.verifiable && atOwn ? ' · matches the real on-chain result' : '';
   // Where each account's bytes came from, in plain words.
   const names = {
-    Recorded: 'recorded as it was', MetadataRewind: 'balance from the transaction', Unchanged: 'unchanged since',
+    Recorded: 'recorded as it was', MetadataRewind: 'balance from the transaction', MetadataEstimate: 'balance estimated from the transaction', Unchanged: 'unchanged since',
     Reconstructed: 'rebuilt from history', Program: 'program code', HistoricalArchive: 'archive', CurrentRpc: "today's data", Fixture: 'fixture',
   };
   const src = Object.entries(d.sources || {})
@@ -2615,8 +2675,8 @@ function renderCertificate(d) {
   const window = recording ? `<div class="cu-note" style="margin:2px 0 2px">This engine has recorded account state since slot <span class="mono">${fmt(d.recorded_from)}</span>; transactions after that replay exactly for every recorded account.</div>` : '';
   return `<div class="cert-card">
     <div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>
-    <div class="cu-note" style="margin:6px 0 2px">Replayed as of the moment it landed — <span class="mono">${esc(d.clock)}</span>${verify}</div>
-    ${sources}${window}${err}${drift}
+    <div class="cu-note" style="margin:6px 0 2px">${when}${verify}</div>
+    ${sources}${window}${err}${upgradedNote}${estimateNote}${drift}
   </div>`;
 }
 
@@ -3136,7 +3196,7 @@ function renderAddressPage(address, a, sigs) {
 async function analyze() {
   $('debug').classList.add('hidden');
   const sig = $('sig').value.trim(); if (!sig) return;
-  currentSig = sig; mutations = [];
+  currentSig = sig; mutations = []; onchainAnalysis = null;
   $('go').disabled = true; $('txlist').classList.add('hidden'); $('out').classList.add('hidden'); $('hero').classList.add('hidden');
   const st = $('status'); st.className = 'status'; st.classList.remove('hidden');
   st.innerHTML = '<span class="spinner"></span>decoding transaction…';
@@ -3154,24 +3214,52 @@ async function analyze() {
       currentSig = analysis.signature;
       $('sig').value = analysis.signature;
     }
-    renderOverview(analysis.overview, analysis.compute);
-    diagnoseIfFailed();
-    renderTree(analysis.cpi_tree);
-    renderCompute(analysis.compute);
-    renderDiffs(analysis.balance_change);
-    renderTokens(analysis.token_change);
-    renderOnchainLogs(analysis.logs);
-    renderReplayPanel();
-    renderStaged(); flashSim('');
-    renderAccountList();
-    buildSuite(); renderSuite();
-    $('exportBox').classList.add('hidden'); $('suiteResult').textContent = '';
-    $('acctFilter').value = ''; $('expandAll').textContent = 'Expand all';
-    wireCopy($('out'));
+    renderAnalysis();
     st.classList.add('hidden'); $('out').classList.remove('hidden');
   } catch (e) { st.className = 'status err'; st.textContent = 'error: ' + e.message; }
   finally { $('go').disabled = false; }
 }
+// Every section of the page from `analysis` — the on-chain record, or a
+// replay as of a slot (`analysis.slot` set), which carries its own certificate.
+function renderAnalysis() {
+  renderOverview(analysis.overview, analysis.compute);
+  diagnoseIfFailed();
+  renderTree(analysis.cpi_tree);
+  renderCompute(analysis.compute);
+  renderDiffs(analysis.balance_change);
+  renderTokens(analysis.token_change);
+  renderOnchainLogs(analysis.logs);
+  renderReplayPanel();
+  renderStaged(); flashSim('');
+  renderAccountList();
+  buildSuite(); renderSuite();
+  $('exportBox').classList.add('hidden'); $('suiteResult').textContent = '';
+  $('acctFilter').value = ''; $('expandAll').textContent = 'Expand all';
+  if (analysis.slot != null && analysis.certificate) {
+    const panel = $('certPanel');
+    if (panel) panel.innerHTML = renderCertificate(certificateCard(analysis));
+    $('driftToggle')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      const d = $('driftList'); if (d) d.classList.toggle('hidden');
+    });
+  }
+  wireCopy($('out'));
+}
+
+// The certificate card's input, from an analysis-at-slot response.
+function certificateCard(a) {
+  const c = a.certificate || {};
+  const sources = {};
+  for (const acc of (c.accounts || [])) {
+    const k = typeof acc.source === 'string' ? acc.source : Object.keys(acc.source || {})[0];
+    sources[k] = (sources[k] || 0) + 1;
+  }
+  return {
+    result: a.replay, clock: a.clock, drifted: c.drifted || [], verifiable: c.verifiable,
+    sources, accounts: c.accounts || [], recorded_from: c.recorded_from, slot: a.slot, landed_slot: a.landed_slot,
+  };
+}
+
 async function simulate() {
   if (!analysis) { flashSim('analyze a transaction first', true); return; }
   let toSend;

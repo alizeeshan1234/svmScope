@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let signature = args
         .get(1)
-        .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]\n       svmscope freeze <transaction-signature> [-o fixture.json]\n       svmscope test <scenarios.json>\n       svmscope report <scenarios.json> [-o report.html]\n       svmscope idl <program-address>\n       svmscope upgrade <fixture.json>\n\n       any command also takes --cluster <mainnet|devnet|testnet|localnet> or --rpc <url>")?;
+        .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]\n       svmscope replay <transaction-signature> [--at <slot>] [--now] [--json]\n       svmscope freeze <transaction-signature> [-o fixture.json]\n       svmscope test <scenarios.json>\n       svmscope report <scenarios.json> [-o report.html]\n       svmscope idl <program-address>\n       svmscope upgrade <fixture.json>\n\n       any command also takes --cluster <mainnet|devnet|testnet|localnet> or --rpc <url>")?;
 
     // Cluster/RPC selection: --cluster <mainnet|devnet|testnet|localnet> or --rpc <url>.
     let flag = |name: &str| {
@@ -29,19 +29,76 @@ fn main() -> Result<(), Box<dyn Error>> {
         "https://api.mainnet-beta.solana.com",
     )?;
     let scope = Scope::new(rpc);
+    // A local record store (`SVMSCOPE_RECORD_DIR`, the directory a recorder
+    // or the hosted engine writes) makes historical replays exact for every
+    // account it covers; without one they are labelled honestly.
+    let scope = match std::env::var("SVMSCOPE_RECORD_DIR") {
+        Ok(dir) if !dir.trim().is_empty() => {
+            let store = svmscope::records::LogStore::open(dir.trim())?;
+            scope.with_records(std::sync::Arc::new(store))
+        }
+        _ => scope,
+    };
 
     // Debugger: `svmscope debug <signature> [--json]` steps through the
     // transaction — every instruction and CPI with what it changed, and the
     // failing step pinpointed.
+    // `svmscope replay <signature> [--at <slot>] [--json]`: the outcome and
+    // the fidelity certificate at the transaction's own slot, or as of any
+    // slot (exact for every account a record store covers across it).
+    if signature == "replay" {
+        let sig = args
+            .get(2)
+            .ok_or("usage: svmscope replay <signature> [--at <slot>] [--now] [--json]")?;
+        let replay = if args.iter().any(|a| a == "--now") {
+            scope.replay(sig)?
+        } else if let Some(slot) = at_slot(&args)? {
+            scope.replay_at(sig, slot)?
+        } else {
+            scope.replay_at_slot(sig)?
+        };
+        let cert = replay.certificate();
+        let out = replay.run()?;
+        if args.iter().any(|a| a == "--json") {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "result": out.result,
+                    "certificate": cert,
+                }))?
+            );
+        } else {
+            println!(
+                "{}  {} compute units  {}",
+                if out.result.success {
+                    "success"
+                } else {
+                    "failed "
+                },
+                out.result.compute_units,
+                out.result.error.clone().unwrap_or_default()
+            );
+            println!("clock: {}", replay.describe_clock());
+            println!("{}", cert.summary());
+            for a in &cert.accounts {
+                println!("  {:<44} {:?}", a.address, a.source);
+            }
+        }
+        return Ok(());
+    }
+
     if signature == "debug" {
         let sig = args
             .get(2)
-            .ok_or("usage: svmscope debug <signature> [--json] [--now]")?;
+            .ok_or("usage: svmscope debug <signature> [--json] [--now] [--at <slot>]")?;
         // Landed transactions are traced as they happened: balances and the
         // clock rewound to the transaction's slot (exact state when an archive
-        // is configured). `--now` traces against today's state instead.
+        // is configured). `--now` traces against today's state instead;
+        // `--at <slot>` rebuilds the world as of that slot.
         let replay = if args.iter().any(|a| a == "--now") {
             scope.replay(sig)?
+        } else if let Some(slot) = at_slot(&args)? {
+            scope.replay_at(sig, slot)?
         } else {
             scope.replay_at_slot(sig)?
         };
@@ -102,10 +159,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(feature = "profiler")]
     if signature == "profile" {
         let sig = args.get(2).ok_or(
-            "usage: svmscope profile <signature> [--now] [--json] [--symbols <program>=<path.debug>[,<path.so>]]...",
+            "usage: svmscope profile <signature> [--now] [--at <slot>] [--json] [--symbols <program>=<path.debug>[,<path.so>]]...",
         )?;
         let replay = if args.iter().any(|a| a == "--now") {
             scope.replay(sig)?
+        } else if let Some(slot) = at_slot(&args)? {
+            scope.replay_at(sig, slot)?
         } else {
             scope.replay_at_slot(sig)?
         };
@@ -639,4 +698,19 @@ fn print_trace(trace: &Trace) {
             trace.fidelity
         );
     }
+}
+
+/// `--at <slot>` from the argument list, if present.
+fn at_slot(args: &[String]) -> Result<Option<u64>, Box<dyn std::error::Error>> {
+    let Some(i) = args.iter().position(|a| a == "--at") else {
+        return Ok(None);
+    };
+    let v = args.get(i + 1).ok_or("--at needs a slot number")?;
+    let slot: u64 = v
+        .parse()
+        .map_err(|_| format!("--at: not a slot number: {v}"))?;
+    if slot == 0 {
+        return Err("--at: slot must be positive".into());
+    }
+    Ok(Some(slot))
 }

@@ -1439,6 +1439,140 @@ struct ReplayAtSlotResponse {
     /// The slot this instance's recordings begin at, when it records.
     #[serde(skip_serializing_if = "Option::is_none")]
     recorded_from: Option<u64>,
+    /// The slot the world was rebuilt as of.
+    slot: u64,
+    /// The slot the transaction actually landed in.
+    landed_slot: u64,
+}
+
+/// `?slot=` for `/replay_at`, plus the usual endpoint overrides.
+#[derive(Deserialize)]
+struct AtSlotQuery {
+    slot: Option<u64>,
+    cluster: Option<String>,
+    rpc: Option<String>,
+    archive: Option<String>,
+}
+
+/// Rebuild the world as of `slot` (the transaction's own slot when `None`),
+/// run the transaction, and describe where every account's state came from.
+fn replay_at_response(
+    scope: &Scope,
+    signature: &str,
+    slot: Option<u64>,
+) -> Result<ReplayAtSlotResponse, svmscope::Error> {
+    let landed_slot = scope
+        .landed_slot(signature)?
+        .ok_or_else(|| svmscope::Error::TransactionNotFound(signature.to_string()))?;
+    let slot = slot.unwrap_or(landed_slot);
+    let replay = if slot == landed_slot {
+        scope.replay_at_slot(signature)?
+    } else {
+        scope.replay_at(signature, slot)?
+    };
+    let cert = replay.certificate();
+    let result = replay.run()?.result;
+    let mut sources = std::collections::BTreeMap::new();
+    for a in &cert.accounts {
+        let label = format!("{:?}", a.source);
+        let label = label.split([' ', '{']).next().unwrap_or("").to_string();
+        *sources.entry(label).or_insert(0) += 1;
+    }
+    Ok(ReplayAtSlotResponse {
+        result,
+        fidelity: cert.fidelity.label(),
+        certificate: cert.summary(),
+        clock: cert.clock.clone(),
+        drifted: cert.drifted.clone(),
+        verifiable: cert.verifiable,
+        sources,
+        accounts: cert.accounts.clone(),
+        recorded_from: cert.recorded_from,
+        slot,
+        landed_slot,
+    })
+}
+
+/// GET /analyze_at/:signature?slot=N — the whole transaction page, rebuilt
+/// from a replay against the world as of `slot` (the transaction's own slot
+/// when omitted): call tree, balances, token balances, compute and logs from
+/// that execution, plus the certificate.
+async fn analyze_at_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<AtSlotQuery>,
+) -> Result<Json<svmscope::AnalysisAt>, (StatusCode, String)> {
+    if q.slot == Some(0) {
+        return Err((StatusCode::BAD_REQUEST, "slot must be positive".to_string()));
+    }
+    let (url, archive) =
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+    let slot = q.slot;
+    let out = tokio::task::spawn_blocking(move || {
+        let scope = scope_for(url, archive);
+        if let (Some(slot), Ok(tip)) = (slot, scope.client().get_slot()) {
+            if slot > tip {
+                return Err(svmscope::Error::Fixture(format!(
+                    "slot {slot} is in the future (current slot {tip})"
+                )));
+            }
+        }
+        scope.analyze_at(&signature, slot)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
+    match out {
+        Ok(v) => Ok(Json(v)),
+        Err(svmscope::Error::Fixture(msg)) if msg.contains("in the future") => {
+            Err((StatusCode::BAD_REQUEST, msg))
+        }
+        Err(e) => Err(lib_err(e)),
+    }
+}
+
+/// GET /replay_at/:signature?slot=N — replay against the world as of any
+/// slot: exact for every account recorded across it, labelled otherwise.
+async fn replay_at_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<AtSlotQuery>,
+) -> Result<Json<ReplayAtSlotResponse>, (StatusCode, String)> {
+    let Some(slot) = q.slot else {
+        return Err((StatusCode::BAD_REQUEST, "slot is required".to_string()));
+    };
+    if slot == 0 {
+        return Err((StatusCode::BAD_REQUEST, "slot must be positive".to_string()));
+    }
+    let (url, archive) =
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+    let out = tokio::task::spawn_blocking(move || {
+        let scope = scope_for(url, archive);
+        if let Ok(tip) = scope.client().get_slot() {
+            if slot > tip {
+                return Err(svmscope::Error::Fixture(format!(
+                    "slot {slot} is in the future (current slot {tip})"
+                )));
+            }
+        }
+        replay_at_response(&scope, &signature, Some(slot))
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
+    match out {
+        Ok(v) => Ok(Json(v)),
+        Err(svmscope::Error::Fixture(msg)) if msg.contains("in the future") => {
+            Err((StatusCode::BAD_REQUEST, msg))
+        }
+        Err(e) => Err(lib_err(e)),
+    }
 }
 
 /// GET /replay_at_slot/:signature — replay against the transaction's slot at the
@@ -1455,26 +1589,7 @@ async fn replay_at_slot_handler(
             // param, e.g. Alchemy's Account Archive) upgrades this replay from
             // Reconstructed to Exact. Unset = free reconstruction, as before.
             let scope = scope_for(url, archive);
-            let replay = scope.replay_at_slot(&signature)?;
-            let cert = replay.certificate();
-            let result = replay.run()?.result;
-            let mut sources = std::collections::BTreeMap::new();
-            for a in &cert.accounts {
-                let label = format!("{:?}", a.source);
-                let label = label.split([' ', '{']).next().unwrap_or("").to_string();
-                *sources.entry(label).or_insert(0) += 1;
-            }
-            Ok(ReplayAtSlotResponse {
-                result,
-                fidelity: cert.fidelity.label(),
-                certificate: cert.summary(),
-                clock: cert.clock.clone(),
-                drifted: cert.drifted.clone(),
-                verifiable: cert.verifiable,
-                sources,
-                accounts: cert.accounts.clone(),
-                recorded_from: cert.recorded_from,
-            })
+            replay_at_response(&scope, &signature, None)
         })
         .await
         .map_err(|e| {
@@ -1697,6 +1812,8 @@ async fn api_index() -> Json<serde_json::Value> {
             "POST /preflight_report":     "{ transaction, mutations[] } — preflight as an HTML report.",
             "POST /replay_report":        "{ signature, scenarios[] } — a suite run as an HTML report.",
             "GET  /replay_at_slot/{signature}": "Replay against state reconstructed at the transaction's slot, with a per-account fidelity certificate.",
+            "GET  /replay_at/{signature}?slot=N": "Replay against the world as of any slot (exact for every account recorded across it, labelled otherwise), with the same certificate.",
+            "GET  /analyze_at/{signature}?slot=N": "The whole transaction page rebuilt from a replay as of any slot (own slot when omitted): call tree, balances, token balances, compute, logs, plus the certificate.",
             "GET  /counterfactual/{signature}?account&lo&hi": "Binary-search the lamport balance at which the outcome flips.",
             "GET  /scan/{signature}":     "Which accounts, when drained, change the outcome.",
             "GET  /diagnose/{signature}": "A failure explained: error name, docs, the step and accounts involved.",
@@ -1933,6 +2050,8 @@ async fn main() {
         .route("/signatures/{address}", get(signatures_handler))
         .route("/replay/{signature}", get(replay_handler))
         .route("/replay_at_slot/{signature}", get(replay_at_slot_handler))
+        .route("/replay_at/{signature}", get(replay_at_handler))
+        .route("/analyze_at/{signature}", get(analyze_at_handler))
         .route("/counterfactual/{signature}", get(counterfactual_handler))
         .route("/scan/{signature}", get(scan_handler))
         .route("/diagnose/{signature}", get(diagnose_handler))

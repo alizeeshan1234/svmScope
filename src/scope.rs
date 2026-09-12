@@ -26,8 +26,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::analyze::{
-    build_overview, AccountDiff, AccountOverview, Analysis, Explanation, FieldDiff, ProgramInfo,
-    SigInfo, SimulationReport,
+    build_overview, AccountDiff, AccountOverview, Analysis, AnalysisAt, Explanation, FieldDiff,
+    ProgramInfo, SigInfo, SimulationReport,
 };
 use crate::check::{Check, Scenario};
 use crate::error::{Error, Result};
@@ -136,6 +136,23 @@ impl Scope {
             .send(
                 RpcRequest::GetSignaturesForAddress,
                 serde_json::json!([address, { "limit": 1 }]),
+            )
+            .ok()?;
+        resp["result"]
+            .as_array()
+            .or_else(|| resp.as_array())
+            .and_then(|a| a.first())
+            .and_then(|e| e["slot"].as_u64())
+    }
+
+    /// Slot of the newest mention of `address` strictly before `signature`
+    /// in its history, or `None` when the transaction is its first.
+    fn mention_before(&self, address: &str, signature: &str) -> Option<u64> {
+        let resp: serde_json::Value = self
+            .client
+            .send(
+                RpcRequest::GetSignaturesForAddress,
+                serde_json::json!([address, { "limit": 1, "before": signature }]),
             )
             .ok()?;
         resp["result"]
@@ -288,9 +305,60 @@ impl Scope {
     pub fn analyze(&self, input: &str) -> Result<Analysis> {
         let signature = self.resolve_signature(input)?;
         let tx = self.transaction_json(&signature)?;
-        let account_keys = utils::resolve_account_keys(&tx);
+        Ok(self.analysis_of(signature, &tx))
+    }
 
-        let mut cpi_tree = cpi_tree::build_cpi_tree(&tx);
+    /// Analyse a transaction as it replays at `slot` (its own slot when
+    /// `None`): the world is rebuilt as of that slot, the transaction runs,
+    /// and every section — call tree, balances, token balances, compute,
+    /// logs — is built from that execution rather than from the on-chain
+    /// record. The certificate says where each account's state came from.
+    pub fn analyze_at(&self, input: &str, slot: Option<u64>) -> Result<AnalysisAt> {
+        let signature = self.resolve_signature(input)?;
+        let tx = self.transaction_json(&signature)?;
+        let landed_slot = tx["slot"]
+            .as_u64()
+            .ok_or_else(|| Error::TransactionNotFound(signature.clone()))?;
+        let slot = slot.unwrap_or(landed_slot);
+        let replay = if slot == landed_slot {
+            self.replay_at_slot(&signature)?
+        } else {
+            self.replay_at(&signature, slot)?
+        };
+        let certificate = replay.certificate();
+        let (mut result, raw_diffs) = replay.ctx.run_with_diff(&[])?;
+        if result.error_name.is_none() {
+            result.error_name = explain_error(&result, replay.ctx.idl_map()).map(|e| e.title);
+        }
+        let account_keys = utils::resolve_account_keys(&tx);
+        let replayed_tx = replayed_transaction(
+            &tx,
+            &account_keys,
+            &replay,
+            &result,
+            &raw_diffs,
+            slot,
+            replay.time_travel.at_unix_timestamp,
+        );
+        let mut analysis = self.analysis_of(signature, &replayed_tx);
+        analysis.replay = Some(result);
+        Ok(AnalysisAt {
+            slot,
+            landed_slot,
+            clock: replay.describe_clock(),
+            certificate,
+            analysis,
+        })
+    }
+
+    /// Every section of an [`Analysis`] from a transaction record: the real
+    /// one from the chain, or one synthesised from a replay.
+    fn analysis_of(&self, signature: String, tx: &serde_json::Value) -> Analysis {
+        let tx = tx.clone();
+        let tx = &tx;
+        let account_keys = utils::resolve_account_keys(tx);
+
+        let mut cpi_tree = cpi_tree::build_cpi_tree(tx);
         let logs: Vec<String> = tx["meta"]["logMessages"]
             .as_array()
             .map(|a| {
@@ -319,24 +387,17 @@ impl Scope {
             }
         }
         cpi_tree::mark_introspection(&mut cpi_tree);
-        Ok(Analysis {
-            overview: build_overview(&tx, &cpi_tree, account_keys.len()),
+        Analysis {
+            overview: build_overview(tx, &cpi_tree, account_keys.len()),
             cpi_tree,
-            balance_change: diffs::account_diffs(&tx),
-            token_change: diffs::token_diffs(&tx),
-            compute: crate::compute::cu_per_program(&tx),
-            logs: tx["meta"]["logMessages"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|l| l.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            balance_change: diffs::account_diffs(tx),
+            token_change: diffs::token_diffs(tx),
+            compute: crate::compute::cu_per_program(tx),
+            logs,
             replay: None,
             accounts: decode::describe_accounts(&self.client, &account_keys),
             signature,
-        })
+        }
     }
 
     /// Diagnose a transaction: **why did it fail, and how do I fix it?** Reads the
@@ -376,6 +437,13 @@ impl Scope {
             provenance: HashMap::new(),
             recorded_from: None,
         })
+    }
+
+    /// The slot a landed transaction was included in, without building a
+    /// replay: what [`Scope::replay_at`] targets when asked for "its own slot".
+    pub fn landed_slot(&self, input: &str) -> Result<Option<u64>> {
+        let signature = self.resolve_signature(input)?;
+        Ok(self.transaction_json(&signature)?["slot"].as_u64())
     }
 
     /// Replay a transaction as of its own slot, at the best fidelity the
@@ -473,13 +541,16 @@ impl Scope {
             return Ok(replay);
         }
 
-        // Free tier: current accounts, the transaction's own balance rewind when
-        // this is its own slot, then every account that was written since the
-        // target slot rebuilt from its write history.
-        let pre = if own_slot {
+        // Free tier: current accounts, the transaction's own balance rewind
+        // (pre-balances at or before its slot, post-balances after: the
+        // record's balances beat today's for every account it lists), then
+        // every account that was written since the target slot rebuilt from
+        // recordings or its write history.
+        let landed_slot = tx["slot"].as_u64().unwrap_or(slot);
+        let pre = if slot <= landed_slot {
             PreState::from_meta(&tx, &account_keys)
         } else {
-            PreState::default()
+            PreState::from_meta_post(&tx, &account_keys)
         };
         let mut ctx = crate::replay::build_context(
             &self.client,
@@ -495,9 +566,12 @@ impl Scope {
             &mut ctx,
             &account_keys,
             num_signers,
-            slot,
-            own_slot,
-            &signature,
+            DriftTarget {
+                slot,
+                landed_slot,
+                signature: &signature,
+            },
+            &pre,
         );
         self.preload_idls(&mut ctx);
         let mut replay = Replay {
@@ -530,11 +604,19 @@ impl Scope {
     /// when the programdata could not be read.
     fn program_upgraded_since(&self, ctx: &ReplayContext, key: &str, slot: u64) -> Option<bool> {
         const UPGRADEABLE: &str = "BPFLoaderUpgradeab1e11111111111111111111111";
-        let program = ctx.pre_account_owned(key)?;
-        if program.owner.to_string() != UPGRADEABLE {
+        // Programs live in the context as loaded ELFs, not data accounts, so
+        // the program account itself is usually one read away.
+        let (owner, data) = match ctx.pre_account_owned(key) {
+            Some(a) => (a.owner.to_string(), a.data),
+            None => {
+                let (owner, _, _, data) = self.account_raw(key).ok().flatten()?;
+                (owner, data)
+            }
+        };
+        if owner != UPGRADEABLE {
             return Some(false);
         }
-        let pd_bytes: [u8; 32] = program.data.get(4..36)?.try_into().ok()?;
+        let pd_bytes: [u8; 32] = data.get(4..36)?.try_into().ok()?;
         let pd_addr = Address::from(pd_bytes).to_string();
         let pd = match ctx.pre_account_owned(&pd_addr) {
             Some(a) => a.data,
@@ -569,11 +651,35 @@ impl Scope {
         ctx: &mut ReplayContext,
         account_keys: &[String],
         num_signers: usize,
-        slot: u64,
-        own_slot: bool,
-        signature: &str,
+        target: DriftTarget<'_>,
+        seeded: &PreState,
     ) -> HashMap<String, Provenance> {
         use crate::reconstruct::{is_infra, reconstruct_account_from, Cut, RpcLedger};
+        let DriftTarget {
+            slot,
+            landed_slot,
+            signature,
+        } = target;
+        let own_slot = slot == landed_slot;
+        // A balance seeded from the record at another slot is exact when no
+        // transaction mentioned the account between the target and the
+        // landing: one signature lookup, paged from this transaction.
+        let metadata_label = |key: &str| -> Provenance {
+            let exact = if slot < landed_slot {
+                match self.mention_before(key, signature) {
+                    Some(mention) => mention < slot,
+                    None => true, // nothing earlier: the account had no history
+                }
+            } else {
+                self.last_write_slot(key)
+                    .is_some_and(|newest| newest <= landed_slot)
+            };
+            if exact {
+                Provenance::MetadataRewind
+            } else {
+                Provenance::MetadataEstimate
+            }
+        };
         // At the transaction's own slot the pre-state includes same-slot
         // writes that landed earlier in the block (a bot creating an account
         // and using it in the next transaction of the same slot). At an
@@ -626,8 +732,12 @@ impl Scope {
                 continue;
             }
             // Signers are wallets: their history is endless, only their balance
-            // matters, and the rewind covers that at the own slot.
+            // matters, and the record's balance covers that (exactly at the own
+            // slot, checked at any other).
             if index < num_signers {
+                if !own_slot && seeded.seeds_balance(key, true) {
+                    provenance.insert(key.clone(), metadata_label(key));
+                }
                 continue;
             }
             // An account absent or empty *now* may have been a live program
@@ -687,6 +797,16 @@ impl Scope {
                     provenance.insert(key.clone(), Provenance::Recorded { slot: v.slot });
                     continue;
                 }
+            }
+            // At another slot, a token account or wallet the record lists
+            // already carries the record's balance: exact when nothing touched
+            // it in between, an estimate otherwise. Either beats a history walk.
+            let wallet = current
+                .as_ref()
+                .is_none_or(|c| c.owner == Address::default() && c.data.is_empty());
+            if !own_slot && (is_token || wallet) && seeded.seeds_balance(key, wallet) {
+                provenance.insert(key.clone(), metadata_label(key));
+                continue;
             }
             // Past the lookups, everything costs RPC calls and replays.
             if budget_left == 0 {
@@ -1331,6 +1451,11 @@ pub enum Provenance {
         /// Whether the whole dependency cone was rebuilt exactly.
         exact: bool,
     },
+    /// A balance taken from the transaction's own record — its pre-balances
+    /// for a target slot before it landed, its post-balances after — with no
+    /// proof that nothing touched the account between the target and the
+    /// landing. The best free estimate; it may differ.
+    MetadataEstimate,
     /// An executable program, loaded as its current ELF. A program's bytes
     /// only change on an upgrade, which the loader stamps with its slot.
     Program {
@@ -1507,8 +1632,11 @@ impl Replay {
                     // A balance-only account (system-owned, no data) is faithfully
                     // rewound from metadata; program-owned data accounts are
                     // still current-state.
-                    (None, Fidelity::Reconstructed { .. })
-                        if !i.is_program && i.owner_is_system && i.data_len == 0 =>
+                    (None, Fidelity::Reconstructed { slot })
+                        if !i.is_program
+                            && i.owner_is_system
+                            && i.data_len == 0
+                            && self.recorded.as_ref().and_then(|r| r.slot) == Some(slot) =>
                     {
                         Provenance::MetadataRewind
                     }
@@ -1547,6 +1675,7 @@ impl Replay {
                     matches!(
                         a.source,
                         Provenance::CurrentRpc
+                            | Provenance::MetadataEstimate
                             | Provenance::Reconstructed { exact: false, .. }
                             | Provenance::Program {
                                 upgraded_since: Some(true)
@@ -2914,6 +3043,145 @@ mod preflight_input_tests {
 /// Diffs of `addrs` between a before-lookup and an after-state. A newly
 /// created account (no "before") is diffed against an empty account rather
 /// than dropped; an account absent from `after` is treated as unchanged.
+/// What a historical replay is rebuilding the world as of.
+struct DriftTarget<'a> {
+    /// The target slot.
+    slot: u64,
+    /// The slot the transaction landed in.
+    landed_slot: u64,
+    /// The transaction, for same-slot cuts and history paging.
+    signature: &'a str,
+}
+
+/// A transaction record in the shape `getTransaction` returns, with the
+/// on-chain `meta` replaced by what a replay did: logs, error, compute,
+/// SOL and token balances before and after, and inner instructions recovered
+/// from the logs (program and depth; a CPI's accounts and data are not
+/// observable from logs, so those stay empty). `slot` and `blockTime` are the
+/// replay's. Everything the analysis builders read comes from here.
+fn replayed_transaction(
+    tx: &serde_json::Value,
+    account_keys: &[String],
+    replay: &Replay,
+    result: &ReplayResult,
+    raw_diffs: &[crate::replay::RawAccountDiff],
+    slot: u64,
+    block_time: Option<i64>,
+) -> serde_json::Value {
+    let diff_of = |key: &str| raw_diffs.iter().find(|d| d.address == key);
+    let pre_of = |key: &str| replay.ctx.pre_account_owned(key);
+
+    let mut pre_balances = Vec::with_capacity(account_keys.len());
+    let mut post_balances = Vec::with_capacity(account_keys.len());
+    let mut pre_tokens = Vec::new();
+    let mut post_tokens = Vec::new();
+    let empty = vec![];
+    let onchain_pre_tokens = tx["meta"]["preTokenBalances"].as_array().unwrap_or(&empty);
+    let onchain_post_tokens = tx["meta"]["postTokenBalances"].as_array().unwrap_or(&empty);
+    let decimals_from_chain = |index: usize| -> Option<u8> {
+        onchain_pre_tokens
+            .iter()
+            .chain(onchain_post_tokens.iter())
+            .find(|e| e["accountIndex"].as_u64() == Some(index as u64))
+            .and_then(|e| e["uiTokenAmount"]["decimals"].as_u64())
+            .map(|d| d as u8)
+    };
+    let token_entry = |index: usize, owner: &str, data: &[u8]| -> Option<serde_json::Value> {
+        if (owner != SPL_TOKEN && owner != SPL_TOKEN_2022) || data.len() < 72 {
+            return None;
+        }
+        let mint = Address::from(<[u8; 32]>::try_from(&data[0..32]).ok()?).to_string();
+        let holder = Address::from(<[u8; 32]>::try_from(&data[32..64]).ok()?).to_string();
+        let amount = u64::from_le_bytes(data[64..72].try_into().ok()?);
+        // Decimals: the on-chain record knows them for the accounts it listed;
+        // otherwise the mint, when it is in the replay's world (offset 44).
+        let decimals = decimals_from_chain(index)
+            .or_else(|| pre_of(&mint).and_then(|m| m.data.get(44).copied()))
+            .unwrap_or(0);
+        Some(json!({
+            "accountIndex": index,
+            "mint": mint,
+            "owner": holder,
+            "uiTokenAmount": { "amount": amount.to_string(), "decimals": decimals },
+        }))
+    };
+    for (index, key) in account_keys.iter().enumerate() {
+        let pre = pre_of(key);
+        let diff = diff_of(key);
+        let pre_lamports = pre.as_ref().map(|a| a.lamports).unwrap_or(0);
+        let post_lamports = diff.map(|d| d.lamports_after).unwrap_or(pre_lamports);
+        pre_balances.push(pre_lamports);
+        post_balances.push(post_lamports);
+        if let Some(pre) = pre.as_ref() {
+            if let Some(e) = token_entry(index, &pre.owner.to_string(), &pre.data) {
+                pre_tokens.push(e);
+            }
+        }
+        let (post_owner, post_data): (String, &[u8]) = match (diff, pre.as_ref()) {
+            (Some(d), _) => (d.owner.clone(), &d.data_after),
+            (None, Some(p)) => (p.owner.to_string(), &p.data),
+            (None, None) => continue,
+        };
+        if post_lamports > 0 {
+            if let Some(e) = token_entry(index, &post_owner, post_data) {
+                post_tokens.push(e);
+            }
+        }
+    }
+
+    // Inner instructions from the logs: one entry per CPI, under the
+    // top-level instruction it happened in.
+    let mut inner: Vec<serde_json::Value> = Vec::new();
+    let mut top_index: i64 = -1;
+    for span in crate::trace::spans_from_logs(&result.logs, 0) {
+        if span.depth <= 1 {
+            top_index += 1;
+            continue;
+        }
+        let Some(program_index) = account_keys.iter().position(|k| *k == span.program) else {
+            continue;
+        };
+        let ix = json!({
+            "programIdIndex": program_index,
+            "accounts": [],
+            "data": "",
+            "stackHeight": span.depth,
+        });
+        match inner
+            .iter_mut()
+            .find(|g| g["index"].as_i64() == Some(top_index))
+        {
+            Some(group) => {
+                if let Some(list) = group["instructions"].as_array_mut() {
+                    list.push(ix);
+                }
+            }
+            None => inner.push(json!({ "index": top_index, "instructions": [ix] })),
+        }
+    }
+
+    let mut out = tx.clone();
+    out["slot"] = json!(slot);
+    out["blockTime"] = match block_time {
+        Some(t) => json!(t),
+        None => serde_json::Value::Null,
+    };
+    let fee = tx["meta"]["fee"].clone();
+    out["meta"] = json!({
+        "err": match &result.error { Some(e) => json!(e), None => serde_json::Value::Null },
+        "fee": fee,
+        "computeUnitsConsumed": result.compute_units,
+        "logMessages": result.logs,
+        "preBalances": pre_balances,
+        "postBalances": post_balances,
+        "preTokenBalances": pre_tokens,
+        "postTokenBalances": post_tokens,
+        "innerInstructions": inner,
+        "loadedAddresses": tx["meta"]["loadedAddresses"].clone(),
+    });
+    out
+}
+
 fn diffs_of(
     before_of: &dyn Fn(&Address) -> Option<solana_account::Account>,
     after: &HashMap<Address, solana_account::Account>,

@@ -899,19 +899,44 @@ pub(crate) struct PreState {
 }
 
 impl PreState {
+    /// Balances from the transaction's record as they were *before* it ran.
     pub(crate) fn from_meta(tx: &serde_json::Value, account_keys: &[String]) -> PreState {
+        Self::from_meta_side(tx, account_keys, "preBalances", "preTokenBalances")
+    }
+
+    /// Balances from the transaction's record as they were right *after* it
+    /// ran: the best free estimate for a target slot after it landed.
+    pub(crate) fn from_meta_post(tx: &serde_json::Value, account_keys: &[String]) -> PreState {
+        Self::from_meta_side(tx, account_keys, "postBalances", "postTokenBalances")
+    }
+
+    /// Whether the record carries a balance for `address` that stands on its
+    /// own: a token account's amount, or a wallet's lamports (system-owned,
+    /// no data). Data accounts also have lamports here, but their bytes are
+    /// what matters and the record says nothing about those.
+    pub(crate) fn seeds_balance(&self, address: &str, owner_is_system_no_data: bool) -> bool {
+        self.token_amounts.contains_key(address)
+            || (owner_is_system_no_data && self.lamports.contains_key(address))
+    }
+
+    fn from_meta_side(
+        tx: &serde_json::Value,
+        account_keys: &[String],
+        balances: &str,
+        token_balances: &str,
+    ) -> PreState {
         let mut ps = PreState::default();
 
-        // Pre-transaction lamports, parallel to the resolved account list.
-        if let Some(pre) = tx["meta"]["preBalances"].as_array() {
+        // Lamports, parallel to the resolved account list.
+        if let Some(pre) = tx["meta"][balances].as_array() {
             for (i, v) in pre.iter().enumerate() {
                 if let (Some(addr), Some(l)) = (account_keys.get(i), v.as_u64()) {
                     ps.lamports.insert(addr.clone(), l);
                 }
             }
         }
-        // Pre-transaction token balances (amount + enough to rebuild the account).
-        if let Some(pre) = tx["meta"]["preTokenBalances"].as_array() {
+        // Token balances (amount + enough to rebuild the account).
+        if let Some(pre) = tx["meta"][token_balances].as_array() {
             for e in pre {
                 let idx = e["accountIndex"].as_u64().unwrap_or(u64::MAX) as usize;
                 let amt = e["uiTokenAmount"]["amount"]

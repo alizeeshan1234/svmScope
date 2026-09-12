@@ -160,8 +160,8 @@ pub(crate) mod utils;
 mod wire_format_tests;
 
 pub use analyze::{
-    AccountDiff, AccountOverview, Analysis, Explanation, FieldDiff, Overview, ProgramInfo, SigInfo,
-    SimulationReport,
+    AccountDiff, AccountOverview, Analysis, AnalysisAt, Explanation, FieldDiff, Overview,
+    ProgramInfo, SigInfo, SimulationReport,
 };
 pub use check::{AccountCheck, Check, Cmp, Scenario};
 pub use compute::CuUsage;
