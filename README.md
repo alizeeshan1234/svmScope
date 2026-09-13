@@ -467,10 +467,12 @@ those transactions' inputs had to come from today's data),
 `SameBlock` (the same situation when that replay was not possible: the chain
 of earlier transactions was longer than `SVMSCOPE_PREFIX_MAX_TXS` (160) or
 touched more than `SVMSCOPE_PREFIX_MAX_ACCOUNTS` (600) data accounts, or one
-of them did not succeed here: counted as drift; the accounts those
-transactions write are searched `SVMSCOPE_PREFIX_LOOKBACK` (4096) slots back
-in the stream, the ones they only read `SVMSCOPE_PREFIX_READ_LOOKBACK`
-(256), with today's bytes beyond that),
+none of them succeeded here: counted as drift; a single predecessor that
+does not succeed here is skipped and only the accounts it would have written
+are marked inexact; the accounts those transactions write are searched
+`SVMSCOPE_PREFIX_LOOKBACK` (1024) slots back in the stream, the ones they
+only read `SVMSCOPE_PREFIX_READ_LOOKBACK` (256), with today's bytes beyond
+that),
 `Program` (the current ELF, with whether it was upgraded after the slot; a
 program upgraded since runs the bytecode deployed before the slot when the
 stream has it, and is then labelled `Recorded` at its deploy slot),

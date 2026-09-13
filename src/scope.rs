@@ -1533,8 +1533,11 @@ impl Scope {
                 for key in affected {
                     let writes = preceded.get(&key).copied().unwrap_or(0);
                     if let Some(p) = provenance.get_mut(&key) {
-                        *p = match applied {
-                            Some((_, exact)) => Provenance::BlockPrefix { writes, exact },
+                        *p = match &applied {
+                            Some((_, inexact)) => Provenance::BlockPrefix {
+                                writes,
+                                exact: !inexact.contains(&key),
+                            },
                             None => Provenance::SameBlock { writes },
                         };
                     }
@@ -1561,7 +1564,7 @@ impl Scope {
         affected: &[String],
         trace: bool,
         started: Instant,
-    ) -> Option<(usize, bool)> {
+    ) -> Option<(usize, std::collections::HashSet<String>)> {
         use crate::replay::{synthesize_lookup_tables, PreState};
         let block: serde_json::Value = self
             .client
@@ -1676,7 +1679,7 @@ impl Scope {
                     .partition(|k| written.contains(k));
                 let first = crate::history::LARGE_FIRST_WINDOW;
                 for (group, depth) in [
-                    (hot, env_u64("SVMSCOPE_PREFIX_LOOKBACK", 4_096)),
+                    (hot, env_u64("SVMSCOPE_PREFIX_LOOKBACK", 1_024)),
                     (quiet, env_u64("SVMSCOPE_PREFIX_READ_LOOKBACK", 256)),
                 ] {
                     if group.is_empty() {
@@ -1797,6 +1800,13 @@ impl Scope {
         }
         // Run them in order, each on the state the one before left, with its
         // own balances rewound from its record right before it runs.
+        let mut skipped = 0usize;
+        let mut inexact: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if !exact {
+            // Some input came from today's bytes: whatever the prefix wrote
+            // may have followed from it.
+            inexact.extend(prefix.iter().flat_map(|t| t.data_writes.iter().cloned()));
+        }
         let mut svm = ctx.fresh_svm_with(false);
         for t in &prefix {
             let pre = PreState::from_meta(&t.entry, &t.keys);
@@ -1830,19 +1840,27 @@ impl Scope {
             match svm.send_transaction(t.tx.clone()) {
                 Ok(_) => {}
                 Err(failed) => {
+                    // Its inputs were not what it saw on chain (something
+                    // only today's bytes could stand in for). Its writes
+                    // are missing from here on: everything it wrote is
+                    // inexact, the rest of the prefix still counts.
                     if trace {
                         eprintln!(
-                            "[reconstruct {:>6.1}s] block prefix: {} (#{}) did not succeed here: {:?}; labelling instead",
+                            "[reconstruct {:>6.1}s] block prefix: {} (#{}) did not succeed here: {:?}; its writes are skipped",
                             started.elapsed().as_secs_f64(),
                             &t.signature[..12.min(t.signature.len())],
                             t.index,
                             failed.err
                         );
                     }
-                    *ctx = backup;
-                    return None;
+                    skipped += 1;
+                    inexact.extend(t.data_writes.iter().cloned());
                 }
             }
+        }
+        if skipped == prefix.len() {
+            *ctx = backup;
+            return None;
         }
         // Bake the state after the prefix into the accounts the context
         // held before it: from here on the replay, its diffs and its
@@ -1857,13 +1875,14 @@ impl Scope {
         *ctx = baked;
         if trace {
             eprintln!(
-                "[reconstruct {:>6.1}s] block prefix: {} transaction(s) replayed before this one, inputs {}",
+                "[reconstruct {:>6.1}s] block prefix: {} transaction(s) replayed before this one ({} skipped), {} account(s) inexact",
                 started.elapsed().as_secs_f64(),
-                prefix.len(),
-                if exact { "exact" } else { "partly today's" }
+                prefix.len() - skipped,
+                skipped,
+                inexact.len()
             );
         }
-        Some((prefix.len(), exact))
+        Some((prefix.len() - skipped, inexact))
     }
 
     /// Current accounts for `keys`, one batched read per hundred.
