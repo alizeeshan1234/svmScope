@@ -1909,7 +1909,17 @@ function fmtUtc(sec) {
 let analysis = null, onchainAnalysis = null, currentSig = '', mutations = [], mutableAccounts = [];
 // What this engine can make exact: the slot its recordings begin at, and the
 // programs whose state comes back from their own event logs at any date.
-const windowInfo = { recordedFrom: null, eventPrograms: [] };
+const windowInfo = { recordedFrom: null, eventPrograms: [], windowDays: 30 };
+
+// About how old a slot is, in days, from this transaction's own block time
+// and the slot distance (slots run about 0.4 s). The engine has the exact
+// answer; this only decides whether to warn before asking.
+function slotAgeDays(slot) {
+  const o = analysis?.overview;
+  if (!o || o.slot == null || !o.block_time) return null;
+  const t = o.block_time + (slot - o.slot) * 0.4;
+  return (Date.now() / 1000 - t) / 86400;
+}
 
 // Before a historical replay: is `slot` inside the exact window? If not, say
 // so up front, once, and let the user go ahead knowing what they'll get.
@@ -1917,6 +1927,10 @@ function windowNotice(slot) {
   const from = windowInfo.recordedFrom;
   const progs = (analysis?.overview?.top_programs || []).concat((analysis?.cpi_tree || []).map(e => e.program));
   const hasEvent = progs.some(p => windowInfo.eventPrograms.includes(p));
+  const age = slotAgeDays(slot);
+  if (age != null && age > windowInfo.windowDays + 1) {
+    return `<div class="drift-inline notice"><b>Slot ${fmt(slot)} is about ${Math.round(age)} days old</b>, outside the ${windowInfo.windowDays}-day window this engine keeps. It will be refused; any slot in the last ${windowInfo.windowDays} days replays exactly.</div>`;
+  }
   if (from == null) {
     return `<div class="drift-inline notice">This engine has no recordings, so pool state comes from today's data and the result is labelled approximate. Balances and the clock are exact.${hasEvent ? ' pump.fun curve reserves come from the program\'s own event log.' : ''}</div>`;
   }
@@ -1948,6 +1962,7 @@ try {
       }
       if (info) {
         windowInfo.recordedFrom = info.recorded_from ?? null;
+        if (info.replay_window_days) windowInfo.windowDays = info.replay_window_days;
         windowInfo.eventPrograms = info.event_log_programs || [];
       }
     })

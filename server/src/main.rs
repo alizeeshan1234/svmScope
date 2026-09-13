@@ -556,6 +556,40 @@ fn lib_err(e: svmscope::Error) -> (StatusCode, String) {
     }
 }
 
+/// Days a historical replay reaches back (`SVMSCOPE_REPLAY_WINDOW_DAYS`,
+/// default 30): the promise the recorder keeps, so slots older than it are
+/// refused up front instead of answered from whatever a third party still
+/// holds.
+fn replay_window_days() -> u64 {
+    std::env::var("SVMSCOPE_REPLAY_WINDOW_DAYS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(30)
+}
+
+/// `Err` with a plain message when `slot` landed more than the window ago,
+/// by block time (a skipped slot borrows the next one's). Slots whose time
+/// cannot be read pass: the engine labels what it cannot prove anyway.
+fn check_replay_window(scope: &Scope, slot: u64) -> Result<(), svmscope::Error> {
+    let days = replay_window_days();
+    let block_time = (slot..slot.saturating_add(8))
+        .find_map(|s| scope.client().get_block_time(s).ok());
+    let Some(t) = block_time else {
+        return Ok(());
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(t);
+    let age_days = now.saturating_sub(t) / 86_400;
+    if age_days as u64 > days {
+        return Err(svmscope::Error::Fixture(format!(
+            "slot {slot} landed {age_days} days ago; replay at slot covers the last {days} days"
+        )));
+    }
+    Ok(())
+}
+
 /// GET /analyze/:signature — decode + replay a transaction, return JSON.
 async fn analyze_handler(
     Path(signature): Path<String>,
@@ -1553,6 +1587,13 @@ async fn analyze_at_handler(
                 )));
             }
         }
+        let target = match slot {
+            Some(s) => Some(s),
+            None => scope.landed_slot(&signature)?,
+        };
+        if let Some(s) = target {
+            check_replay_window(&scope, s)?;
+        }
         scope.analyze_at(&signature, slot)
     })
     .await
@@ -1594,6 +1635,7 @@ async fn replay_at_handler(
                 )));
             }
         }
+        check_replay_window(&scope, slot)?;
         replay_at_response(&scope, &signature, Some(slot))
     })
     .await
@@ -1842,6 +1884,7 @@ async fn api_index() -> Json<serde_json::Value> {
             s.covered_from().ok().flatten()
         }),
         "event_log_programs": ["6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"],
+        "replay_window_days": replay_window_days(),
         "archive": "Any route that replays accepts `archive` (query or body): an archival RPC that honours a historical slot, e.g. Alchemy's Account Archive, for exact state at the transaction's slot. Same opt-in and vetting as `rpc`.",
         "endpoints": {
             "GET  /analyze/{signature}":  "Decode a transaction: CPI tree, balance & token changes, compute, and IDL-decoded accounts.",
