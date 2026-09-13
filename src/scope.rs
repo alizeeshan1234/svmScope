@@ -1660,11 +1660,15 @@ impl Scope {
             let current = self.accounts_now(&missing);
             let mut found = HashMap::new();
             if let Some(stream) = self.history.as_ref() {
-                let sized: Vec<(String, usize)> = missing
-                    .iter()
-                    .map(|k| (k.clone(), current.get(k).map_or(0, |a| a.data.len())))
-                    .collect();
-                match stream.latest_before_sized(&sized, slot) {
+                // These accounts were written in this very block, so they
+                // are hot: a short first window finds them, and a wide one
+                // would stream every change of hundreds of busy accounts.
+                match stream.latest_before_windows(
+                    &missing,
+                    slot,
+                    crate::history::LARGE_FIRST_WINDOW,
+                    stream.deep_lookback,
+                ) {
                     Ok(f) => found = f,
                     Err(e) => eprintln!("history stream: {e}"),
                 }
