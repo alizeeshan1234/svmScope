@@ -1756,15 +1756,38 @@ impl Scope {
                 synthesize_lookup_tables(ctx, &t.lookups_json);
             }
         }
-        // Token accounts and wallets a prefix transaction needs that nobody
-        // loaded: rebuilt from its own record.
+        // What a prefix transaction still needs that nobody loaded: wallets
+        // and token accounts, rebuilt from its own record, and programs it
+        // passes without invoking, loaded by their binary. One batched read
+        // tells which is which.
+        let rest: Vec<String> = {
+            let mut seen = std::collections::HashSet::new();
+            prefix
+                .iter()
+                .flat_map(|t| t.keys.iter())
+                .filter(|k| seen.insert((*k).clone()))
+                .filter(|k| {
+                    Address::from_str(k)
+                        .map(|a| !ctx.is_loaded(&a))
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect()
+        };
+        let rest_now = self.accounts_now(&rest);
         for t in &prefix {
             let pre = PreState::from_meta(&t.entry, &t.keys);
             for key in &t.keys {
                 let Ok(addr) = Address::from_str(key) else {
                     continue;
                 };
-                if ctx.is_loaded(&addr) || t.programs.contains(key) {
+                if ctx.is_loaded(&addr) {
+                    continue;
+                }
+                if rest_now.get(key).is_some_and(|a| a.executable) {
+                    if let Some(elf) = crate::replay::fetch_program_elf(&self.client, key) {
+                        ctx.add_program(addr, elf);
+                    }
                     continue;
                 }
                 if let Some(acc) = pre.reconstruct(key) {
