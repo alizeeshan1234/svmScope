@@ -1,0 +1,16 @@
+{
+  "source_index_url": "https://whirlpool-archive.pleiades.dev/alpha/index.json",
+  "source_index_updated_at": "2026-09-12T12:46:03.364Z",
+  "source_index_sha256": "a7aef7a8f2431e05f8befa44e890cafc0a9e228c6ae92ec4386388d61d184511",
+  "requested_start_date_utc": "2026-08-12",
+  "requested_end_date": "2026-09-13 (local date; serve only finalized slots already produced)",
+  "last_listed_date_utc": "2026-09-10",
+  "initial_anchor_compressed_bytes": 125637979,
+  "transaction_files_aug12_sep10_bytes": 12770117250,
+  "one_anchor_plus_transactions_bytes": 12895755229,
+  "daily_anchors_plus_transactions_bytes": 16787834010,
+  "all_daily_anchors_bytes": 4017716760,
+  "source_files_fully_downloaded": 1,
+  "full_day_execution_benchmark_completed": false,
+  "universal_30_day_exact_replay_verified": false
+}

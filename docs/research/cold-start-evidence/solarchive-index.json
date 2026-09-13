@@ -1,0 +1,35 @@
+{
+  "name": "Solarchive",
+  "description": "Historical Solana blockchain data",
+  "version": "1.0",
+  "datasets": [
+    {
+      "name": "accounts",
+      "key": "accounts",
+      "path": "accounts/index.json",
+      "description": "Solana account snapshots partitioned by month",
+      "partition_type": "monthly",
+      "partition_count": 63,
+      "schema": "https://data.solarchive.org/schemas/solana/accounts.json"
+    },
+    {
+      "name": "tokens",
+      "key": "tokens",
+      "path": "tokens/index.json",
+      "description": "Solana token metadata partitioned by month",
+      "partition_type": "monthly",
+      "partition_count": 63,
+      "schema": "https://data.solarchive.org/schemas/solana/tokens.json"
+    },
+    {
+      "name": "transactions",
+      "key": "txs",
+      "path": "txs/index.json",
+      "description": "Non-vote Solana transactions partitioned by day",
+      "partition_type": "daily",
+      "partition_count": 5,
+      "schema": "https://data.solarchive.org/schemas/solana/transactions.json"
+    }
+  ],
+  "updated_at": "2025-12-19T19:19:41.901324Z"
+}

@@ -1,0 +1,1 @@
+[{"jsonrpc":"2.0","result":{"absoluteSlot":446554585,"blockHeight":424597313,"epoch":1033,"slotIndex":298585,"slotsInEpoch":432000,"transactionCount":547863983429},"id":"epoch"},{"jsonrpc":"2.0","result":{"firstNormalEpoch":0,"firstNormalSlot":0,"leaderScheduleSlotOffset":432000,"slotsPerEpoch":432000,"warmup":false},"id":"schedule"}]

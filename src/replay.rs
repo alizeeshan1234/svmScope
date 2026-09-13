@@ -235,6 +235,123 @@ fn fetch_loaded_at_slot(
     Ok((out, existing))
 }
 
+/// The address lookup table program.
+const LOOKUP_TABLE_PROGRAM: &str = "AddressLookupTab1e1111111111111111111111111";
+
+/// Rebuild every address lookup table the transaction used from the
+/// transaction's own record, and load those tables into the context in
+/// place of whatever the chain holds today. Returns the tables' addresses.
+///
+/// A v0 transaction names its extra accounts by (table, index), and the
+/// runtime resolves them from the table account at execution time. A table
+/// closed since, or extended after the target slot, makes that resolution
+/// fail (`AddressLookupTableNotFound`, `InvalidAddressLookupTableIndex`)
+/// even though the record says exactly which address every index meant:
+/// `meta.loadedAddresses` lists them in lookup order. A table built from
+/// that, with every other index zeroed and no deactivation, resolves this
+/// transaction exactly at any slot; it is the record's own data, not a
+/// guess.
+pub(crate) fn synthesize_lookup_tables(
+    ctx: &mut ReplayContext,
+    tx: &serde_json::Value,
+) -> Vec<String> {
+    let empty = vec![];
+    let lookups = tx["transaction"]["message"]["addressTableLookups"]
+        .as_array()
+        .unwrap_or(&empty);
+    if lookups.is_empty() {
+        return Vec::new();
+    }
+    let list = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let indexes = |v: &serde_json::Value| -> Vec<usize> {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_u64().map(|i| i as usize))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let writable = list(&tx["meta"]["loadedAddresses"]["writable"]);
+    let readonly = list(&tx["meta"]["loadedAddresses"]["readonly"]);
+    let (mut w, mut r) = (0usize, 0usize);
+    let Ok(owner) = Address::from_str(LOOKUP_TABLE_PROGRAM) else {
+        return Vec::new();
+    };
+    let mut done = Vec::new();
+    for l in lookups {
+        let Some(table) = l["accountKey"].as_str() else {
+            continue;
+        };
+        let wi = indexes(&l["writableIndexes"]);
+        let ri = indexes(&l["readonlyIndexes"]);
+        let mut entries: Vec<(usize, String)> = Vec::new();
+        for i in wi {
+            if let Some(a) = writable.get(w) {
+                entries.push((i, a.clone()));
+            }
+            w += 1;
+        }
+        for i in ri {
+            if let Some(a) = readonly.get(r) {
+                entries.push((i, a.clone()));
+            }
+            r += 1;
+        }
+        let Ok(table_addr) = Address::from_str(table) else {
+            continue;
+        };
+        let len = entries.iter().map(|(i, _)| i + 1).max().unwrap_or(0);
+        // Meta (bincode of `ProgramState::LookupTable`): discriminant 1,
+        // deactivation_slot = never, last_extended_slot = 0 so every index
+        // is active at any slot, no authority; zero-padded to 56 bytes.
+        let mut data = Vec::with_capacity(LOOKUP_TABLE_META_SIZE + 32 * len);
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&u64::MAX.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes());
+        data.push(0);
+        data.push(0);
+        data.extend_from_slice(&0u16.to_le_bytes());
+        data.resize(LOOKUP_TABLE_META_SIZE, 0);
+        let mut addresses = vec![[0u8; 32]; len];
+        for (i, a) in entries {
+            if let Ok(addr) = Address::from_str(&a) {
+                addresses[i] = addr.to_bytes();
+            }
+        }
+        for a in addresses {
+            data.extend_from_slice(&a);
+        }
+        let lamports = ctx
+            .pre_account(table)
+            .map(|a| a.lamports)
+            .unwrap_or(((data.len() + 128) as u64) * 6_960);
+        ctx.set_loaded_data(
+            table_addr,
+            Some(Account {
+                lamports,
+                data,
+                owner,
+                executable: false,
+                rent_epoch: 0,
+            }),
+        );
+        done.push(table.to_string());
+    }
+    done
+}
+
+/// Size of the lookup table's serialized meta prefix.
+const LOOKUP_TABLE_META_SIZE: usize = 56;
+
 /// A ready-to-load account: either raw data, or a program's ELF bytecode.
 #[derive(Clone)]
 enum Loaded {
@@ -730,6 +847,41 @@ impl ReplayContext {
         Ok((result, diffs))
     }
 
+    /// [`run_with_diff`] that also returns the inner instructions the runtime
+    /// executed, per top-level instruction: what a replayed call tree needs to
+    /// name and decode every CPI, not just the top level.
+    pub(crate) fn run_with_diff_and_inner(
+        &self,
+        mutations: &[Mutation],
+    ) -> Result<(ReplayResult, Vec<RawAccountDiff>, InnerList)> {
+        let Prepared { mut svm, tx, .. } = self.prepare(mutations, false)?;
+        let outcome = svm.send_transaction(tx);
+        let inner = match &outcome {
+            Ok(meta) => inner_of(meta),
+            Err(failed) => inner_of(&failed.meta),
+        };
+        let result = to_replay_result(outcome);
+        let mut diffs = Vec::new();
+        for (addr, l) in &self.loaded {
+            let Loaded::Data(before) = l else { continue };
+            let Some(after) = svm.get_account(addr) else {
+                continue;
+            };
+            if after.lamports == before.lamports && after.data == before.data {
+                continue;
+            }
+            diffs.push(RawAccountDiff {
+                address: addr.to_string(),
+                owner: after.owner.to_string(),
+                lamports_before: before.lamports,
+                lamports_after: after.lamports,
+                data_before: before.data.clone(),
+                data_after: after.data.clone(),
+            });
+        }
+        Ok((result, diffs, inner))
+    }
+
     /// Replay with `mutations`, then read one account's raw post-execution state
     /// — the primitive historical reconstruction chains: inject an account's
     /// reconstructed bytes, replay the next write, read the account out again.
@@ -831,6 +983,7 @@ impl ReplayContext {
 /// (Only token accounts that existed pre-transaction appear in `preTokenBalances`,
 /// so restoring them is safe — it never resurrects an account the tx creates.)
 const SPL_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const SPL_TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 /// The Rent sysvar. Always loaded with the world (see [`with_rent_sysvar`]) so
 /// the replay enforces the *cluster's* rent parameters, not LiteSVM's defaults.
 pub(crate) const SYSVAR_RENT: &str = "SysvarRent111111111111111111111111111111111";
@@ -881,10 +1034,12 @@ pub(crate) fn parse_rent(data: &[u8]) -> Option<RentParams> {
     })
 }
 
-/// Pre-transaction token-account details, enough to rebuild a closed one.
+/// Pre-transaction token-account details for rebuilding a closed account's
+/// base layout. Metadata does not supply delegates, extensions or all flags.
 struct TokenInfo {
     mint: String,
     owner: String, // the token authority (SPL "owner" field), not the program
+    program: String,
     amount: u64,
 }
 
@@ -908,6 +1063,16 @@ impl PreState {
     /// ran: the best free estimate for a target slot after it landed.
     pub(crate) fn from_meta_post(tx: &serde_json::Value, account_keys: &[String]) -> PreState {
         Self::from_meta_side(tx, account_keys, "postBalances", "postTokenBalances")
+    }
+
+    /// The token amount the record holds for `address`, if it lists one.
+    pub(crate) fn token_amount(&self, address: &str) -> Option<u64> {
+        self.token_amounts.get(address).copied()
+    }
+
+    /// The lamports the record holds for `address`, if it lists it.
+    pub(crate) fn lamports_of(&self, address: &str) -> Option<u64> {
+        self.lamports.get(address).copied()
     }
 
     /// Whether the record carries a balance for `address` that stands on its
@@ -952,6 +1117,12 @@ impl PreState {
                         TokenInfo {
                             mint: mint.to_string(),
                             owner: owner.to_string(),
+                            // Older RPC metadata omitted programId. Preserve
+                            // the legacy fallback only when it is unavailable.
+                            program: e["programId"]
+                                .as_str()
+                                .unwrap_or(SPL_TOKEN_PROGRAM)
+                                .to_string(),
                             amount: amt,
                         },
                     );
@@ -965,8 +1136,17 @@ impl PreState {
     /// been closed (so `getMultipleAccounts` returns null). Returns `None` for
     /// accounts that never existed (the transaction creates those itself).
     fn reconstruct(&self, address: &str) -> Option<Account> {
-        // A closed token account: rebuild the full SPL layout from meta.
+        // Rebuild the token base layout. In particular, retain Token-2022
+        // ownership: assigning its accounts to the legacy token program makes
+        // historical TransferChecked calls fail with IncorrectProgramId.
+        // Extensions and other fields absent from metadata remain unknown.
         if let Some(info) = self.token_info.get(address) {
+            if !matches!(
+                info.program.as_str(),
+                SPL_TOKEN_PROGRAM | SPL_TOKEN_2022_PROGRAM
+            ) {
+                return None;
+            }
             let mut data = vec![0u8; 165];
             let mint = Address::from_str(&info.mint).ok()?;
             let owner = Address::from_str(&info.owner).ok()?;
@@ -977,7 +1157,7 @@ impl PreState {
             return Some(Account {
                 lamports: self.lamports.get(address).copied().unwrap_or(2_039_280),
                 data,
-                owner: Address::from_str(SPL_TOKEN_PROGRAM).ok()?,
+                owner: Address::from_str(&info.program).ok()?,
                 executable: false,
                 rent_epoch: 0,
             });
@@ -1631,6 +1811,37 @@ fn apply_mutation(svm: &mut LiteSVM, m: &Mutation) -> Result<()> {
 ///
 /// This does NOT print — it just extracts the data. The caller (CLI or a UI)
 /// decides how to display it.
+/// One inner instruction as the runtime executed it: indexes into the
+/// transaction's account keys, raw data, and its stack height (2 = a direct
+/// CPI).
+#[derive(Debug, Clone)]
+pub(crate) struct RawInner {
+    pub(crate) program_id_index: u8,
+    pub(crate) accounts: Vec<u8>,
+    pub(crate) data: Vec<u8>,
+    pub(crate) stack_height: u8,
+}
+
+/// Inner instructions per top-level instruction, in execution order.
+pub(crate) type InnerList = Vec<Vec<RawInner>>;
+
+fn inner_of(meta: &litesvm::types::TransactionMetadata) -> InnerList {
+    meta.inner_instructions
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .map(|i| RawInner {
+                    program_id_index: i.instruction.program_id_index,
+                    accounts: i.instruction.accounts.clone(),
+                    data: i.instruction.data.clone(),
+                    stack_height: i.stack_height,
+                })
+                .collect()
+        })
+        .collect()
+}
+
 fn to_replay_result(result: TransactionResult) -> ReplayResult {
     match result {
         Ok(meta) => ReplayResult {
@@ -3235,6 +3446,56 @@ mod tests {
     fn never_resurrects_an_account_the_tx_creates() {
         let pre = PreState::default();
         assert!(pre.reconstruct("SomeAddr").is_none());
+    }
+
+    #[test]
+    fn closed_token_account_preserves_recorded_program_for_both_balance_sides() {
+        let keys = vec!["4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T".to_string()];
+        for program in [SPL_TOKEN_PROGRAM, SPL_TOKEN_2022_PROGRAM] {
+            let balance = serde_json::json!({
+                "accountIndex": 0,
+                "mint": "So11111111111111111111111111111111111111112",
+                "owner": "Vote111111111111111111111111111111111111111",
+                "programId": program,
+                "uiTokenAmount": { "amount": "12345" }
+            });
+            let tx = serde_json::json!({ "meta": {
+                "preBalances": [2_039_280], "postBalances": [2_039_280],
+                "preTokenBalances": [balance.clone()], "postTokenBalances": [balance]
+            }});
+            for pre in [
+                PreState::from_meta(&tx, &keys),
+                PreState::from_meta_post(&tx, &keys),
+            ] {
+                let account = pre.reconstruct(&keys[0]).unwrap();
+                assert_eq!(account.owner.to_string(), program);
+                assert_eq!(read_u64_at(&account.data, 64), 12345);
+                assert_eq!(
+                    &account.data[32..64],
+                    Address::from_str("Vote111111111111111111111111111111111111111")
+                        .unwrap()
+                        .as_array()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn closed_token_account_rejects_unrecognized_program() {
+        let keys = vec!["4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T".to_string()];
+        let tx = serde_json::json!({ "meta": {
+            "preBalances": [2_039_280],
+            "preTokenBalances": [{
+                "accountIndex": 0,
+                "mint": "So11111111111111111111111111111111111111112",
+                "owner": "Vote111111111111111111111111111111111111111",
+                "programId": "11111111111111111111111111111111",
+                "uiTokenAmount": { "amount": "1" }
+            }]
+        }});
+        assert!(PreState::from_meta(&tx, &keys)
+            .reconstruct(&keys[0])
+            .is_none());
     }
 
     #[test]

@@ -29,9 +29,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         "https://api.mainnet-beta.solana.com",
     )?;
     let scope = Scope::new(rpc);
+    // Replays the free tier may spend rebuilding an account from its write
+    // history; the library default is generous, `SVMSCOPE_RECONSTRUCT_BUDGET`
+    // overrides it (the hosted engine defaults to 0).
+    let scope = match std::env::var("SVMSCOPE_RECONSTRUCT_BUDGET")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+    {
+        Some(budget) => scope.with_reconstruction_budget(budget),
+        None => scope,
+    };
     // A local record store (`SVMSCOPE_RECORD_DIR`, the directory a recorder
     // or the hosted engine writes) makes historical replays exact for every
     // account it covers; without one they are labelled honestly.
+    let scope = match svmscope::history::HistoryStream::from_env() {
+        Some(stream) => scope.with_history_stream(stream),
+        None => scope,
+    };
     let scope = match std::env::var("SVMSCOPE_RECORD_DIR") {
         Ok(dir) if !dir.trim().is_empty() => {
             let store = svmscope::records::LogStore::open(dir.trim())?;

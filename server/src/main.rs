@@ -173,6 +173,11 @@ fn localnet_alias(c: &str) -> bool {
 /// ignored, falling through to trusted sources.
 /// A `Scope` for `url`, with `archive` attached when present — every replay
 /// (analyze, trace, profile, replay_at_slot) then gets exact historical state.
+/// Seed accounts recorded from the first poll: `seeds/mainnet.txt`, one
+/// address per line, `#` comments, most-shared first; `SVMSCOPE_RECORD_MAX_SEEDS`
+/// bounds how many are taken.
+const BUNDLED_SEEDS: &str = include_str!("../../seeds/mainnet.txt");
+
 /// The record store behind this instance (see `svmscope::records`), opened
 /// from `SVMSCOPE_RECORD_DIR` at startup; `None` when recording is off.
 static RECORDS: std::sync::LazyLock<Option<std::sync::Arc<svmscope::records::LogStore>>> =
@@ -186,14 +191,42 @@ static RECORDS: std::sync::LazyLock<Option<std::sync::Arc<svmscope::records::Log
             Ok(store) => {
                 let store = std::sync::Arc::new(store);
                 use svmscope::records::StateStore;
+                // The bundled seed list: the accounts the busiest programs'
+                // transactions share (pools, markets, vaults), regenerated
+                // with `cargo run --example seed_list`. Recording them from
+                // day one is what makes a first replay of a popular pool
+                // exact instead of "watched from now on".
+                // Each hot account costs about 1 MB a day in the dense tier,
+                // so the bundled list is taken from the top, most-shared first,
+                // up to `SVMSCOPE_RECORD_MAX_SEEDS` (default 400; 0 = none).
+                let max_seeds: usize = std::env::var("SVMSCOPE_RECORD_MAX_SEEDS")
+                    .ok()
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(400);
+                let mut seeded = 0;
+                for line in BUNDLED_SEEDS.lines() {
+                    if seeded >= max_seeds {
+                        break;
+                    }
+                    let addr = line.split('#').next().unwrap_or("").trim();
+                    if !addr.is_empty() && store.watch(addr).is_ok() {
+                        seeded += 1;
+                    }
+                }
                 for seed in std::env::var("SVMSCOPE_RECORD_SEEDS")
                     .unwrap_or_default()
                     .split(',')
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                 {
-                    let _ = store.watch(seed);
+                    if store.watch(seed).is_ok() {
+                        seeded += 1;
+                    }
                 }
+                eprintln!(
+                    "record store: {} watched ({seeded} seeds)",
+                    store.watched().map(|w| w.len()).unwrap_or(0)
+                );
                 Some(store)
             }
             Err(e) => {
@@ -374,6 +407,10 @@ fn scope_for(url: String, archive: Option<String>) -> Scope {
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(0);
     let scope = Scope::new(url).with_reconstruction_budget(budget);
+    let scope = match svmscope::history::HistoryStream::from_env() {
+        Some(stream) => scope.with_history_stream(stream),
+        None => scope,
+    };
     let scope = match RECORDS.as_ref() {
         Some(store) => {
             let dynamic: std::sync::Arc<dyn svmscope::records::StateStore> =
@@ -1797,6 +1834,14 @@ async fn api_index() -> Json<serde_json::Value> {
         // Lets the UI hide the custom-RPC field on instances that don't allow it.
         "custom_rpc": custom_rpc_allowed(),
         "custom_archive": custom_rpc_allowed(),
+        // The recorded window's first slot, so the UI can say up front whether
+        // a slot can be exact, and the programs whose state comes back from
+        // their own event logs at any date.
+        "recorded_from": RECORDS.as_ref().and_then(|s| {
+            use svmscope::records::StateStore;
+            s.covered_from().ok().flatten()
+        }),
+        "event_log_programs": ["6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"],
         "archive": "Any route that replays accepts `archive` (query or body): an archival RPC that honours a historical slot, e.g. Alchemy's Account Archive, for exact state at the transaction's slot. Same opt-in and vetting as `rpc`.",
         "endpoints": {
             "GET  /analyze/{signature}":  "Decode a transaction: CPI tree, balance & token changes, compute, and IDL-decoded accounts.",

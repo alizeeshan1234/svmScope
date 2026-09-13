@@ -1,0 +1,87 @@
+{
+  "source_url": "https://whirlpool-archive.pleiades.dev/alpha/2026/0811/whirlpool-state-20260811.json.gz",
+  "compressed_bytes": 125637979,
+  "sample_transaction": {
+    "index": 415,
+    "signature": "kEPAZpunDAXfhJ2oXbbNVJrZxBETGZWLzEYr118faVNVjsih75Y2agnwsGArbdjSWk1hQ7f5fDzY4za1pMcyvnw",
+    "payer": "MfDuWeqSHEqTFVYZ7LoexgAK9dxk7cy4DFJWjWMGVWa",
+    "balances": [
+      {
+        "account": "A99HYkvGeE5Btn5Mi2246oV4DSUAcG7CxFMuJ6vUARDy",
+        "pre": "79883908914",
+        "post": "79903797671"
+      },
+      {
+        "account": "AqKqiu9mWCPoWT1WqofQUrcyCm53VCY9tPc3PdaMDuTy",
+        "pre": "24417056584737",
+        "post": "24412147649878"
+      }
+    ],
+    "instructions": [
+      {
+        "name": "swap",
+        "payload": {
+          "dataAmount": "19888757",
+          "dataOtherAmountThreshold": "3681664327",
+          "dataSqrtPriceLimit": "1173876518611356797",
+          "dataAmountSpecifiedIsInput": 1,
+          "dataAToB": 0,
+          "keyTokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "keyTokenAuthority": "MfDuWeqSHEqTFVYZ7LoexgAK9dxk7cy4DFJWjWMGVWa",
+          "keyWhirlpool": "HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF",
+          "keyTokenOwnerAccountA": "CTyFguG69kwYrzk24P3UuBvY1rR5atu9kf2S6XEwAU8X",
+          "keyVaultA": "AqKqiu9mWCPoWT1WqofQUrcyCm53VCY9tPc3PdaMDuTy",
+          "keyTokenOwnerAccountB": "CFpaEA1rc3nQo5AfJPX4LzUzW9E4K9tXUDesjfwCoT8x",
+          "keyVaultB": "A99HYkvGeE5Btn5Mi2246oV4DSUAcG7CxFMuJ6vUARDy",
+          "keyTickArray0": "82KppHH5eWWHhhiPhwenZDFrd5eMKn3882UxusXRMvcb",
+          "keyTickArray1": "GDMZX9npyh66UhMP2E8dSEfGc5pJBHTwUDsxYZb8CT9Z",
+          "keyTickArray2": "6DxLjxvEMqAYAA95yXQQYV3NFbdSayzVZ7QnD88qCHuf",
+          "keyOracle": "8dTz9hwTXoydPyQoeaov261XyCb36WeFyjwmtkw65ce2",
+          "transferAmount0": "19888757",
+          "transferAmount1": "4908934859"
+        }
+      }
+    ]
+  },
+  "sample_slot": 438704932,
+  "scope": "Whirlpool-owned account data only; not complete Solana accounts or validated transaction execution",
+  "compressed_sha256": "5d2a4ac12ba98c764f9f61f1713494f8858d573cd06518c54e2a9bb6a4277cc9",
+  "matched_accounts": [
+    {
+      "pubkey": "6DxLjxvEMqAYAA95yXQQYV3NFbdSayzVZ7QnD88qCHuf",
+      "data_bytes": 9988,
+      "data_sha256": "66c67ef76c3857c6e08122a4aea1d271dc28414e52b0acf67d08e1a4ad0c326c",
+      "discriminator_hex": "4561bdbe6e0742bb"
+    },
+    {
+      "pubkey": "82KppHH5eWWHhhiPhwenZDFrd5eMKn3882UxusXRMvcb",
+      "data_bytes": 9988,
+      "data_sha256": "30d3b58caa198360c0c027bd56b381c03a922dc6014e7fb40170c1990cb5a16a",
+      "discriminator_hex": "4561bdbe6e0742bb"
+    },
+    {
+      "pubkey": "GDMZX9npyh66UhMP2E8dSEfGc5pJBHTwUDsxYZb8CT9Z",
+      "data_bytes": 9988,
+      "data_sha256": "b8a394790d0606235a7ef60f99f09264603b09b3ac7a7f9cdfe875990086ae05",
+      "discriminator_hex": "4561bdbe6e0742bb"
+    },
+    {
+      "pubkey": "HktfL7iwGKT5QHjywQkcDnZXScoh811k7akrMZJkCcEF",
+      "data_bytes": 653,
+      "data_sha256": "d610088e3abcbe606fff79bbc5851328d2f02729f544c144f030c510d8be47ab",
+      "discriminator_hex": "3f95d10ce1806309"
+    }
+  ],
+  "slot": 438704931,
+  "blockHeight": 416758544,
+  "blockTime": 1786492799,
+  "program": {
+    "bytes": 1537784,
+    "sha256": "a2de85d7dd2c13929fdf93190652bfeed1df6c6c4a0b9e4a31d1a5e95baebafd",
+    "prefix_hex": "7f454c4602010100"
+  },
+  "account_count": 1052402,
+  "total_account_data_bytes": 1584223548,
+  "inspection_elapsed_seconds": 19.942,
+  "gzip_crc_verified": true
+}

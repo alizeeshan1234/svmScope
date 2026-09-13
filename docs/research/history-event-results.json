@@ -1,0 +1,206 @@
+{
+  "status": "prototype_partial_state_recovery_not_full_exact_replay",
+  "recorded_on": "2026-09-13",
+  "source": "Public Solana JSON RPC, https://api.mainnet-beta.solana.com; no historical account-state API",
+  "method": "Invert four legacy Pump reserve transitions using successful, program-attributed TradeEvent logs. Inject fields into current curve bytes; ordinary replay metadata rewinds balances.",
+  "sample_selection": "Three manually chosen historical blocks; first decoded Pump event per block. Not a representative coverage estimate.",
+  "limitations": [
+    "Three selected own-transaction-slot replays only; no arbitrary-slot validation.",
+    "Current program binaries and remaining account fields are used.",
+    "Replayed compute units differ from the chain in all three samples.",
+    "Matching event amounts and four reserve fields is not byte-for-byte account-state verification.",
+    "No complete 30-day archive or production event-state integration was built."
+  ],
+  "samples": [
+    {
+      "block": {
+        "slot": 444365059,
+        "block_date_utc": "2026-09-04T22:58:59+00:00",
+        "source_sha256": "d00efbcea084c5e7576f38c74a21caf8487dc7336b1560cf8ce07a4d831b304b",
+        "transactions_in_block": 1026,
+        "trade_events": 34,
+        "consecutive_pairs": 24,
+        "matching_pairs": 24
+      },
+      "signature": "dmr57ZNeg3qUrp3eyA7RSDkwtPK2vkTw33sDKjvZp8P32PxMhZYLteUaAUPjZYm6Tb6cctRURFdrDnnNPVMc1yY",
+      "mint": "6XNLbDKj8jFquv4fMMKs9HpFNZNTSejL85X8o4iZeswx",
+      "curve": "5cN73vfAeqzWPnzhhR79SACgeeGcLGPfcuQCSCiq57Tq",
+      "candidate_pre": {
+        "virtual_sol": 58197351283,
+        "virtual_token": 553117957316003,
+        "real_sol": 28197351283,
+        "real_token": 273217957316003
+      },
+      "onchain": {
+        "compute_units": 73485,
+        "success": true,
+        "trade_sol_amount": 941170770,
+        "trade_token_amount": 9092091881136,
+        "reported_post": {
+          "virtual_sol": 57256180513,
+          "virtual_token": 562210049197139,
+          "real_sol": 27256180513,
+          "real_token": 282310049197139
+        }
+      },
+      "replays": {
+        "baseline": {
+          "success": true,
+          "error": null,
+          "compute_units": 74002,
+          "trade_sol_amount": 267475023,
+          "trade_token_amount": 9092091881136,
+          "reported_post": {
+            "virtual_sol": 30639579008,
+            "virtual_token": 1050601925195230,
+            "real_sol": 639579008,
+            "real_token": 770701925195230
+          },
+          "four_post_reserve_fields_match": false,
+          "trade_amounts_match": false
+        },
+        "event_reserves": {
+          "success": true,
+          "error": null,
+          "compute_units": 74001,
+          "trade_sol_amount": 941170770,
+          "trade_token_amount": 9092091881136,
+          "reported_post": {
+            "virtual_sol": 57256180513,
+            "virtual_token": 562210049197139,
+            "real_sol": 27256180513,
+            "real_token": 282310049197139
+          },
+          "four_post_reserve_fields_match": true,
+          "trade_amounts_match": true
+        }
+      },
+      "elapsed_seconds": 7.425191208
+    },
+    {
+      "block": {
+        "slot": 441125059,
+        "block_date_utc": "2026-08-23T09:09:50+00:00",
+        "source_sha256": "69fc11220ef0befe0fb261631e55a473b79fecb5a5b6ac204c625a017d6a6e6c",
+        "transactions_in_block": 1085,
+        "trade_events": 15,
+        "consecutive_pairs": 5,
+        "matching_pairs": 5
+      },
+      "signature": "i5NHkL3sXVKS2SfVpHnQmrCcfPA8Thff18HB1tt3dUtRB5Q4goFduCGecWDmU8oqqzDsQnMXoLu6h9T1d4HWZTw",
+      "mint": "43WDc5i2kjPmBABTr17QJT7bUpSrnpXcJMLbRxfapump",
+      "curve": "DxtgDh8Qv8H9UNbZctR1CZcHzopzGzfLj7rUDJsW21MC",
+      "candidate_pre": {
+        "virtual_sol": 56742574945,
+        "virtual_token": 567298896887284,
+        "real_sol": 26742574945,
+        "real_token": 287398896887284
+      },
+      "onchain": {
+        "compute_units": 72258,
+        "success": true,
+        "trade_sol_amount": 295552733,
+        "trade_token_amount": 2970338083261,
+        "reported_post": {
+          "virtual_sol": 56447022212,
+          "virtual_token": 570269234970545,
+          "real_sol": 26447022212,
+          "real_token": 290369234970545
+        }
+      },
+      "replays": {
+        "baseline": {
+          "success": false,
+          "error": "InstructionError(2, Custom(6024))",
+          "compute_units": 43016,
+          "trade_sol_amount": null,
+          "trade_token_amount": null,
+          "reported_post": null,
+          "four_post_reserve_fields_match": false,
+          "trade_amounts_match": false
+        },
+        "event_reserves": {
+          "success": true,
+          "error": null,
+          "compute_units": 72902,
+          "trade_sol_amount": 295552733,
+          "trade_token_amount": 2970338083261,
+          "reported_post": {
+            "virtual_sol": 56447022212,
+            "virtual_token": 570269234970545,
+            "real_sol": 26447022212,
+            "real_token": 290369234970545
+          },
+          "four_post_reserve_fields_match": true,
+          "trade_amounts_match": true
+        }
+      },
+      "elapsed_seconds": 6.50856475
+    },
+    {
+      "block": {
+        "slot": 438965059,
+        "block_date_utc": "2026-08-13T06:19:00+00:00",
+        "source_sha256": "29cbb4db8dc1e98230189aa1b2237fe7a9e0fc5aa4e2b864f29838eacdb9ca9d",
+        "transactions_in_block": 1143,
+        "trade_events": 10,
+        "consecutive_pairs": 2,
+        "matching_pairs": 2
+      },
+      "signature": "ZGF7niDfEdncxg1KKMtYruhmLtrJ8rJjeU7cVNLyYSoybMBxeTiqHu8GRCy3ruiAKALQHBBv2MkqjfptCXCZijG",
+      "mint": "5a5uqAiYodn7e9RjXr75q4uwh2miWx3vGXLKApiBpump",
+      "curve": "8SzXwztNiGK3YnyEB1zNXUdguAfDJSXmRxUH2HQkU5xH",
+      "candidate_pre": {
+        "virtual_sol": 63456522636,
+        "virtual_token": 507276458067821,
+        "real_sol": 33456522636,
+        "real_token": 227376458067821
+      },
+      "onchain": {
+        "compute_units": 100869,
+        "success": true,
+        "trade_sol_amount": 48888888,
+        "trade_token_amount": 390520765842,
+        "reported_post": {
+          "virtual_sol": 63505411524,
+          "virtual_token": 506885937301979,
+          "real_sol": 33505411524,
+          "real_token": 226985937301979
+        }
+      },
+      "replays": {
+        "baseline": {
+          "success": true,
+          "error": null,
+          "compute_units": 101522,
+          "trade_sol_amount": 48888888,
+          "trade_token_amount": 1737669271379,
+          "reported_post": {
+            "virtual_sol": 30118599299,
+            "virtual_token": 1068774805851038,
+            "real_sol": 118599299,
+            "real_token": 788874805851038
+          },
+          "four_post_reserve_fields_match": false,
+          "trade_amounts_match": false
+        },
+        "event_reserves": {
+          "success": true,
+          "error": null,
+          "compute_units": 101511,
+          "trade_sol_amount": 48888888,
+          "trade_token_amount": 390520765842,
+          "reported_post": {
+            "virtual_sol": 63505411524,
+            "virtual_token": 506885937301979,
+            "real_sol": 33505411524,
+            "real_token": 226985937301979
+          },
+          "four_post_reserve_fields_match": true,
+          "trade_amounts_match": true
+        }
+      },
+      "elapsed_seconds": 19.255138041
+    }
+  ]
+}

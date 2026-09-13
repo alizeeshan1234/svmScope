@@ -581,6 +581,7 @@ body::after {
 }
 .ov-ring.ok  { background: var(--green-soft); color: var(--green); box-shadow: inset 0 0 0 1px rgba(52,211,153,.35); }
 .ov-ring.fail { background: var(--red-soft);  color: var(--red);  box-shadow: inset 0 0 0 1px rgba(248,113,113,.35); }
+.ov-ring.warn { background: var(--amber-soft); color: var(--amber); box-shadow: inset 0 0 0 1px rgba(251,191,36,.35); }
 .ov-title { font-size: 17px; font-weight: 650; letter-spacing: -0.015em; }
 .ov-sub { color: var(--text-2); font-size: 13px; margin-top: 1px; }
 .ov-spacer { flex: 1; }
@@ -780,6 +781,8 @@ body::after {
 }
 .badge.ok { background: var(--green-soft); color: var(--green); }
 .badge.fail { background: var(--red-soft); color: var(--red); }
+.badge.warn { background: var(--amber-soft); color: var(--amber); }
+.drift-inline.notice { border-color: var(--amber); }
 .badge.neutral { background: var(--bg-2); color: var(--text-2); border: 1px solid var(--border); }
 .b-dot { width: 6px; height: 6px; border-radius: var(--r-full); background: currentColor; }
 .replay-head { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
@@ -1903,6 +1906,22 @@ function fmtUtc(sec) {
 }
 
 let analysis = null, onchainAnalysis = null, currentSig = '', mutations = [], mutableAccounts = [];
+// What this engine can make exact: the slot its recordings begin at, and the
+// programs whose state comes back from their own event logs at any date.
+const windowInfo = { recordedFrom: null, eventPrograms: [] };
+
+// Before a historical replay: is `slot` inside the exact window? If not, say
+// so up front, once, and let the user go ahead knowing what they'll get.
+function windowNotice(slot) {
+  const from = windowInfo.recordedFrom;
+  const progs = (analysis?.overview?.top_programs || []).concat((analysis?.cpi_tree || []).map(e => e.program));
+  const hasEvent = progs.some(p => windowInfo.eventPrograms.includes(p));
+  if (from == null) {
+    return `<div class="drift-inline notice">This engine has no recordings, so pool state comes from today's data and the result is labelled approximate. Balances and the clock are exact.${hasEvent ? ' pump.fun curve reserves come from the program\'s own event log.' : ''}</div>`;
+  }
+  if (slot >= from) return '';
+  return `<div class="drift-inline notice"><b>Slot ${fmt(slot)} is before this engine started recording</b> (slot ${fmt(from)}). Balances and the clock will be exact; pool state for programs without an event log will be today's, and the result will be labelled approximate rather than exact.${hasEvent ? ' pump.fun curve reserves will come from the program\'s own event log.' : ''}</div>`;
+}
 
 // API base. Empty = same origin (the Rust server serving this page locally).
 // When the frontend is hosted separately (e.g. Vercel), window.SVMSCOPE_API is
@@ -1925,6 +1944,10 @@ try {
       if (info && info.custom_rpc === false) {
         const opt = document.querySelector('#cluster option[value="custom"]');
         if (opt) opt.remove();
+      }
+      if (info) {
+        windowInfo.recordedFrom = info.recorded_from ?? null;
+        windowInfo.eventPrograms = info.event_log_programs || [];
       }
     })
     .catch(() => {});
@@ -2126,7 +2149,12 @@ function renderOverview(o, compute) {
       : analysis.slot > analysis.landed_slot
         ? `slot ${fmt(analysis.slot)}, ${fmt(analysis.slot - analysis.landed_slot)} slots after it landed`
         : `slot ${fmt(analysis.slot)}, ${fmt(analysis.landed_slot - analysis.slot)} slots before it landed`;
-    sub = `${ok ? 'Succeeds' : 'Fails'} when replayed as of ${delta}`;
+    const c = analysis.certificate || {};
+    const stale = (c.drifted || []).filter(a => !(c.accounts || []).some(x => x.address === a && x.source && (x.source.Program || x.source === 'MetadataEstimate'))).length;
+    const inconclusive = !ok && stale > 0;
+    sub = inconclusive
+      ? `Inconclusive when replayed as of ${delta}: ${stale} account${stale === 1 ? ' was' : 's were'} not recorded at that slot`
+      : `${ok ? 'Succeeds' : 'Fails'} when replayed as of ${delta}`;
     banner = `<div class="ov-banner">Replayed as of <b>${own ? 'the moment it landed' : 'slot ' + fmt(analysis.slot)}</b> — every section below comes from that replay, not the on-chain record. <a href="#" id="backOnchain">← back to what happened on-chain</a></div>`;
   }
   $('overview').innerHTML = `
@@ -2134,7 +2162,7 @@ function renderOverview(o, compute) {
     <div class="overview">
       <div class="ov-top">
         <div class="ov-status">
-          <div class="ov-ring ${ok ? 'ok' : 'fail'}">${ok ? '✓' : '✕'}</div>
+          <div class="ov-ring ${ok ? 'ok' : (at && sub.startsWith('Inconclusive') ? 'warn' : 'fail')}">${ok ? '✓' : (at && sub.startsWith('Inconclusive') ? '?' : '✕')}</div>
           <div>
             <div class="ov-title">${esc(title)}</div>
             <div class="ov-sub">${sub}</div>
@@ -2337,7 +2365,7 @@ function renderReplayPanel() {
     : `<div class="slot-cta">
          <button class="btn ghost sm" id="runReplay">▶ Replay now</button>
          <button class="btn ghost sm" id="reconSlot">⟲ Replay as it happened</button>
-         <span class="at-slot"><input id="atSlot" class="mono" type="number" min="1" placeholder="slot" title="Any slot: exact for every account recorded across it"><button class="btn ghost sm" id="reconAt">⟲ Replay at slot</button></span>
+         <span class="at-slot"><input id="atSlot" class="mono" type="number" min="1" placeholder="slot" title="Any slot: exact for every account recorded across it"><button class="btn ghost sm" id="reconAt">⟲ Replay at slot</button><span class="cu-note window-note"></span></span>
          <button class="btn ghost sm" id="openDebug" title="Step through every instruction and CPI">⋮ Step debugger</button>
          <button class="btn ghost sm" id="openProfile" title="Where the compute went: a flamegraph of every instruction">🔥 Profile compute</button>
        </div>
@@ -2422,7 +2450,7 @@ function renderReplay(r) {
   return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}
     <div class="slot-cta">
       <button class="btn ghost sm" id="reconSlot">⟲ Replay as it happened</button>
-      <span class="at-slot"><input id="atSlot" class="mono" type="number" min="1" placeholder="slot" title="Any slot: exact for every account recorded across it"><button class="btn ghost sm" id="reconAt">⟲ Replay at slot</button></span>
+      <span class="at-slot"><input id="atSlot" class="mono" type="number" min="1" placeholder="slot" title="Any slot: exact for every account recorded across it"><button class="btn ghost sm" id="reconAt">⟲ Replay at slot</button><span class="cu-note window-note"></span></span>
       <span class="cu-note">Rewind the balances and clock back to the moment this transaction landed, or rebuild the world as of any slot — free, with an accuracy report.</span>
     </div>
     <div id="certPanel"></div>
@@ -2588,6 +2616,9 @@ function renderBreakingPoints(bps) {
 function wireReplayAt() {
   const input = $('atSlot');
   if (input && analysis?.overview?.slot != null && !input.value) input.placeholder = String(analysis.overview.slot);
+  document.querySelectorAll('.window-note').forEach(el => {
+    el.textContent = windowInfo.recordedFrom != null ? `exact from slot ${fmt(windowInfo.recordedFrom)}` : 'no recordings on this engine';
+  });
   const go = () => {
     const v = Number(input?.value);
     if (!Number.isInteger(v) || v < 1) { input?.focus(); return; }
@@ -2602,7 +2633,9 @@ async function reconstructAtSlot(slot) {
   const label = slot != null ? '⟲ Replay at slot' : '⟲ Replay as it happened';
   const panel = $('certPanel');
   if (btn) { btn.disabled = true; btn.textContent = '⟲ Replaying…'; }
-  if (panel) panel.innerHTML = `<div class="status" style="text-align:left"><span class="spinner"></span>${slot != null ? 'rebuilding the world as of slot ' + fmt(slot) : 'reconstructing at the transaction\'s slot'} and replaying…</div>`;
+  const target = slot != null ? slot : analysis?.overview?.slot;
+  const notice = target != null ? windowNotice(target) : '';
+  if (panel) panel.innerHTML = notice + `<div class="status" style="text-align:left"><span class="spinner"></span>${slot != null ? 'rebuilding the world as of slot ' + fmt(slot) : 'reconstructing at the transaction\'s slot'} and replaying…</div>`;
   try {
     const q = clusterQ();
     const path = '/analyze_at/' + encodeURIComponent(currentSig) + q
@@ -2632,9 +2665,15 @@ function showOnchain() {
 function renderCertificate(d) {
   const r = d.result;
   const atOwn = d.slot == null || d.landed_slot == null || d.slot === d.landed_slot;
+  const staleCount = (d.drifted || []).filter(a => !(d.accounts || []).some(x => x.address === a && x.source && (x.source.Program || x.source === 'MetadataEstimate'))).length;
+  // A failure against state the engine knows was approximate is not a
+  // verdict on the transaction; say "inconclusive", not "failed".
+  const inconclusive = !r.success && staleCount > 0;
   const badge = r.success
     ? `<span class="badge ok"><span class="b-dot"></span>${atOwn ? 'replayed as it happened' : 'succeeds at slot ' + fmt(d.slot)}</span>`
-    : `<span class="badge fail"><span class="b-dot"></span>${atOwn ? 'replay failed' : 'fails at slot ' + fmt(d.slot)}</span>`;
+    : inconclusive
+      ? `<span class="badge warn"><span class="b-dot"></span>inconclusive at slot ${fmt(d.slot)} — ${staleCount} account${staleCount === 1 ? '' : 's'} not recorded then</span>`
+      : `<span class="badge fail"><span class="b-dot"></span>${atOwn ? 'replay failed' : 'fails at slot ' + fmt(d.slot)}</span>`;
   const delta = atOwn ? '' : (d.slot > d.landed_slot
     ? `${fmt(d.slot - d.landed_slot)} slots after it landed`
     : `${fmt(d.landed_slot - d.slot)} slots before it landed`);
@@ -2648,6 +2687,10 @@ function renderCertificate(d) {
   const stale = (d.drifted || []).filter(a => !upgraded.includes(a) && !estimated.includes(a));
   const n = stale.length;
   const recording = d.recorded_from != null;
+  const fromEvents = (d.accounts || []).filter(a => a.source && a.source.EventLog).map(a => a.address);
+  const eventNote = fromEvents.length
+    ? `<div class="drift-inline"><b>${fromEvents.length}</b> account${fromEvents.length === 1 ? "'s" : "s'"} reserves were <b>restored from the program's own event log</b> at that moment (the fields the event carries are exact; the account's other bytes are today's): ${fromEvents.map(a => `<span class="mono">${esc(a)}</span>`).join(', ')}.</div>`
+    : '';
   const estimateNote = estimated.length
     ? `<div class="drift-inline"><b>${estimated.length}</b> balance${estimated.length === 1 ? ' is' : 's are'} <b>estimated from the transaction's own record</b> (its balances ${d.slot < d.landed_slot ? 'just before' : 'right after'} it landed) because something else touched ${estimated.length === 1 ? 'that account' : 'those accounts'} in between and they weren't being recorded: ${estimated.map(a => `<span class="mono">${esc(a)}</span>`).join(', ')}.</div>`
     : '';
@@ -2665,7 +2708,7 @@ function renderCertificate(d) {
   const verify = d.verifiable && atOwn ? ' · matches the real on-chain result' : '';
   // Where each account's bytes came from, in plain words.
   const names = {
-    Recorded: 'recorded as it was', MetadataRewind: 'balance from the transaction', MetadataEstimate: 'balance estimated from the transaction', Unchanged: 'unchanged since',
+    Recorded: 'recorded as it was', MetadataRewind: 'balance from the transaction', MetadataEstimate: 'balance estimated from the transaction', EventLog: "from the program's event log", Unchanged: 'unchanged since',
     Reconstructed: 'rebuilt from history', Program: 'program code', HistoricalArchive: 'archive', CurrentRpc: "today's data", Fixture: 'fixture',
   };
   const src = Object.entries(d.sources || {})
@@ -2676,7 +2719,7 @@ function renderCertificate(d) {
   return `<div class="cert-card">
     <div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>
     <div class="cu-note" style="margin:6px 0 2px">${when}${verify}</div>
-    ${sources}${window}${err}${upgradedNote}${estimateNote}${drift}
+    ${sources}${window}${err}${eventNote}${upgradedNote}${estimateNote}${drift}
   </div>`;
 }
 

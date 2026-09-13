@@ -42,6 +42,7 @@ const PROGRAMS: &[(&str, &str)] = &[
         "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
     ),
     ("Pump AMM", "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"),
+    ("pump.fun", "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"),
 ];
 
 /// Slots after coverage start that a target must clear, so the first polling
@@ -54,6 +55,9 @@ struct Opts {
     watch_txs: usize,
     per: usize,
     json: Option<String>,
+    /// Sweep transactions this many slots old, at their own slot, with no
+    /// recording: what the free tier does for history it never watched.
+    age: Option<u64>,
 }
 
 fn parse_opts() -> Opts {
@@ -62,6 +66,7 @@ fn parse_opts() -> Opts {
         watch_txs: 8,
         per: 4,
         json: None,
+        age: None,
     };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -71,6 +76,7 @@ fn parse_opts() -> Opts {
             "--watch-txs" => o.watch_txs = val().parse().unwrap_or(8),
             "--per" => o.per = val().parse().unwrap_or(4),
             "--json" => o.json = Some(val()),
+            "--age" => o.age = val().parse().ok(),
             other => eprintln!("ignoring unknown argument {other}"),
         }
     }
@@ -339,6 +345,7 @@ fn provenance_label(p: &Provenance, is_program: bool) -> &'static str {
         Provenance::Unchanged { .. } => "unchanged",
         Provenance::Recorded { .. } => "recorded",
         Provenance::MetadataRewind => "metadata",
+        Provenance::EventLog { .. } => "event-log",
         Provenance::MetadataEstimate => "metadata~",
         Provenance::Reconstructed { exact: true, .. } => "reconstructed",
         Provenance::Reconstructed { exact: false, .. } => "reconstructed~",
@@ -367,18 +374,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let scope = Scope::new(&rpc)
         .with_reconstruction_budget(8)
         .with_records(store.clone());
+    let scope = match svmscope::history::HistoryStream::from_env() {
+        Some(stream) => scope.with_history_stream(stream),
+        None => scope,
+    };
 
     let mut candidates = if opts.record_secs > 0 {
         record(&scope, &record_rpc, &store, &opts)
     } else {
         Vec::new()
     };
-    let Some(from) = store.covered_from()? else {
-        eprintln!("the store at {dir} has no coverage yet; run with --record <secs>");
-        return Ok(());
+    // Age mode: transactions from `age` slots ago, found by seeking each
+    // program's history from a signature in the block at that slot.
+    let mut age_mode = false;
+    if let Some(age) = opts.age {
+        age_mode = true;
+        let tip = scope.client().get_slot()?;
+        let mut target = tip.saturating_sub(age);
+        let mut seek: Option<String> = None;
+        for _ in 0..8 {
+            let block: serde_json::Value = match scope.client().send(
+                RpcRequest::GetBlock,
+                serde_json::json!([target, { "transactionDetails": "signatures", "rewards": false, "maxSupportedTransactionVersion": 0 }]),
+            ) {
+                Ok(b) => b,
+                Err(_) => {
+                    target += 1;
+                    continue;
+                }
+            };
+            if let Some(sig) = block["signatures"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str())
+            {
+                seek = Some(sig.to_string());
+                break;
+            }
+            target += 1;
+        }
+        let seek = seek.ok_or("no block with signatures near the target slot")?;
+        eprintln!("age mode: transactions before slot {target} ({age} slots ago)");
+        for (label, program) in PROGRAMS {
+            let resp: serde_json::Value = scope.client().send(
+                RpcRequest::GetSignaturesForAddress,
+                serde_json::json!([program, { "before": seek, "limit": opts.per * 10 }]),
+            )?;
+            let list: Vec<svmscope::SigInfo> = resp
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|e| {
+                            Some(svmscope::SigInfo {
+                                signature: e["signature"].as_str()?.to_string(),
+                                slot: e["slot"].as_u64(),
+                                err: !e["err"].is_null(),
+                                block_time: e["blockTime"].as_i64(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            candidates.push((label, list));
+        }
+    }
+    let from = match store.covered_from()? {
+        Some(from) => from,
+        None if age_mode => 0,
+        None => {
+            eprintln!("the store at {dir} has no coverage yet; run with --record <secs>");
+            return Ok(());
+        }
     };
-    let floor = from + MARGIN_SLOTS;
-    eprintln!("coverage starts at slot {from}; targets must land after {floor}");
+    let floor = if age_mode { 0 } else { from + MARGIN_SLOTS };
+    if !age_mode {
+        eprintln!("coverage starts at slot {from}; targets must land after {floor}");
+    }
     if candidates.is_empty() {
         // Sweeping an existing store: the programs' newest signatures that
         // the window still covers.
@@ -400,7 +471,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             let Some(slot) = s.slot else { continue };
-            if slot <= floor || !store.covers(slot).unwrap_or(false) {
+            if !age_mode && (slot <= floor || !store.covers(slot).unwrap_or(false)) {
                 continue;
             }
             // A route through several programs shows up under each; count

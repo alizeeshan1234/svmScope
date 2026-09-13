@@ -62,6 +62,11 @@ pub struct Scope {
     /// exact state for hot accounts, from the moment they were first watched.
     records: Option<std::sync::Arc<dyn crate::records::StateStore>>,
 
+    /// A public account-changes stream (see [`crate::history`]) for slots
+    /// before the recordings begin: asked on demand, written through into
+    /// the record store.
+    history: Option<crate::history::HistoryStream>,
+
     /// getTransaction (json encoding) responses by signature.
     tx_cache: Mutex<HashMap<String, serde_json::Value>>,
     /// On-chain IDL by program id; `None` = checked, program publishes none.
@@ -98,6 +103,7 @@ impl Scope {
             archive: None,
             reconstruct_budget: DEFAULT_RECONSTRUCT_BUDGET,
             records: None,
+            history: None,
             tx_cache: Mutex::new(HashMap::new()),
             idl_cache: Mutex::new(HashMap::new()),
         }
@@ -162,6 +168,48 @@ impl Scope {
             .and_then(|e| e["slot"].as_u64())
     }
 
+    /// The newest transaction mentioning `address` that landed before `slot`,
+    /// as `(its slot, its record)`: three calls regardless of how busy the
+    /// account is. A signature from the block at `slot` (or the next
+    /// non-empty one) seeds `getSignaturesForAddress`'s `before` cursor, so
+    /// the history is entered at the right place instead of paged from now.
+    fn mention_tx_before(&self, address: &str, slot: u64) -> Option<(u64, serde_json::Value)> {
+        let mut seek: Option<String> = None;
+        for s in slot..slot.saturating_add(8) {
+            let block: serde_json::Value = self
+                .client
+                .send(
+                    RpcRequest::GetBlock,
+                    json!([s, { "transactionDetails": "signatures", "rewards": false, "maxSupportedTransactionVersion": 0 }]),
+                )
+                .ok()?;
+            if let Some(sig) = block["signatures"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str())
+            {
+                seek = Some(sig.to_string());
+                break;
+            }
+        }
+        let seek = seek?;
+        let resp: serde_json::Value = self
+            .client
+            .send(
+                RpcRequest::GetSignaturesForAddress,
+                json!([address, { "before": seek, "limit": 50 }]),
+            )
+            .ok()?;
+        let entry = resp
+            .as_array()?
+            .iter()
+            .find(|e| e["slot"].as_u64().is_some_and(|s| s < slot) && e["err"].is_null())?;
+        let prev_slot = entry["slot"].as_u64()?;
+        let sig = entry["signature"].as_str()?;
+        let tx = self.transaction_json(sig).ok()?;
+        Some((prev_slot, tx))
+    }
+
     /// How many old transactions a historical replay may re-execute to rebuild
     /// the accounts that changed since the target slot (the free tier of
     /// [`Scope::replay_at`]). Each drifting account costs at least one replay;
@@ -169,6 +217,15 @@ impl Scope {
     /// at current state and the certificate says so.
     pub fn with_reconstruction_budget(mut self, replays: usize) -> Scope {
         self.reconstruct_budget = replays;
+        self
+    }
+
+    /// Attach a public account-changes stream for the months before the
+    /// recordings begin. Historical replays fetch the last change of each
+    /// account they still lack before the target slot, load it, and write
+    /// it into the record store so it is never fetched twice.
+    pub fn with_history_stream(mut self, stream: crate::history::HistoryStream) -> Scope {
+        self.history = Some(stream);
         self
     }
 
@@ -326,7 +383,7 @@ impl Scope {
             self.replay_at(&signature, slot)?
         };
         let certificate = replay.certificate();
-        let (mut result, raw_diffs) = replay.ctx.run_with_diff(&[])?;
+        let (mut result, raw_diffs, inner) = replay.ctx.run_with_diff_and_inner(&[])?;
         if result.error_name.is_none() {
             result.error_name = explain_error(&result, replay.ctx.idl_map()).map(|e| e.title);
         }
@@ -337,6 +394,7 @@ impl Scope {
             &replay,
             &result,
             &raw_diffs,
+            &inner,
             slot,
             replay.time_travel.at_unix_timestamp,
         );
@@ -428,6 +486,9 @@ impl Scope {
             tx["slot"].as_u64(),
             &pre,
         )?;
+        // Lookup tables from the record: a table closed or extended since
+        // must not stop the transaction from resolving its own accounts.
+        crate::replay::synthesize_lookup_tables(&mut ctx, &tx);
         self.preload_idls(&mut ctx);
         Ok(Replay {
             recorded: Some(OnchainRecord::from_tx_json(&tx)),
@@ -562,7 +623,10 @@ impl Scope {
         let num_signers = tx["transaction"]["message"]["header"]["numRequiredSignatures"]
             .as_u64()
             .unwrap_or(1) as usize;
-        let provenance = self.reconstruct_drift(
+        // Lookup tables from the record: exact for this transaction at any
+        // slot, whatever happened to the tables since.
+        let tables = crate::replay::synthesize_lookup_tables(&mut ctx, &tx);
+        let mut provenance = self.reconstruct_drift(
             &mut ctx,
             &account_keys,
             num_signers,
@@ -570,9 +634,13 @@ impl Scope {
                 slot,
                 landed_slot,
                 signature: &signature,
+                tx: &tx,
             },
             &pre,
         );
+        for table in tables {
+            provenance.insert(table, Provenance::MetadataRewind);
+        }
         self.preload_idls(&mut ctx);
         let mut replay = Replay {
             recorded: Some(OnchainRecord::from_tx_json(&tx)),
@@ -659,8 +727,20 @@ impl Scope {
             slot,
             landed_slot,
             signature,
+            tx,
         } = target;
         let own_slot = slot == landed_slot;
+        // Events the target transaction itself logged: at its own slot, the
+        // first event for an account is that account's pre-image.
+        let own_logs: Vec<String> = tx["meta"]["logMessages"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|l| l.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let own_trades = crate::events::pump_trades(&own_logs);
         // A balance seeded from the record at another slot is exact when no
         // transaction mentioned the account between the target and the
         // landing: one signature lookup, paged from this transaction.
@@ -718,6 +798,65 @@ impl Scope {
         // on stderr, only when SVMSCOPE_TRACE_RECONSTRUCT is set.
         let trace = std::env::var_os("SVMSCOPE_TRACE_RECONSTRUCT").is_some();
         let started = std::time::Instant::now();
+        // The account-changes stream, when attached: one call for every data
+        // account the recordings do not cover, before the per-account loop.
+        // Whatever it returns is exact at the target slot and goes into the
+        // record store on the way.
+        let floor_slot = if own_slot {
+            slot.saturating_sub(1)
+        } else {
+            slot
+        };
+        let mut streamed: HashMap<String, crate::records::Version> = HashMap::new();
+        if let Some(stream) = self.history.as_ref() {
+            let wanted: Vec<String> = account_keys
+                .iter()
+                .enumerate()
+                .filter(|(index, key)| {
+                    if *index < num_signers || is_infra(key) || programs.contains(*key) {
+                        return false;
+                    }
+                    let Some(cur) = ctx.pre_account_owned(key) else {
+                        return false;
+                    };
+                    if cur.executable || (cur.owner == Address::default() && cur.data.is_empty()) {
+                        return false;
+                    }
+                    // Lookup tables are resolved from the record; the runtime
+                    // never reads their bytes here.
+                    if cur.owner.to_string() == "AddressLookupTab1e1111111111111111111111111" {
+                        return false;
+                    }
+                    // Already covered by our own recordings: nothing to ask.
+                    let covered = self.records.as_deref().is_some_and(|s| {
+                        s.covers(floor_slot).unwrap_or(false)
+                            && s.latest_at_or_before(key, floor_slot)
+                                .ok()
+                                .flatten()
+                                .is_some()
+                    });
+                    !covered
+                })
+                .map(|(_, key)| key.clone())
+                .collect();
+            if !wanted.is_empty() {
+                match stream.latest_before(&wanted, floor_slot.saturating_add(1), stream.lookback) {
+                    Ok(found) => {
+                        if trace {
+                            eprintln!(
+                                "[reconstruct {:>6.1}s] history stream: {} of {} accounts found within {} slots",
+                                started.elapsed().as_secs_f64(),
+                                found.len(),
+                                wanted.len(),
+                                stream.lookback
+                            );
+                        }
+                        streamed = found;
+                    }
+                    Err(e) => eprintln!("history stream: {e}"),
+                }
+            }
+        }
         for (index, key) in account_keys.iter().enumerate() {
             // Programs first: the well-known ones are infrastructure too, but
             // some of them (Token-2022, the associated-token program) are
@@ -753,7 +892,57 @@ impl Scope {
                 .map(|c| c.owner.to_string())
                 .unwrap_or_default();
             let is_token = owner == SPL_TOKEN || owner == SPL_TOKEN_2022;
-            if own_slot && is_token {
+            // A wallet (system-owned, no data) is only its balance, and the
+            // record's balances cover it exactly at the transaction's own slot.
+            let plain_wallet = current
+                .as_ref()
+                .is_none_or(|c| c.owner == Address::default() && c.data.is_empty());
+            if own_slot && (is_token || (plain_wallet && seeded.seeds_balance(key, true))) {
+                // A token account's bytes at the slot from the stream (its
+                // frozen state, delegate, extensions), with the transaction's
+                // own pre-balance on top: the record beats a version taken a
+                // slot earlier when a same-slot predecessor moved funds.
+                if let (true, Some(v), Ok(addr)) =
+                    (is_token, streamed.remove(key), Address::from_str(key))
+                {
+                    if let Some(st) = v.state.as_ref() {
+                        let mut data = st.data.clone();
+                        if let (Some(amount), true) = (seeded.token_amount(key), data.len() >= 72) {
+                            data[64..72].copy_from_slice(&amount.to_le_bytes());
+                        }
+                        let lamports = seeded.lamports_of(key).unwrap_or_else(|| {
+                            crate::history::lamports_for(
+                                current.as_ref().map(|c| c.lamports),
+                                data.len(),
+                            )
+                        });
+                        let account = solana_account::Account {
+                            lamports,
+                            data,
+                            owner: Address::from_str(&st.owner).unwrap_or_default(),
+                            executable: false,
+                            rent_epoch: 0,
+                        };
+                        if trace {
+                            eprintln!(
+                                "[reconstruct {:>6.1}s] {key}: token account bytes from the account-changes stream at slot {}",
+                                started.elapsed().as_secs_f64(),
+                                v.slot
+                            );
+                        }
+                        if let Some(s) = self.records.as_deref() {
+                            let stored = AccountState {
+                                data: account.data.clone(),
+                                lamports: account.lamports,
+                                owner: account.owner.to_string(),
+                            };
+                            let _ = s.record(key, v.slot, Some(&stored));
+                        }
+                        ctx.set_loaded_data(addr, Some(account));
+                        provenance.insert(key.clone(), Provenance::Recorded { slot: v.slot });
+                        continue;
+                    }
+                }
                 provenance.insert(key.clone(), Provenance::MetadataRewind);
                 continue;
             }
@@ -796,6 +985,87 @@ impl Scope {
                     ctx.set_loaded_data(addr, account);
                     provenance.insert(key.clone(), Provenance::Recorded { slot: v.slot });
                     continue;
+                }
+            }
+            // The account-changes stream had it: exact at the target, and
+            // from now on our own store has it too.
+            if let Some(v) = streamed.remove(key) {
+                let account = v.state.as_ref().map(|st| solana_account::Account {
+                    lamports: crate::history::lamports_for(
+                        current.as_ref().map(|c| c.lamports),
+                        st.data.len(),
+                    ),
+                    data: st.data.clone(),
+                    owner: Address::from_str(&st.owner).unwrap_or_default(),
+                    executable: false,
+                    rent_epoch: 0,
+                });
+                if trace {
+                    eprintln!(
+                        "[reconstruct {:>6.1}s] {key}: from the account-changes stream at slot {}",
+                        started.elapsed().as_secs_f64(),
+                        v.slot
+                    );
+                }
+                if let Some(s) = store {
+                    let stored = account.as_ref().map(|a| AccountState {
+                        data: a.data.clone(),
+                        lamports: a.lamports,
+                        owner: a.owner.to_string(),
+                    });
+                    let _ = s.record(key, v.slot, stored.as_ref());
+                }
+                ctx.set_loaded_data(addr, account);
+                provenance.insert(key.clone(), Provenance::Recorded { slot: v.slot });
+                continue;
+            }
+            // Programs that log their state: the event log gives the economic
+            // fields at the target slot without any archive. Bonding curves
+            // today; the same shape fits any program with post-state events.
+            if owner == crate::events::PUMP_PROGRAM
+                && current
+                    .as_ref()
+                    .is_some_and(|c| crate::events::is_bonding_curve(&c.data))
+            {
+                let event = if own_slot {
+                    own_trades
+                        .iter()
+                        .find(|t| crate::events::bonding_curve_of(&t.mint).as_deref() == Some(key))
+                        .map(|t| (t.pre, landed_slot))
+                } else {
+                    self.mention_tx_before(key, slot)
+                        .and_then(|(prev_slot, prev_tx)| {
+                            let logs: Vec<String> = prev_tx["meta"]["logMessages"]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|l| l.as_str().map(String::from))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            crate::events::pump_trades(&logs)
+                                .into_iter()
+                                .rev()
+                                .find(|t| {
+                                    crate::events::bonding_curve_of(&t.mint).as_deref() == Some(key)
+                                })
+                                .map(|t| (t.post, prev_slot))
+                        })
+                };
+                if let (Some((reserves, event_slot)), Some(cur)) = (event, current.as_ref()) {
+                    if let Some(data) = crate::events::patch_bonding_curve(&cur.data, reserves) {
+                        if trace {
+                            eprintln!(
+                                "[reconstruct {:>6.1}s] {key}: reserves from the program's event at slot {event_slot}",
+                                started.elapsed().as_secs_f64()
+                            );
+                        }
+                        let mut account = cur.clone();
+                        account.data = data;
+                        ctx.set_loaded_data(addr, Some(account));
+                        provenance.insert(key.clone(), Provenance::EventLog { slot: event_slot });
+                        continue;
+                    }
                 }
             }
             // At another slot, a token account or wallet the record lists
@@ -937,6 +1207,59 @@ impl Scope {
                         );
                     }
                     provenance.insert(key.clone(), Provenance::CurrentRpc);
+                }
+            }
+        }
+        // Second try for what is still on today's data: a long range over a
+        // quiet account is cheap (the stream skips blocks it does not touch).
+        if let Some(stream) = self.history.as_ref() {
+            let leftovers: Vec<String> = provenance
+                .iter()
+                .filter(|(_, p)| matches!(p, Provenance::CurrentRpc))
+                .map(|(k, _)| k.clone())
+                .collect();
+            if !leftovers.is_empty() {
+                match stream.latest_before(
+                    &leftovers,
+                    floor_slot.saturating_add(1),
+                    stream.deep_lookback,
+                ) {
+                    Ok(found) => {
+                        for (key, v) in found {
+                            let Ok(addr) = Address::from_str(&key) else {
+                                continue;
+                            };
+                            let current = ctx.pre_account_owned(&key);
+                            let account = v.state.as_ref().map(|st| solana_account::Account {
+                                lamports: crate::history::lamports_for(
+                                    current.as_ref().map(|c| c.lamports),
+                                    st.data.len(),
+                                ),
+                                data: st.data.clone(),
+                                owner: Address::from_str(&st.owner).unwrap_or_default(),
+                                executable: false,
+                                rent_epoch: 0,
+                            });
+                            if trace {
+                                eprintln!(
+                                    "[reconstruct {:>6.1}s] {key}: from the account-changes stream at slot {} (deep)",
+                                    started.elapsed().as_secs_f64(),
+                                    v.slot
+                                );
+                            }
+                            if let Some(s) = self.records.as_deref() {
+                                let stored = account.as_ref().map(|a| AccountState {
+                                    data: a.data.clone(),
+                                    lamports: a.lamports,
+                                    owner: a.owner.to_string(),
+                                });
+                                let _ = s.record(&key, v.slot, stored.as_ref());
+                            }
+                            ctx.set_loaded_data(addr, account);
+                            provenance.insert(key, Provenance::Recorded { slot: v.slot });
+                        }
+                    }
+                    Err(e) => eprintln!("history stream: {e}"),
                 }
             }
         }
@@ -1456,6 +1779,16 @@ pub enum Provenance {
     /// proof that nothing touched the account between the target and the
     /// landing. The best free estimate; it may differ.
     MetadataEstimate,
+    /// Economic fields restored from the program's own event log: the last
+    /// event before the target slot (or, at the transaction's own slot, the
+    /// transaction's first event for the account inverted through the
+    /// program's transition rules). The fields the event carries are exact;
+    /// the account's other bytes are current. Today: pump.fun bonding
+    /// curves, four reserve fields.
+    EventLog {
+        /// The slot of the transaction whose event supplied the fields.
+        slot: u64,
+    },
     /// An executable program, loaded as its current ELF. A program's bytes
     /// only change on an upgrade, which the loader stamps with its slot.
     Program {
@@ -3051,20 +3384,24 @@ struct DriftTarget<'a> {
     landed_slot: u64,
     /// The transaction, for same-slot cuts and history paging.
     signature: &'a str,
+    /// The transaction's record, for the events it logged.
+    tx: &'a serde_json::Value,
 }
 
 /// A transaction record in the shape `getTransaction` returns, with the
 /// on-chain `meta` replaced by what a replay did: logs, error, compute,
-/// SOL and token balances before and after, and inner instructions recovered
-/// from the logs (program and depth; a CPI's accounts and data are not
-/// observable from logs, so those stay empty). `slot` and `blockTime` are the
-/// replay's. Everything the analysis builders read comes from here.
+/// SOL and token balances before and after, and the inner instructions the
+/// runtime executed (program, accounts, data, stack height — everything the
+/// call tree needs to name a CPI). `slot` and `blockTime` are the replay's.
+/// Everything the analysis builders read comes from here.
+#[allow(clippy::too_many_arguments)]
 fn replayed_transaction(
     tx: &serde_json::Value,
     account_keys: &[String],
     replay: &Replay,
     result: &ReplayResult,
     raw_diffs: &[crate::replay::RawAccountDiff],
+    inner_list: &crate::replay::InnerList,
     slot: u64,
     block_time: Option<i64>,
 ) -> serde_json::Value {
@@ -3129,36 +3466,27 @@ fn replayed_transaction(
         }
     }
 
-    // Inner instructions from the logs: one entry per CPI, under the
-    // top-level instruction it happened in.
-    let mut inner: Vec<serde_json::Value> = Vec::new();
-    let mut top_index: i64 = -1;
-    for span in crate::trace::spans_from_logs(&result.logs, 0) {
-        if span.depth <= 1 {
-            top_index += 1;
-            continue;
-        }
-        let Some(program_index) = account_keys.iter().position(|k| *k == span.program) else {
-            continue;
-        };
-        let ix = json!({
-            "programIdIndex": program_index,
-            "accounts": [],
-            "data": "",
-            "stackHeight": span.depth,
-        });
-        match inner
-            .iter_mut()
-            .find(|g| g["index"].as_i64() == Some(top_index))
-        {
-            Some(group) => {
-                if let Some(list) = group["instructions"].as_array_mut() {
-                    list.push(ix);
-                }
-            }
-            None => inner.push(json!({ "index": top_index, "instructions": [ix] })),
-        }
-    }
+    // Inner instructions as the runtime executed them, in the record's
+    // shape: one group per top-level instruction that made CPIs.
+    let inner: Vec<serde_json::Value> = inner_list
+        .iter()
+        .enumerate()
+        .filter(|(_, group)| !group.is_empty())
+        .map(|(index, group)| {
+            let instructions: Vec<serde_json::Value> = group
+                .iter()
+                .map(|i| {
+                    json!({
+                        "programIdIndex": i.program_id_index,
+                        "accounts": i.accounts,
+                        "data": bs58::encode(&i.data).into_string(),
+                        "stackHeight": i.stack_height,
+                    })
+                })
+                .collect();
+            json!({ "index": index, "instructions": instructions })
+        })
+        .collect();
 
     let mut out = tx.clone();
     out["slot"] = json!(slot);

@@ -19,6 +19,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|b| b.parse().ok())
         .unwrap_or(32);
     let scope = Scope::new(&rpc).with_reconstruction_budget(budget);
+    let scope = match svmscope::history::HistoryStream::from_env() {
+        Some(stream) => scope.with_history_stream(stream),
+        None => scope,
+    };
     let scope = match std::env::var("RECORD_DIR") {
         Ok(dir) if !dir.trim().is_empty() => {
             let store = svmscope::records::LogStore::open(dir.trim())?;

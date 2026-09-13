@@ -1,0 +1,157 @@
+{
+  "description": "Read-only HEAD observations; full CAR bodies were not downloaded. Current epoch 1033 returned 404. Completed epoch files include slots outside the exact requested window.",
+  "files": [
+    {
+      "epoch": 1015,
+      "url": "https://files.old-faithful.net/1015/epoch-1015.car",
+      "http_status": 200,
+      "content_length": 1184512241422,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:29:30 GMT"
+    },
+    {
+      "epoch": 1016,
+      "url": "https://files.old-faithful.net/1016/epoch-1016.car",
+      "http_status": 200,
+      "content_length": 1150662452311,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1017,
+      "url": "https://files.old-faithful.net/1017/epoch-1017.car",
+      "http_status": 200,
+      "content_length": 968216228950,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1018,
+      "url": "https://files.old-faithful.net/1018/epoch-1018.car",
+      "http_status": 200,
+      "content_length": 1172656490725,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1019,
+      "url": "https://files.old-faithful.net/1019/epoch-1019.car",
+      "http_status": 200,
+      "content_length": 1304374594753,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1020,
+      "url": "https://files.old-faithful.net/1020/epoch-1020.car",
+      "http_status": 200,
+      "content_length": 1083582470456,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1021,
+      "url": "https://files.old-faithful.net/1021/epoch-1021.car",
+      "http_status": 200,
+      "content_length": 1030675692565,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1022,
+      "url": "https://files.old-faithful.net/1022/epoch-1022.car",
+      "http_status": 200,
+      "content_length": 1090195294217,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1023,
+      "url": "https://files.old-faithful.net/1023/epoch-1023.car",
+      "http_status": 200,
+      "content_length": 1137443365133,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1024,
+      "url": "https://files.old-faithful.net/1024/epoch-1024.car",
+      "http_status": 200,
+      "content_length": 919599891804,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:29:30 GMT"
+    },
+    {
+      "epoch": 1025,
+      "url": "https://files.old-faithful.net/1025/epoch-1025.car",
+      "http_status": 200,
+      "content_length": 869430103108,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1026,
+      "url": "https://files.old-faithful.net/1026/epoch-1026.car",
+      "http_status": 200,
+      "content_length": 849808078118,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1027,
+      "url": "https://files.old-faithful.net/1027/epoch-1027.car",
+      "http_status": 200,
+      "content_length": 757643213153,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1028,
+      "url": "https://files.old-faithful.net/1028/epoch-1028.car",
+      "http_status": 200,
+      "content_length": 625073561933,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1029,
+      "url": "https://files.old-faithful.net/1029/epoch-1029.car",
+      "http_status": 200,
+      "content_length": 718295084126,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1030,
+      "url": "https://files.old-faithful.net/1030/epoch-1030.car",
+      "http_status": 200,
+      "content_length": 789303930968,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1031,
+      "url": "https://files.old-faithful.net/1031/epoch-1031.car",
+      "http_status": 200,
+      "content_length": 951903662097,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:33:31 GMT"
+    },
+    {
+      "epoch": 1032,
+      "url": "https://files.old-faithful.net/1032/epoch-1032.car",
+      "http_status": 200,
+      "content_length": 877427805327,
+      "accept_ranges_bytes": true,
+      "observed_date": "Sat, 12 Sep 2026 23:29:30 GMT"
+    },
+    {
+      "epoch": 1033,
+      "url": "https://files.old-faithful.net/1033/epoch-1033.car",
+      "http_status": 404,
+      "content_length": 94,
+      "accept_ranges_bytes": false,
+      "observed_date": "Sat, 12 Sep 2026 23:29:30 GMT"
+    }
+  ]
+}

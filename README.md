@@ -443,15 +443,19 @@ unless `SVMSCOPE_RECORD_DIR` is set:
 | Variable | Meaning |
 |---|---|
 | `SVMSCOPE_RECORD_DIR` | Directory for the record store (per-account logs of compressed diffs). Turns the recorder on. |
-| `SVMSCOPE_RECORD_SEEDS` | Comma-separated addresses watched from the start; every account a replay had to rebuild is added automatically. |
+| `SVMSCOPE_RECORD_SEEDS` | Extra comma-separated addresses to watch from the start. The bundled list in `seeds/mainnet.txt` (the accounts the busiest programs' transactions share, most-shared first, regenerated with `cargo run --example seed_list`) is watched by default up to `SVMSCOPE_RECORD_MAX_SEEDS` (default 400, `0` for none); each hot account costs about 1 MB a day of dense recording. Every account a replay had to rebuild is added automatically. |
 | `SVMSCOPE_RECORD_RPC_URL` | Node the recorder polls, default the public mainnet RPC (one `getMultipleAccounts` per 100 accounts per round; never a paid key). |
 | `SVMSCOPE_RECORD_INTERVAL_MS` | Polling interval, default 2000. |
 | `SVMSCOPE_RECORD_GITHUB` + `SVMSCOPE_GITHUB_TOKEN` | `owner/repo` and a token with releases write scope: the durable 30-day queue. On every hour boundary and on shutdown, the versions recorded since the previous push are uploaded as an asset of that UTC day's release; releases older than 30 days are deleted; the window is restored from the releases after a redeploy, so a redeploy loses nothing. Without it the window lives on local disk only. |
 | `SVMSCOPE_RECONSTRUCT_BUDGET` | Old transactions the free tier may re-execute per drifting account that no recording covers, default 0. |
+| `SUBSTREAMS_API_KEY` | A key from [The Graph Market](https://thegraph.market) (free tier, no card): turns on the account-changes stream, which supplies any account's bytes at any slot in roughly the last three months for slots the recordings don't cover. Each version fetched is written into the record store, so it is fetched once. `SVMSCOPE_SUBSTREAMS_BIN` names the client binary (default `substreams` on `PATH`), `SVMSCOPE_SUBSTREAMS_PACKAGE` a local copy of the `solana-accounts-foundational` package so no registry lookup happens per replay (the Docker image bundles one); `SVMSCOPE_HISTORY_LOOKBACK` (2000) and `SVMSCOPE_HISTORY_DEEP_LOOKBACK` (100000) are the slot ranges searched. |
 
 The window keeps every change for 24 hours and one version per 30 seconds
-for 30 days. The fidelity certificate names the slot coverage begins at and
-labels every account: `Recorded` (a version observed before the slot with
+for 30 days; with the account-changes stream attached, slots before the
+window are served from the stream on demand and cached into the window.
+Address lookup tables are rebuilt from the transaction's own record, so a
+table closed or extended since never blocks a replay. The fidelity
+certificate names the slot coverage begins at and labels every account: `Recorded` (a version observed before the slot with
 continuous coverage across it), `MetadataRewind` (balances from the
 transaction's own metadata), `Unchanged` (verified not written since the
 slot), `Reconstructed` (re-executed write history, `exact` or not),
