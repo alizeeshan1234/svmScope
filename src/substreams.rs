@@ -211,6 +211,8 @@ pub struct Request {
     pub noop_mode: bool,
     #[prost(uint64, tag = "12")]
     pub limit_processed_blocks: u64,
+    #[prost(uint64, tag = "14")]
+    pub progress_messages_interval_ms: u64,
 }
 
 /// `sf.substreams.rpc.v2.Response`, the variants we act on. Progress and
@@ -417,6 +419,9 @@ async fn stream_accounts_async(call: &Call<'_>) -> Result<Vec<AccountsAt>> {
         modules: Some(modules),
         noop_mode: false,
         limit_processed_blocks: 0,
+        // A long range over a quiet account sends no data for minutes;
+        // progress messages keep the connection from being cut as idle.
+        progress_messages_interval_ms: 5_000,
     });
     let key = call
         .api_key

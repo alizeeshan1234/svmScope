@@ -695,6 +695,50 @@ impl Scope {
         Some(deployed > slot)
     }
 
+    /// An upgradeable program's ELF as deployed before `slot`, with the slot
+    /// of that deploy, from the account-changes stream. The programdata
+    /// account is written only by deploys and authority changes, so its
+    /// newest mention before `slot` is the deploy in force then; the stream
+    /// returns that block's version, one block wide.
+    fn program_elf_at(&self, ctx: &ReplayContext, key: &str, slot: u64) -> Option<(u64, Vec<u8>)> {
+        let stream = self.history.as_ref()?;
+        let data = match ctx.pre_account_owned(key) {
+            Some(a) => a.data,
+            None => self.account_raw(key).ok().flatten()?.3,
+        };
+        let pd_bytes: [u8; 32] = data.get(4..36)?.try_into().ok()?;
+        let pd_addr = Address::from(pd_bytes).to_string();
+        // Newest mentions first; a mention that did not write (an authority
+        // change reads it too) yields no version, so try the next one, a
+        // few at most: each is one short stream call.
+        let mentions: Vec<u64> = self
+            .signatures(&pd_addr, 25)
+            .ok()?
+            .into_iter()
+            .filter(|s| !s.err)
+            .filter_map(|s| s.slot)
+            .filter(|s| *s < slot)
+            .take(3)
+            .collect();
+        for deploy_slot in mentions {
+            let found = stream
+                .latest_before_windows(std::slice::from_ref(&pd_addr), deploy_slot + 1, 1, 1)
+                .ok()?;
+            let Some(version) = found.get(&pd_addr) else {
+                continue;
+            };
+            let state = version.state.as_ref()?;
+            if state.data.len() <= 45 {
+                return None;
+            }
+            if let Some(s) = self.records.as_deref() {
+                let _ = s.record(&pd_addr, version.slot, Some(state));
+            }
+            return Some((version.slot, state.data[45..].to_vec()));
+        }
+        None
+    }
+
     /// The free historical tier's core: decide, per account, whether current
     /// bytes are still the bytes at `slot`, and rebuild the ones that are not.
     ///
@@ -868,6 +912,24 @@ impl Scope {
             // upgradeable, and the upgrade check is one read.
             if programs.contains(key) {
                 let upgraded_since = self.program_upgraded_since(ctx, key, slot);
+                // Upgraded since the target: the bytecode live at `slot` is
+                // the programdata account's version at its last deploy
+                // before `slot`. Deploys are the only writes to programdata,
+                // so its mention history names that slot, and the stream is
+                // asked for exactly that one block.
+                if upgraded_since == Some(true) {
+                    if let Some((deploy_slot, elf)) = self.program_elf_at(ctx, key, slot) {
+                        if trace {
+                            eprintln!(
+                                "[reconstruct {:>6.1}s] {key}: bytecode from the account-changes stream, deployed at slot {deploy_slot}",
+                                started.elapsed().as_secs_f64(),
+                            );
+                        }
+                        ctx.replace_program(key, elf);
+                        provenance.insert(key.clone(), Provenance::Recorded { slot: deploy_slot });
+                        continue;
+                    }
+                }
                 provenance.insert(key.clone(), Provenance::Program { upgraded_since });
                 continue;
             }
