@@ -125,15 +125,15 @@ impl HistoryStream {
             bin,
             endpoint: ENDPOINT.to_string(),
             package,
-            lookback: num("SVMSCOPE_HISTORY_LOOKBACK", 2_000),
+            lookback: num("SVMSCOPE_HISTORY_LOOKBACK", 5_000),
             deep_lookback: num("SVMSCOPE_HISTORY_DEEP_LOOKBACK", 100_000),
             keys,
         })
     }
 
     /// The last change of each of `accounts` strictly before `slot`, searching
-    /// backwards in doubling windows: the first `first` slots, then the next
-    /// `2 * first`, and so on until every account is found or `max` slots
+    /// backwards in widening windows: the first `first` slots, then the next
+    /// `4 * first`, and so on until every account is found or `max` slots
     /// have been covered. Each window asks only for the accounts still
     /// missing, so a hot account costs one small window and a quiet one a
     /// few cheap empty ones; nothing ever streams a busy account across a
@@ -156,7 +156,9 @@ impl HistoryStream {
             missing.retain(|a| !got.contains_key(a));
             found.extend(got);
             end = start;
-            width = width.saturating_mul(2);
+            // Each client call costs tens of seconds of fixed overhead, so
+            // widen fast: 5k, 20k, 80k covers a day in three calls.
+            width = width.saturating_mul(4);
         }
         Ok(found)
     }
