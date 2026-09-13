@@ -2168,10 +2168,21 @@ function renderOverview(o, compute) {
         : `slot ${fmt(analysis.slot)}, ${fmt(analysis.landed_slot - analysis.slot)} slots before it landed`;
     const c = analysis.certificate || {};
     const stale = (c.drifted || []).filter(a => !(c.accounts || []).some(x => x.address === a && x.source && (x.source.Program || x.source === 'MetadataEstimate'))).length;
-    const inconclusive = !ok && stale > 0;
-    sub = inconclusive
-      ? `Inconclusive when replayed as of ${delta}: ${stale} account${stale === 1 ? ' was' : 's were'} not recorded at that slot`
-      : `${ok ? 'Succeeds' : 'Fails'} when replayed as of ${delta}`;
+    const driftAll = (c.drifted || []).length;
+    // The on-chain outcome, when the page came here from the on-chain view:
+    // a replay that disagrees with it is inconclusive if anything could not
+    // be proven, and a replay gap worth reporting if everything was.
+    const onchainOk = own ? onchainAnalysis?.overview?.success : null;
+    const mismatch = onchainOk != null && onchainOk !== ok;
+    if (mismatch && driftAll > 0) {
+      sub = `Inconclusive when replayed as of ${delta}: it ${ok ? 'succeeds' : 'fails'} here but ${onchainOk ? 'succeeded' : 'failed'} on-chain, and ${driftAll} account${driftAll === 1 ? '' : 's'} could not be proven exact`;
+    } else if (mismatch) {
+      sub = `${ok ? 'Succeeds' : 'Fails'} when replayed as of ${delta}, but it ${onchainOk ? 'succeeded' : 'failed'} on-chain — every account was proven, so this is a replay gap worth reporting`;
+    } else if (!ok && stale > 0) {
+      sub = `Inconclusive when replayed as of ${delta}: ${stale} account${stale === 1 ? ' was' : 's were'} not recorded at that slot`;
+    } else {
+      sub = `${ok ? 'Succeeds' : 'Fails'} when replayed as of ${delta}`;
+    }
     banner = `<div class="ov-banner">Replayed as of <b>${own ? 'the moment it landed' : 'slot ' + fmt(analysis.slot)}</b> — every section below comes from that replay, not the on-chain record. <a href="#" id="backOnchain">← back to what happened on-chain</a></div>`;
   }
   $('overview').innerHTML = `
@@ -2179,7 +2190,7 @@ function renderOverview(o, compute) {
     <div class="overview">
       <div class="ov-top">
         <div class="ov-status">
-          <div class="ov-ring ${ok ? 'ok' : (at && sub.startsWith('Inconclusive') ? 'warn' : 'fail')}">${ok ? '✓' : (at && sub.startsWith('Inconclusive') ? '?' : '✕')}</div>
+          <div class="ov-ring ${at && sub.startsWith('Inconclusive') ? 'warn' : at && sub.includes('replay gap') ? 'fail' : ok ? 'ok' : 'fail'}">${at && sub.startsWith('Inconclusive') ? '?' : at && sub.includes('replay gap') ? '!' : ok ? '✓' : '✕'}</div>
           <div>
             <div class="ov-title">${esc(title)}</div>
             <div class="ov-sub">${sub}</div>
@@ -2499,7 +2510,7 @@ function cfBox() {
 function renderReplay(r) {
   const badge = r.success ? `<span class="badge ok"><span class="b-dot"></span>replay success</span>`
                           : `<span class="badge fail"><span class="b-dot"></span>replay failed</span>`;
-  const hint = driftHint(r);
+  const hint = analysis?.slot != null ? '' : driftHint(r);
   const note = hint
     ? `<div class="drift-inline">This looks like <b>state drift</b>, not a bug: ${hint}. It succeeded on-chain — replaying against <i>current</i> state can differ. <b>❄ Freeze fixture</b> to pin the state, or try a recent / simpler transaction.</div>`
     : '';
@@ -2736,12 +2747,16 @@ function renderCertificate(d) {
   const staleCount = (d.drifted || []).filter(a => !(d.accounts || []).some(x => x.address === a && x.source && (x.source.Program || x.source === 'MetadataEstimate'))).length;
   // A failure against state the engine knows was approximate is not a
   // verdict on the transaction; say "inconclusive", not "failed".
-  const inconclusive = !r.success && staleCount > 0;
-  const badge = r.success
-    ? `<span class="badge ok"><span class="b-dot"></span>${atOwn ? 'replayed as it happened' : 'succeeds at slot ' + fmt(d.slot)}</span>`
-    : inconclusive
-      ? `<span class="badge warn"><span class="b-dot"></span>inconclusive at slot ${fmt(d.slot)} — ${staleCount} account${staleCount === 1 ? '' : 's'} not recorded then</span>`
-      : `<span class="badge fail"><span class="b-dot"></span>${atOwn ? 'replay failed' : 'fails at slot ' + fmt(d.slot)}</span>`;
+  const driftAll = (d.drifted || []).length;
+  const mismatch = atOwn && d.onchain_success != null && d.onchain_success !== r.success;
+  const inconclusive = (!r.success && staleCount > 0) || (mismatch && driftAll > 0);
+  const badge = inconclusive
+    ? `<span class="badge warn"><span class="b-dot"></span>inconclusive at slot ${fmt(d.slot)} — ${mismatch ? `${driftAll} account${driftAll === 1 ? '' : 's'} could not be proven exact` : `${staleCount} account${staleCount === 1 ? '' : 's'} not recorded then`}</span>`
+    : mismatch
+      ? `<span class="badge fail"><span class="b-dot"></span>${r.success ? 'succeeds here, failed on-chain' : 'fails here, succeeded on-chain'}</span>`
+      : r.success
+        ? `<span class="badge ok"><span class="b-dot"></span>${atOwn ? 'replayed as it happened' : 'succeeds at slot ' + fmt(d.slot)}</span>`
+        : `<span class="badge fail"><span class="b-dot"></span>${atOwn ? 'replay failed' : 'fails at slot ' + fmt(d.slot)}</span>`;
   const delta = atOwn ? '' : (d.slot > d.landed_slot
     ? `${fmt(d.slot - d.landed_slot)} slots after it landed`
     : `${fmt(d.landed_slot - d.slot)} slots before it landed`);
@@ -2777,7 +2792,9 @@ function renderCertificate(d) {
          (<a href="#" id="driftToggle">show which</a>). ${fixNote}
          <div id="driftList" class="drift-list hidden">${stale.map(esc).join('<br>')}</div></div>`
     : (upgraded.length || estimated.length || sameBlock.length ? '' : `<div class="drift-inline">Every account is as it was at that moment — this replay is exact.</div>`);
-  const verify = d.verifiable && atOwn ? ' · matches the real on-chain result' : '';
+  const verify = atOwn && d.onchain_success != null
+    ? (d.onchain_success === r.success ? ' · matches the real on-chain result' : ` · differs from the real on-chain result (it ${d.onchain_success ? 'succeeded' : 'failed'} on-chain)`)
+    : '';
   // Where each account's bytes came from, in plain words.
   const names = {
     Recorded: 'recorded as it was', MetadataRewind: 'balance from the transaction', MetadataEstimate: 'balance estimated from the transaction', EventLog: "from the program's event log", Unchanged: 'unchanged since',
@@ -3395,6 +3412,7 @@ function certificateCard(a) {
   }
   return {
     result: a.replay, clock: a.clock, drifted: c.drifted || [], verifiable: c.verifiable,
+    onchain_success: onchainAnalysis?.overview?.success,
     sources, accounts: c.accounts || [], recorded_from: c.recorded_from, slot: a.slot, landed_slot: a.landed_slot,
   };
 }
