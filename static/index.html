@@ -729,6 +729,45 @@ body::after {
 }
 .drift-inline b { color: var(--text-1); }
 .slot-cta { margin-top: var(--s-3); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* The replay bar: one primary action, one "as of" row, tools last. */
+.replay-bar { display: grid; gap: var(--s-3); margin-top: var(--s-2); }
+.replay-primary { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; }
+.replay-primary .btn { padding: 10px var(--s-5); }
+.replay-at { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; padding: var(--s-3) var(--s-4); background: var(--bg-inset); border: 1px solid var(--border); border-radius: var(--r-md); }
+.replay-at .lbl { color: var(--text-3); font-size: 12.5px; }
+.replay-at input { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--text-1); padding: 6px 8px; font-size: 12.5px; }
+.replay-at input[type=number] { width: 13ch; }
+.replay-at .window-note { flex-basis: 100%; color: var(--text-3); font-size: 12px; }
+.replay-tools { display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap; }
+.replay-tools .sep { width: 1px; height: 18px; background: var(--border); margin: 0 var(--s-1); }
+/* Section navigation for the analysis page. */
+.subnav { position: sticky; top: 58px; z-index: 30; display: flex; gap: var(--s-1); overflow-x: auto; scrollbar-width: none; padding: var(--s-2) 0; margin: 0 0 var(--s-4); background: linear-gradient(var(--bg-0) 85%, transparent); }
+.subnav::-webkit-scrollbar { display: none; }
+.subnav a { flex: 0 0 auto; color: var(--text-3); text-decoration: none; font-size: 12.5px; font-weight: 550; padding: 6px var(--s-3); border-radius: var(--r-full); border: 1px solid transparent; transition: color var(--t-fast), background var(--t-fast); }
+.subnav a:hover { color: var(--text-1); background: var(--bg-2); }
+.subnav a.on { color: var(--text-1); background: var(--bg-2); border-color: var(--border); }
+@media (max-width: 1280px) { .subnav { top: 104px; } }
+@media (max-width: 860px) { .subnav { top: 58px; } }
+/* Certificate chips: where the state came from, one glance. */
+.cert-chips { display: flex; flex-wrap: wrap; gap: var(--s-2); margin: var(--s-3) 0 var(--s-2); }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: var(--r-full); border: 1px solid var(--border); background: var(--bg-2); color: var(--text-2); font-size: 12.5px; cursor: pointer; transition: border-color var(--t-fast), color var(--t-fast); }
+.chip:hover, .chip.on { color: var(--text-1); border-color: var(--border-strong); }
+.chip b { color: var(--text-1); font-weight: 600; }
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); }
+.chip.exact .dot { background: var(--green); }
+.chip.soft .dot { background: var(--amber); }
+.chip.drift .dot { background: var(--red); }
+.acct-row .k { color: var(--text-3); font-size: 12px; }
+.acct-row.exact .k { color: var(--green); }
+.acct-row.soft .k { color: var(--amber); }
+.acct-row.drift .k { color: var(--red); }
+.more-link { color: var(--brand-strong); cursor: pointer; text-decoration: underline; }
+/* The what-if editor says what it starts from. */
+.adv-head { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; padding: var(--s-3) var(--s-4); margin-bottom: var(--s-3); background: var(--bg-inset); border: 1px solid var(--border); border-radius: var(--r-md); font-size: 13px; color: var(--text-2); }
+.adv-head b { color: var(--text-1); }
+.adv-head input { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--text-1); padding: 5px 8px; font-size: 12.5px; width: 13ch; }
+.elapsed { color: var(--text-3); font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) { .replay-primary .btn, .replay-at .btn { width: 100%; } .replay-at input[type=number] { width: 100%; } .at-time { max-width: 100%; } }
 .at-slot { display: inline-flex; align-items: center; gap: 4px; }
 .ov-banner { margin: 0 0 10px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 12.5px; color: var(--text-2, inherit); background: var(--bg-2, transparent); }
 .ov-banner a { margin-left: 8px; }
@@ -1745,6 +1784,15 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
     </div>
 
     <div id="out" class="hidden">
+      <nav class="subnav" id="subnav" aria-label="Sections">
+        <a href="#overview" data-sec="overview">Overview</a>
+        <a href="#sec-calls" data-sec="sec-calls">Calls</a>
+        <a href="#sec-balances" data-sec="sec-balances">Balances</a>
+        <a href="#onchainLogsCard" data-sec="onchainLogsCard">Logs</a>
+        <a href="#sec-replay" data-sec="sec-replay">Replay</a>
+        <a href="#sec-tests" data-sec="sec-tests">Tests</a>
+        <a href="#sec-advanced" data-sec="sec-advanced">Advanced</a>
+      </nav>
       <form class="page-search" id="pageSearch" autocomplete="off">
         <span class="hs-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></span>
         <input id="pageSig" placeholder="paste another transaction signature — or a program / account address" spellcheck="false" autocomplete="off" />
@@ -1754,10 +1802,10 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
       <div id="overview"></div>
 
       <div class="grid">
-        <div class="card"><h2>Instruction call tree <span id="treeCount" class="count"></span></h2><div id="tree" class="tree"></div></div>
+        <div class="card" id="sec-calls"><h2>Instruction call tree <span id="treeCount" class="count"></span></h2><div id="tree" class="tree"></div></div>
         <div class="col">
           <div class="card"><h2>Compute units <span id="cuCount" class="count"></span><a class="cu-link" id="cuProfileLink" title="Every BPF instruction this transaction executed, by function, as a flamegraph">🔥 see where it went →</a></h2><div id="compute" class="rows"></div></div>
-          <div class="card"><h2>SOL balance changes <span id="diffCount" class="count"></span></h2><div id="diffs" class="rows"></div></div>
+          <div class="card" id="sec-balances"><h2>SOL balance changes <span id="diffCount" class="count"></span></h2><div id="diffs" class="rows"></div></div>
           <div class="card"><h2>Token balance changes <span id="tokCount" class="count"></span></h2><div id="tokens" class="rows"></div></div>
         </div>
         <div class="card" id="introspectionCard" style="grid-column: 1 / -1" hidden><h2>Instruction introspection <span id="introspectCount" class="count"></span></h2><div id="introspection"></div></div>
@@ -1769,9 +1817,9 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
         <div id="onchainLogs"></div>
       </div>
 
-      <div class="card full" style="margin-top:16px"><h2>Local replay</h2><div id="replay"></div></div>
+      <div class="card full" style="margin-top:16px" id="sec-replay"><h2>Local replay</h2><div id="replay"></div></div>
 
-      <div class="card full" style="margin-top:16px">
+      <div class="card full" style="margin-top:16px" id="sec-tests">
         <h2>Scenario tests <span id="suiteSummary" class="count"></span></h2>
         <p class="whatif-lead">svmscope replays the <em>real</em> programs against edited state, so you can assert what
            <em>should</em> happen in each edge case — with no test harness to write. It starts you with a
@@ -1787,9 +1835,14 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
         <div id="suite" class="suite"></div>
         <div id="exportBox" class="export-box hidden"></div>
 
-        <details class="advanced">
+        <details class="advanced" id="sec-advanced">
           <summary>Advanced — edit account fields &amp; add a custom scenario <span id="acctCount" class="count"></span></summary>
           <div class="adv-body">
+            <div class="adv-head">
+              <span>Starting from</span>
+              <input id="simSlot" class="mono" type="number" min="1" placeholder="slot" title="The slot whose state the mutated replay starts from: the slot shown above, or any slot in the last 30 days">
+              <span id="simAtNote"></span>
+            </div>
             <p class="whatif-lead" style="margin-bottom:12px">Edit any field below, then <b>Stage</b> your changes and
                <b>Add as test scenario</b> to drop them into the suite above — or just <b>Simulate</b> once to preview.</p>
             <div class="editor-toolbar">
@@ -1802,7 +1855,6 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
               <button class="btn ghost sm" id="stageBtn">＋ Stage all changes</button>
               <span class="spacer"></span>
               <span id="dirtyCount" class="dirty-count"></span>
-              <span class="at-slot" title="The slot whose state the mutated replay starts from: the slot shown above, or any slot in the last 30 days"><input id="simSlot" class="mono" type="number" min="1" placeholder="slot"><span class="cu-note" id="simAtNote"></span></span>
               <button class="btn ghost sm" id="addScenario">＋ Add as test scenario</button>
               <button class="btn" id="simBtn">Simulate ⟶</button>
             </div>
@@ -2410,14 +2462,7 @@ function renderReplayPanel() {
 
   const body = analysis.replay
     ? renderReplay(analysis.replay)
-    : `<div class="slot-cta">
-         <button class="btn ghost sm" id="runReplay">▶ Replay now</button>
-         <button class="btn ghost sm" id="reconSlot">⟲ Replay as it happened</button>
-         <span class="at-slot"><input id="atSlot" class="mono" type="number" min="1" placeholder="slot" title="Any slot: exact for every account recorded across it"><span class="cu-note">or</span><input id="atTime" class="mono at-time" type="datetime-local" title="A moment in time: the nearest slot goes into the box"><button class="btn ghost sm" id="reconAt">⟲ Replay at slot</button><span class="cu-note window-note"></span></span>
-         <button class="btn ghost sm" id="openDebug" title="Step through every instruction and CPI">⋮ Step debugger</button>
-         <button class="btn ghost sm" id="openProfile" title="Where the compute went: a flamegraph of every instruction">🔥 Profile compute</button>
-       </div>
-       <span class="cu-note" style="display:block;margin-top:8px"><b>Replay now</b> re-runs this transaction against <i>today's</i> on-chain state. <b>Replay as it happened</b> rewinds the balances and clock back to the exact moment it originally landed — free, and it tells you how accurate the result is. <b>Replay at slot</b> rebuilds the world as of any slot you type: exact for every account this engine has been recording across that slot.</span>
+    : `${replayControls(true)}
        <div id="certPanel"></div>
        ${cfBox()}`;
   $('replay').innerHTML = body;
@@ -2433,6 +2478,7 @@ function renderReplayPanel() {
   wireReplayAt();
   wireSimSlot();
   wireSlotAt();
+  wireSubnav();
   $('cfRun')?.addEventListener('click', runCounterfactual);
   $('cfScanAll')?.addEventListener('click', runScan);
   $('cfNarrate')?.addEventListener('click', runNarrate);
@@ -2505,6 +2551,36 @@ function driftHint(r) {
 }
 // The counterfactual control — an account picker + "Find flip point". Shown in
 // the replay panel from the start (not gated behind a specific replay button).
+// The replay controls: the exact replay first, "as of" a slot or a time
+// below it, the tools last. `withTools` adds the today's-state replay,
+// the debugger and the profiler (wired by the panel that renders them).
+function replayControls(withTools) {
+  const landed = analysis?.overview?.slot;
+  const tools = withTools
+    ? `<div class="replay-tools">
+         <button class="btn ghost sm" id="runReplay" title="Re-run against today's on-chain state">▶ Replay against today's state</button>
+         <span class="sep"></span>
+         <button class="btn ghost sm" id="openDebug" title="Step through every instruction and CPI">⋮ Step debugger</button>
+         <button class="btn ghost sm" id="openProfile" title="Where the compute went: a flamegraph of every instruction">🔥 Profile compute</button>
+       </div>`
+    : '';
+  return `<div class="replay-bar">
+    <div class="replay-primary">
+      <button class="btn" id="reconSlot">⟲ Replay as it happened</button>
+      <span class="cu-note">the world rebuilt as of slot <span class="mono">${fmt(landed)}</span>, the moment it landed — with a certificate of where every account's state came from</span>
+    </div>
+    <div class="replay-at">
+      <span class="lbl">or as of</span>
+      <input id="atSlot" class="mono" type="number" min="1" placeholder="slot" title="Any slot in the last 30 days">
+      <span class="lbl">/</span>
+      <input id="atTime" class="mono at-time" type="datetime-local" title="A moment in time: the nearest slot goes into the box">
+      <button class="btn ghost sm" id="reconAt">⟲ Replay at slot</button>
+      <span class="cu-note window-note"></span>
+    </div>
+    ${tools}
+  </div>`;
+}
+
 function cfBox() {
   const opts = (analysis.balance_change || [])
     .map((b, i) => `<option value="${esc(b.address)}">${i === 0 ? '⛽ ' : ''}${esc(short(b.address))}</option>`)
@@ -2540,11 +2616,7 @@ function renderReplay(r) {
   const err = errText ? `<div class="err-box">${esc(errText)}</div>` : '';
   const logs = r.logs && r.logs.length ? `<div class="logs">${renderLogs(r.logs)}</div>` : '';
   return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}
-    <div class="slot-cta">
-      <button class="btn ghost sm" id="reconSlot">⟲ Replay as it happened</button>
-      <span class="at-slot"><input id="atSlot" class="mono" type="number" min="1" placeholder="slot" title="Any slot: exact for every account recorded across it"><span class="cu-note">or</span><input id="atTime" class="mono at-time" type="datetime-local" title="A moment in time: the nearest slot goes into the box"><button class="btn ghost sm" id="reconAt">⟲ Replay at slot</button><span class="cu-note window-note"></span></span>
-      <span class="cu-note">Rewind the balances and clock back to the moment this transaction landed, or rebuild the world as of any slot — free, with an accuracy report.</span>
-    </div>
+    ${replayControls(false)}
     <div id="certPanel"></div>
     ${cfBox()}`;
 }
@@ -2727,6 +2799,43 @@ function wireReplayAt() {
 
 // A date and time instead of a slot: ask the engine for the nearest slot
 // and put it in the slot box, with the block's actual time shown beside.
+// Section navigation: the pill of the section on screen is lit, and a
+// click scrolls there (opening the Advanced fold when that is the target).
+let subnavScroll = null;
+function wireSubnav() {
+  const nav = $('subnav'); if (!nav) return;
+  const links = [...nav.querySelectorAll('a')];
+  links.forEach(a => {
+    a.onclick = (e) => {
+      e.preventDefault();
+      const target = document.getElementById(a.dataset.sec);
+      if (!target) return;
+      if (target.tagName === 'DETAILS') target.open = true;
+      const y = target.getBoundingClientRect().top + window.scrollY - 150;
+      window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
+    };
+  });
+  // The lit pill is the last section whose top has passed a line a little
+  // below the sticky bars: deterministic, one pass per scroll frame.
+  if (subnavScroll) window.removeEventListener('scroll', subnavScroll);
+  let ticking = false;
+  subnavScroll = () => {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(() => {
+      ticking = false;
+      let current = links[0];
+      for (const a of links) {
+        const el = document.getElementById(a.dataset.sec);
+        if (el && el.getBoundingClientRect().top <= 170) current = a;
+      }
+      links.forEach(a => a.classList.toggle('on', a === current));
+    });
+  };
+  window.addEventListener('scroll', subnavScroll, { passive: true });
+  subnavScroll();
+}
+
 function wireSlotAt() {
   const time = $('atTime'), slot = $('atSlot');
   if (!time || !slot) return;
@@ -2760,7 +2869,9 @@ async function reconstructAtSlot(slot) {
   const notice = target != null ? windowNotice(target) : '';
   const beforeWindow = target != null && windowInfo.recordedFrom != null && target < windowInfo.recordedFrom;
   const wait = beforeWindow ? ' Fetching past account bytes from the stream: this can take one to three minutes, longer for accounts with a long history.' : '';
-  if (panel) panel.innerHTML = notice + `<div class="status" style="text-align:left"><span class="spinner"></span>${slot != null ? 'rebuilding the world as of slot ' + fmt(slot) : 'reconstructing at the transaction\'s slot'} and replaying…${wait}</div>`;
+  if (panel) panel.innerHTML = notice + `<div class="status" style="text-align:left"><span class="spinner"></span>${slot != null ? 'rebuilding the world as of slot ' + fmt(slot) : 'reconstructing at the transaction\'s slot'} and replaying… <span class="elapsed" id="elapsed"></span>${wait}</div>`;
+  const t0 = Date.now();
+  const tick = setInterval(() => { const el = $('elapsed'); if (el) el.textContent = Math.round((Date.now() - t0) / 1000) + ' s'; }, 1000);
   try {
     const q = clusterQ();
     const path = '/analyze_at/' + encodeURIComponent(currentSig) + q
@@ -2778,6 +2889,8 @@ async function reconstructAtSlot(slot) {
   } catch (e) {
     if (panel) panel.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
     if (btn) { btn.disabled = false; btn.textContent = label; }
+  } finally {
+    clearInterval(tick);
   }
 }
 
@@ -2786,6 +2899,16 @@ function showOnchain() {
   if (!onchainAnalysis) { analyze(); return; }
   analysis = onchainAnalysis; onchainAnalysis = null; mutations = [];
   renderAnalysis();
+}
+
+// A list of addresses folded past the first few: "…and N more" opens it.
+function addrList(list) {
+  const show = 3;
+  const first = list.slice(0, show).map(a => `<span class="mono">${esc(a)}</span>`).join(', ');
+  if (list.length <= show) return first;
+  const rest = list.slice(show).map(a => `<span class="mono">${esc(a)}</span>`).join(', ');
+  const id = 'more' + Math.random().toString(36).slice(2, 8);
+  return `${first}, <a href="#" class="more-link" data-more="${id}">and ${list.length - show} more</a><span id="${id}" class="hidden">, ${rest}</span>`;
 }
 
 function renderCertificate(d) {
@@ -2823,19 +2946,19 @@ function renderCertificate(d) {
   const recording = d.recorded_from != null;
   const fromEvents = (d.accounts || []).filter(a => a.source && a.source.EventLog).map(a => a.address);
   const eventNote = fromEvents.length
-    ? `<div class="drift-inline"><b>${fromEvents.length}</b> account${fromEvents.length === 1 ? "'s" : "s'"} reserves were <b>restored from the program's own event log</b> at that moment (the fields the event carries are exact; the account's other bytes are today's): ${fromEvents.map(a => `<span class="mono">${esc(a)}</span>`).join(', ')}.</div>`
+    ? `<div class="drift-inline"><b>${fromEvents.length}</b> account${fromEvents.length === 1 ? "'s" : "s'"} reserves were <b>restored from the program's own event log</b> at that moment (the fields the event carries are exact; the account's other bytes are today's): ${addrList(fromEvents)}.</div>`
     : '';
   const estimateNote = estimated.length
-    ? `<div class="drift-inline"><b>${estimated.length}</b> balance${estimated.length === 1 ? ' is' : 's are'} <b>estimated from the transaction's own record</b> (its balances ${d.slot < d.landed_slot ? 'just before' : 'right after'} it landed) because something else touched ${estimated.length === 1 ? 'that account' : 'those accounts'} in between and they weren't being recorded: ${estimated.map(a => `<span class="mono">${esc(a)}</span>`).join(', ')}.</div>`
+    ? `<div class="drift-inline"><b>${estimated.length}</b> balance${estimated.length === 1 ? ' is' : 's are'} <b>estimated from the transaction's own record</b> (its balances ${d.slot < d.landed_slot ? 'just before' : 'right after'} it landed) because something else touched ${estimated.length === 1 ? 'that account' : 'those accounts'} in between and they weren't being recorded: ${addrList(estimated)}.</div>`
     : '';
   const prefixNote = prefixed.length
     ? `<div class="drift-inline"><b>${prefixed.length}</b> account${prefixed.length === 1 ? ' was' : 's were'} <b>written by earlier transactions in the same block</b>, so those transactions were replayed first, in order, on the block's opening state: the bytes this transaction saw.${prefixedInexact.length ? ` For ${prefixedInexact.length} of them one of those transactions' inputs had to come from today's data, so they count as drift.` : ''}</div>`
     : '';
   const sameBlockNote = sameBlock.length
-    ? `<div class="drift-inline"><b>${sameBlock.length}</b> account${sameBlock.length === 1 ? ' was' : 's were'} <b>written by earlier transactions in the same block</b>, and every state source is block-granular, so this replay starts from the block's opening state for ${sameBlock.length === 1 ? 'it' : 'them'}. The outcome can differ from what landed (a price moved by a swap just before this one): ${sameBlock.map(a => `<span class="mono">${esc(a)}</span>`).join(', ')}.</div>`
+    ? `<div class="drift-inline"><b>${sameBlock.length}</b> account${sameBlock.length === 1 ? ' was' : 's were'} <b>written by earlier transactions in the same block</b>, and every state source is block-granular, so this replay starts from the block's opening state for ${sameBlock.length === 1 ? 'it' : 'them'}. The outcome can differ from what landed (a price moved by a swap just before this one): ${addrList(sameBlock)}.</div>`
     : '';
   const upgradedNote = upgraded.length
-    ? `<div class="drift-inline"><b>${upgraded.length}</b> program${upgraded.length === 1 ? ' was' : 's were'} <b>upgraded after this slot</b>, so the code that ran back then differs from the code loaded now: ${upgraded.map(a => `<span class="mono">${esc(a)}</span>`).join(', ')}.</div>`
+    ? `<div class="drift-inline"><b>${upgraded.length}</b> program${upgraded.length === 1 ? ' was' : 's were'} <b>upgraded after this slot</b>, so the code that ran back then differs from the code loaded now: ${addrList(upgraded)}.</div>`
     : '';
   const fixNote = recording
     ? `They weren't being recorded before this transaction landed; they are now, so later transactions that touch them replay exactly.`
@@ -2873,11 +2996,27 @@ function renderCertificate(d) {
     if (k === 'Reconstructed') return `rebuilt from ${v.writes} write${v.writes === 1 ? '' : 's'}${v.exact ? '' : ' (inexact)'}`;
     return names[k] || k;
   };
-  const rows = (d.accounts || []).map(a => `<div class="acct-row"><span class="mono">${esc(a.address)}</span> <span class="cu-note">${esc(labelOf(a))}</span></div>`).join('');
+  // Exact, soft (a proven-enough source), or drift, per source kind.
+  const kindOf = (a) => {
+    const so = a.source;
+    const k = typeof so === 'string' ? so : Object.keys(so || {})[0];
+    const v = typeof so === 'string' ? {} : (so || {})[k] || {};
+    if (k === 'CurrentRpc' || k === 'MetadataEstimate' || k === 'SameBlock') return 'drift';
+    if (k === 'BlockPrefix' && v.exact === false) return 'drift';
+    if (k === 'Reconstructed' && v.exact === false) return 'drift';
+    if (k === 'Program' && v.upgraded_since === true) return 'drift';
+    if (k === 'EventLog' || (k === 'Program' && v.upgraded_since == null)) return 'soft';
+    return 'exact';
+  };
+  const rows = (d.accounts || []).map(a => `<div class="acct-row ${kindOf(a)}" data-kind="${esc(typeof a.source === 'string' ? a.source : Object.keys(a.source || {})[0])}"><span class="mono">${esc(a.address)}</span> <span class="k">${esc(labelOf(a))}</span></div>`).join('');
   const listed = (d.accounts || []).length;
   const total = analysis?.overview?.account_count;
-  const omitted = total && total > listed ? ` The transaction names ${fmt(total)} accounts; the ${total - listed} not listed are signers, whose balances come from the transaction's own record, and native programs.` : '';
-  const sources = src ? `<div class="cu-note" style="margin:4px 0 2px">Where the state came from: ${src} (<a href="#" id="acctToggle">show every account</a>).${omitted}<div id="certAcctList" class="drift-list hidden">${rows}</div></div>` : '';
+  const omitted = total && total > listed ? `<span class="cu-note">${fmt(total)} accounts in the transaction; the ${total - listed} not listed are signers (balances from its own record) and native programs.</span>` : '';
+  const chipKind = (k) => k === 'CurrentRpc' || k === 'MetadataEstimate' || k === 'SameBlock' ? 'drift' : k === 'EventLog' ? 'soft' : 'exact';
+  const chips = Object.entries(d.sources || {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `<span class="chip ${chipKind(k)}" data-kind="${esc(k)}" title="show these accounts"><span class="dot"></span><b>${v}</b> ${esc(names[k] || k)}</span>`).join('');
+  const sources = src ? `<div class="cert-chips">${chips}<span class="chip" id="acctToggle" data-kind="*"><span class="dot"></span>all ${listed} accounts</span></div>${omitted}<div id="certAcctList" class="drift-list hidden">${rows}</div>` : '';
   const window = recording ? `<div class="cu-note" style="margin:2px 0 2px">This engine's own recordings begin at slot <span class="mono">${fmt(d.recorded_from)}</span>; earlier slots are served from a public account-changes stream and cached here.</div>` : '';
   return `<div class="cert-card">
     <div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>
@@ -3456,14 +3595,29 @@ function renderAnalysis() {
   if (analysis.slot != null && analysis.certificate) {
     const panel = $('certPanel');
     if (panel) panel.innerHTML = renderCertificate(certificateCard(analysis));
+    document.querySelectorAll('.more-link').forEach(a => a.addEventListener('click', (e) => {
+      e.preventDefault();
+      const t = document.getElementById(a.dataset.more); if (t) t.classList.remove('hidden');
+      a.remove();
+    }));
     $('driftToggle')?.addEventListener('click', (e) => {
       e.preventDefault();
       const d = $('driftList'); if (d) d.classList.toggle('hidden');
     });
-    $('acctToggle')?.addEventListener('click', (e) => {
-      e.preventDefault();
-      const l = $('certAcctList'); if (l) l.classList.toggle('hidden');
-      e.target.textContent = l && l.classList.contains('hidden') ? 'show every account' : 'hide the list';
+    // A chip filters the account list to its kind; the "all" chip shows
+    // everything; clicking the active chip again folds the list.
+    document.querySelectorAll('.cert-chips .chip').forEach((chip) => {
+      chip.addEventListener('click', (e) => {
+        e.preventDefault();
+        const l = $('certAcctList'); if (!l) return;
+        const kind = chip.dataset.kind;
+        const wasOn = chip.classList.contains('on');
+        document.querySelectorAll('.cert-chips .chip').forEach(c => c.classList.remove('on'));
+        if (wasOn) { l.classList.add('hidden'); return; }
+        chip.classList.add('on');
+        l.classList.remove('hidden');
+        l.querySelectorAll('.acct-row').forEach(r => { r.style.display = (kind === '*' || r.dataset.kind === kind) ? '' : 'none'; });
+      });
     });
   }
   wireCopy($('out'));
