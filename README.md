@@ -460,8 +460,14 @@ certificate names the slot coverage begins at and labels every account: `Recorde
 continuous coverage across it), `MetadataRewind` (balances from the
 transaction's own metadata), `Unchanged` (verified not written since the
 slot), `Reconstructed` (re-executed write history, `exact` or not),
-`SameBlock` (written by an earlier transaction in the same block, which no
-block-granular source can show: counted as drift),
+`BlockPrefix` (written by earlier transactions in the same block, which were
+replayed first, in order, on the block's opening state, so the bytes are what
+the transaction saw; `exact` is false, and it counts as drift, when one of
+those transactions' inputs had to come from today's data),
+`SameBlock` (the same situation when that replay was not possible: the chain
+of earlier transactions was longer than `SVMSCOPE_PREFIX_MAX_TXS` (160) or
+touched more than `SVMSCOPE_PREFIX_MAX_ACCOUNTS` (600) data accounts, or one
+of them did not succeed here: counted as drift),
 `Program` (the current ELF, with whether it was upgraded after the slot; a
 program upgraded since runs the bytecode deployed before the slot when the
 stream has it, and is then labelled `Recorded` at its deploy slot),

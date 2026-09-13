@@ -345,6 +345,8 @@ fn provenance_label(p: &Provenance, is_program: bool) -> &'static str {
         Provenance::Unchanged { .. } => "unchanged",
         Provenance::Recorded { .. } => "recorded",
         Provenance::SameBlock { .. } => "same-block",
+        Provenance::BlockPrefix { exact: true, .. } => "block-prefix",
+        Provenance::BlockPrefix { exact: false, .. } => "block-prefix~",
         Provenance::MetadataRewind => "metadata",
         Provenance::EventLog { .. } => "event-log",
         Provenance::MetadataEstimate => "metadata~",

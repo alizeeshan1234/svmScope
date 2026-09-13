@@ -168,6 +168,81 @@ impl Scope {
             .and_then(|e| e["slot"].as_u64())
     }
 
+    /// A wallet's lamports right after its newest mention at or before
+    /// `slot`, with that mention's slot: every transaction that names an
+    /// account records the account's balance after it, so the newest such
+    /// record at or before the target is the balance at the target. Pages
+    /// the mention history from the newest (or from `before`), a few pages
+    /// at most.
+    fn wallet_balance_at(
+        &self,
+        address: &str,
+        slot: u64,
+        before: Option<&str>,
+    ) -> Option<(u64, u64)> {
+        let mut cursor = before.map(String::from);
+        let mut chosen: Option<(u64, String)> = None;
+        for _ in 0..WALLET_HISTORY_PAGES {
+            let mut params = json!({ "limit": 1000 });
+            if let Some(c) = &cursor {
+                params["before"] = json!(c);
+            }
+            let resp: serde_json::Value = self
+                .client
+                .send(
+                    RpcRequest::GetSignaturesForAddress,
+                    json!([address, params]),
+                )
+                .ok()?;
+            let arr = resp["result"].as_array().or_else(|| resp.as_array())?;
+            if arr.is_empty() {
+                break;
+            }
+            for e in arr {
+                if !e["err"].is_null() {
+                    // A failed transaction still pays its fee; the balance
+                    // after it is still the balance. Keep it.
+                }
+                let (Some(s), Some(sig)) = (e["slot"].as_u64(), e["signature"].as_str()) else {
+                    continue;
+                };
+                if s <= slot {
+                    chosen = Some((s, sig.to_string()));
+                    break;
+                }
+            }
+            if chosen.is_some() {
+                break;
+            }
+            cursor = arr
+                .last()
+                .and_then(|e| e["signature"].as_str())
+                .map(String::from);
+        }
+        let (mention_slot, sig) = chosen?;
+        let tx = self.transaction_json(&sig).ok()?;
+        let mut keys: Vec<String> = tx["transaction"]["message"]["accountKeys"]
+            .as_array()?
+            .iter()
+            .filter_map(|k| {
+                k.as_str()
+                    .map(String::from)
+                    .or_else(|| k["pubkey"].as_str().map(String::from))
+            })
+            .collect();
+        for side in ["writable", "readonly"] {
+            if let Some(extra) = tx["meta"]["loadedAddresses"][side].as_array() {
+                keys.extend(extra.iter().filter_map(|k| k.as_str().map(String::from)));
+            }
+        }
+        let index = keys.iter().position(|k| k == address)?;
+        let lamports = tx["meta"]["postBalances"]
+            .as_array()?
+            .get(index)?
+            .as_u64()?;
+        Some((mention_slot, lamports))
+    }
+
     /// Up to `limit` mentions of `address` strictly before `signature`,
     /// newest first, as `(slot, signature)`.
     fn mentions_before(
@@ -1052,7 +1127,40 @@ impl Scope {
             // slot, checked at any other).
             if index < num_signers {
                 if !own_slot && seeded.seeds_balance(key, true) {
-                    provenance.insert(key.clone(), metadata_label(key));
+                    let label = metadata_label(key);
+                    // Something touched the wallet between the target and
+                    // the landing: its newest mention at or before the
+                    // target carries its balance right after that
+                    // transaction, which is its balance at the target.
+                    if matches!(label, Provenance::MetadataEstimate) {
+                        let cursor = if slot < landed_slot {
+                            Some(signature)
+                        } else {
+                            None
+                        };
+                        if let Some((mention_slot, lamports)) =
+                            self.wallet_balance_at(key, slot, cursor)
+                        {
+                            if let (Ok(addr), Some(mut acc)) =
+                                (Address::from_str(key), ctx.pre_account_owned(key))
+                            {
+                                acc.lamports = lamports;
+                                ctx.set_loaded_data(addr, Some(acc));
+                                if trace {
+                                    eprintln!(
+                                        "[reconstruct {:>6.1}s] {key}: balance {lamports} after its mention at slot {mention_slot}",
+                                        started.elapsed().as_secs_f64(),
+                                    );
+                                }
+                                provenance.insert(
+                                    key.clone(),
+                                    Provenance::Recorded { slot: mention_slot },
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                    provenance.insert(key.clone(), label);
                 }
                 continue;
             }
@@ -1393,32 +1501,359 @@ impl Scope {
         // it; token accounts keep their rewound balance, which is exact.
         if own_slot {
             let preceded = self.same_block_writes_before(slot, target.signature);
-            for (key, writes) in preceded {
-                let is_token = ctx.pre_account_owned(&key).is_some_and(|a| {
+            let is_token = |key: &str| {
+                ctx.pre_account_owned(key).is_some_and(|a| {
                     let o = a.owner.to_string();
                     o == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
                         || o == "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
-                });
-                if is_token {
-                    continue;
-                }
-                if let Some(p) = provenance.get_mut(&key) {
-                    if matches!(
-                        p,
-                        Provenance::Recorded { .. } | Provenance::Unchanged { .. }
-                    ) {
-                        if trace {
-                            eprintln!(
-                                "[reconstruct {:>6.1}s] {key}: written by {writes} earlier transaction(s) in the same block",
-                                started.elapsed().as_secs_f64(),
-                            );
-                        }
-                        *p = Provenance::SameBlock { writes };
+                })
+            };
+            let affected: Vec<String> = preceded
+                .keys()
+                .filter(|k| {
+                    !is_token(k)
+                        && matches!(
+                            provenance.get(*k),
+                            Some(Provenance::Recorded { .. } | Provenance::Unchanged { .. })
+                        )
+                })
+                .cloned()
+                .collect();
+            if !affected.is_empty() {
+                // The block's earlier transactions, replayed first on the
+                // opening state: the bytes this one actually saw.
+                let applied = self.replay_block_prefix(
+                    ctx,
+                    slot,
+                    target.signature,
+                    &affected,
+                    trace,
+                    started,
+                );
+                for key in affected {
+                    let writes = preceded.get(&key).copied().unwrap_or(0);
+                    if let Some(p) = provenance.get_mut(&key) {
+                        *p = match applied {
+                            Some((_, exact)) => Provenance::BlockPrefix { writes, exact },
+                            None => Provenance::SameBlock { writes },
+                        };
                     }
                 }
             }
         }
         provenance
+    }
+
+    /// Replay the earlier transactions of `signature`'s block that wrote
+    /// `affected` (and, transitively, the ones that wrote *their* data
+    /// inputs) on the block's opening state already in `ctx`, then bake the
+    /// resulting state back into `ctx`. Balances and token amounts of every
+    /// replayed transaction come from its own record, exact at its position;
+    /// data accounts come from the stream at the block's opening. Returns
+    /// `(transactions replayed, every input exact)`, or `None` when the
+    /// chain is too long, a transaction cannot be rebuilt, or one of them
+    /// does not succeed as it did on chain.
+    fn replay_block_prefix(
+        &self,
+        ctx: &mut ReplayContext,
+        slot: u64,
+        signature: &str,
+        affected: &[String],
+        trace: bool,
+        started: Instant,
+    ) -> Option<(usize, bool)> {
+        use crate::replay::{synthesize_lookup_tables, PreState};
+        let block: serde_json::Value = self
+            .client
+            .send(
+                RpcRequest::GetBlock,
+                json!([slot, {
+                    "encoding": "base64",
+                    "transactionDetails": "full",
+                    "maxSupportedTransactionVersion": 0,
+                    "rewards": false
+                }]),
+            )
+            .ok()?;
+        let entries = block["transactions"].as_array()?;
+        // Decode every successful transaction before ours.
+        let mut txs: Vec<BlockTx> = Vec::new();
+        for entry in entries {
+            let b64 = entry["transaction"][0].as_str()?;
+            let bytes = {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.decode(b64).ok()?
+            };
+            let tx: VersionedTransaction = bincode::deserialize(&bytes).ok()?;
+            let sig = tx
+                .signatures
+                .first()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            if sig == signature {
+                break;
+            }
+            if !entry["meta"]["err"].is_null() {
+                continue;
+            }
+            let mut t = BlockTx::new(tx, entry.clone());
+            t.index = txs.len();
+            txs.push(t);
+        }
+        // The dependency chain over data accounts: a transaction is needed
+        // when it writes something we need; then everything it touches is
+        // needed too, back to the start of the block. Wallets (signers),
+        // token accounts and programs are not chained: their state comes
+        // from each transaction's own record or is loaded outright.
+        let mut need: std::collections::HashSet<String> = affected.iter().cloned().collect();
+        let mut chosen: Vec<bool> = vec![false; txs.len()];
+        loop {
+            let mut changed = false;
+            for i in (0..txs.len()).rev() {
+                if chosen[i] {
+                    continue;
+                }
+                if txs[i].data_writes.iter().any(|k| need.contains(k)) {
+                    chosen[i] = true;
+                    changed = true;
+                    need.extend(txs[i].data_touched.iter().cloned());
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let prefix: Vec<&BlockTx> = txs
+            .iter()
+            .zip(&chosen)
+            .filter(|(_, c)| **c)
+            .map(|(t, _)| t)
+            .collect();
+        let max_txs = env_usize("SVMSCOPE_PREFIX_MAX_TXS", 160);
+        let max_accounts = env_usize("SVMSCOPE_PREFIX_MAX_ACCOUNTS", 600);
+        if prefix.is_empty() || prefix.len() > max_txs || need.len() > max_accounts {
+            if trace {
+                eprintln!(
+                    "[reconstruct {:>6.1}s] block prefix: {} transaction(s) over {} data accounts, beyond the cap ({max_txs}/{max_accounts}); labelling instead",
+                    started.elapsed().as_secs_f64(),
+                    prefix.len(),
+                    need.len()
+                );
+            }
+            return None;
+        }
+        // Data accounts the prefix needs that our own transaction does not
+        // hold: their bytes at the block's opening, from the stream. Sizes
+        // (for the stream's window choice) and a today's-data fallback come
+        // from one batched RPC read.
+        let missing: Vec<String> = need
+            .iter()
+            .filter(|k| {
+                Address::from_str(k)
+                    .map(|a| !ctx.is_loaded(&a))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        let mut exact = true;
+        if !missing.is_empty() {
+            let current = self.accounts_now(&missing);
+            let mut found = HashMap::new();
+            if let Some(stream) = self.history.as_ref() {
+                let sized: Vec<(String, usize)> = missing
+                    .iter()
+                    .map(|k| (k.clone(), current.get(k).map_or(0, |a| a.data.len())))
+                    .collect();
+                match stream.latest_before_sized(&sized, slot) {
+                    Ok(f) => found = f,
+                    Err(e) => eprintln!("history stream: {e}"),
+                }
+            }
+            for key in &missing {
+                let Ok(addr) = Address::from_str(key) else {
+                    continue;
+                };
+                let account = match found.get(key) {
+                    Some(v) => {
+                        if let Some(store) = self.records.as_deref() {
+                            let _ = store.record(key, v.slot, v.state.as_ref());
+                        }
+                        v.state.as_ref().map(|st| solana_account::Account {
+                            lamports: crate::history::lamports_for(
+                                current.get(key).map(|c| c.lamports),
+                                st.data.len(),
+                            ),
+                            data: st.data.clone(),
+                            owner: Address::from_str(&st.owner).unwrap_or_default(),
+                            executable: false,
+                            rent_epoch: 0,
+                        })
+                    }
+                    None => {
+                        // Not written within the stream's reach: a config
+                        // or something equally quiet. Today's bytes, and
+                        // the result is marked inexact.
+                        exact = false;
+                        current.get(key).cloned()
+                    }
+                };
+                if let Some(acc) = account {
+                    if acc.executable {
+                        ctx.add_program(addr, acc.data.clone());
+                    } else {
+                        ctx.set_loaded_data(addr, Some(acc));
+                    }
+                }
+            }
+            if trace {
+                eprintln!(
+                    "[reconstruct {:>6.1}s] block prefix: {} transaction(s), {} data account(s) loaded at the block's opening, {} from the stream",
+                    started.elapsed().as_secs_f64(),
+                    prefix.len(),
+                    missing.len(),
+                    found.len()
+                );
+            }
+        }
+        // Programs the prefix invokes that our transaction does not.
+        for t in &prefix {
+            for program in &t.programs {
+                let Ok(addr) = Address::from_str(program) else {
+                    continue;
+                };
+                if ctx.is_loaded(&addr) || crate::reconstruct::is_infra(program) {
+                    continue;
+                }
+                if let Some(elf) = crate::replay::fetch_program_elf(&self.client, program) {
+                    ctx.add_program(addr, elf);
+                }
+            }
+            // Lookup tables from each record, merged with ours.
+            if !t.lookups_json.is_null() {
+                synthesize_lookup_tables(ctx, &t.lookups_json);
+            }
+        }
+        // Token accounts and wallets a prefix transaction needs that nobody
+        // loaded: rebuilt from its own record.
+        for t in &prefix {
+            let pre = PreState::from_meta(&t.entry, &t.keys);
+            for key in &t.keys {
+                let Ok(addr) = Address::from_str(key) else {
+                    continue;
+                };
+                if ctx.is_loaded(&addr) || t.programs.contains(key) {
+                    continue;
+                }
+                if let Some(acc) = pre.reconstruct(key) {
+                    ctx.set_loaded_data(addr, Some(acc));
+                }
+            }
+        }
+        // Run them in order, each on the state the one before left, with its
+        // own balances rewound from its record right before it runs.
+        let mut svm = ctx.fresh_svm_with(false);
+        for t in &prefix {
+            let pre = PreState::from_meta(&t.entry, &t.keys);
+            for key in &t.keys {
+                let Ok(addr) = Address::from_str(key) else {
+                    continue;
+                };
+                if t.programs.contains(key) {
+                    continue;
+                }
+                let mut acc = match svm.get_account(&addr) {
+                    Some(a) => a,
+                    None => match pre.reconstruct(key) {
+                        Some(a) => a,
+                        None => continue,
+                    },
+                };
+                if acc.executable {
+                    continue;
+                }
+                if let Some(l) = pre.lamports_of(key) {
+                    acc.lamports = l;
+                }
+                if let Some(amount) = pre.token_amount(key) {
+                    if acc.data.len() >= 72 {
+                        acc.data[64..72].copy_from_slice(&amount.to_le_bytes());
+                    }
+                }
+                let _ = svm.set_account(addr, acc);
+            }
+            match svm.send_transaction(t.tx.clone()) {
+                Ok(_) => {}
+                Err(failed) => {
+                    if trace {
+                        eprintln!(
+                            "[reconstruct {:>6.1}s] block prefix: {} (#{}) did not succeed here: {:?}; labelling instead",
+                            started.elapsed().as_secs_f64(),
+                            &t.signature[..12.min(t.signature.len())],
+                            t.index,
+                            failed.err
+                        );
+                    }
+                    return None;
+                }
+            }
+        }
+        // Bake the state after the prefix into the context: from here on
+        // the replay, its diffs and its what-ifs start from these bytes.
+        for addr in ctx.loaded_data_addresses() {
+            if let Some(acc) = svm.get_account(&addr) {
+                ctx.set_loaded_data(addr, Some(acc));
+            }
+        }
+        if trace {
+            eprintln!(
+                "[reconstruct {:>6.1}s] block prefix: {} transaction(s) replayed before this one, inputs {}",
+                started.elapsed().as_secs_f64(),
+                prefix.len(),
+                if exact { "exact" } else { "partly today's" }
+            );
+        }
+        Some((prefix.len(), exact))
+    }
+
+    /// Current accounts for `keys`, one batched read per hundred.
+    fn accounts_now(&self, keys: &[String]) -> HashMap<String, solana_account::Account> {
+        use base64::Engine;
+        let mut out = HashMap::new();
+        for chunk in keys.chunks(100) {
+            let resp: serde_json::Value = match self.client.send(
+                RpcRequest::GetMultipleAccounts,
+                json!([chunk, { "encoding": "base64" }]),
+            ) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let Some(values) = resp["value"].as_array() else {
+                continue;
+            };
+            for (key, v) in chunk.iter().zip(values) {
+                if v.is_null() {
+                    continue;
+                }
+                let data = v["data"][0]
+                    .as_str()
+                    .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
+                    .unwrap_or_default();
+                out.insert(
+                    key.clone(),
+                    solana_account::Account {
+                        lamports: v["lamports"].as_u64().unwrap_or(0),
+                        data,
+                        owner: v["owner"]
+                            .as_str()
+                            .and_then(|o| Address::from_str(o).ok())
+                            .unwrap_or_default(),
+                        executable: v["executable"].as_bool().unwrap_or(false),
+                        rent_epoch: 0,
+                    },
+                );
+            }
+        }
+        out
     }
 
     /// Accounts that earlier successful transactions in `signature`'s block
@@ -1995,6 +2430,16 @@ pub enum Provenance {
         /// Earlier successful transactions in the block that wrote it.
         writes: usize,
     },
+    /// Written by earlier transactions in the same block, and those
+    /// transactions were replayed first, in order, on the block's opening
+    /// state, so the bytes are what this transaction saw. `exact` is false
+    /// when one of their inputs had to be taken from today's data.
+    BlockPrefix {
+        /// Earlier transactions of the block replayed before this one.
+        writes: usize,
+        /// Whether every input of those transactions was itself exact.
+        exact: bool,
+    },
     /// An executable program, loaded as its current ELF. A program's bytes
     /// only change on an upgrade, which the loader stamps with its slot.
     Program {
@@ -2216,6 +2661,7 @@ impl Replay {
                         Provenance::CurrentRpc
                             | Provenance::MetadataEstimate
                             | Provenance::SameBlock { .. }
+                            | Provenance::BlockPrefix { exact: false, .. }
                             | Provenance::Reconstructed { exact: false, .. }
                             | Provenance::Program {
                                 upgraded_since: Some(true)
@@ -3587,12 +4033,139 @@ mod preflight_input_tests {
 /// Accounts the mention-history fallback is tried for per replay, and the
 /// mentions walked per account: each step is one RPC call and one stream
 /// call, so this bounds the time a replay spends on quiet accounts.
+/// Pages of a wallet's mention history walked to find its balance at a
+/// slot (1,000 mentions each): a bot wallet can outrun this, and then the
+/// balance stays an estimate.
+const WALLET_HISTORY_PAGES: usize = 3;
 const MENTION_FALLBACK_ACCOUNTS: usize = 4;
 const MENTION_FALLBACK_STEPS: usize = 2;
 /// Mentions per history page and pages walked: a hot account has many
 /// mentions in the target block itself, which have to be paged past.
 const MENTION_PAGE: usize = 100;
 const MENTION_FALLBACK_PAGES: usize = 3;
+
+/// A transaction of the target's block, decoded from the block's record,
+/// with what the block-prefix replay needs to know about it.
+struct BlockTx {
+    index: usize,
+    signature: String,
+    tx: VersionedTransaction,
+    /// The block's record entry (`transaction`, `meta`), for its balances.
+    entry: serde_json::Value,
+    /// Every account key in message order: static, then loaded writable,
+    /// then loaded readonly.
+    keys: Vec<String>,
+    /// Programs it invokes at the top level.
+    programs: std::collections::HashSet<String>,
+    /// Data accounts (not signers, token accounts, programs or sysvars) it
+    /// may write, and every data account it touches.
+    data_writes: Vec<String>,
+    data_touched: Vec<String>,
+    /// A getTransaction-shaped value carrying its lookup-table use, for
+    /// [`crate::replay::synthesize_lookup_tables`]; null when it uses none.
+    lookups_json: serde_json::Value,
+}
+
+impl BlockTx {
+    fn new(tx: VersionedTransaction, entry: serde_json::Value) -> BlockTx {
+        let message = &tx.message;
+        let header = message.header();
+        let statics: Vec<String> = message
+            .static_account_keys()
+            .iter()
+            .map(|k| k.to_string())
+            .collect();
+        let list = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let loaded_w = list(&entry["meta"]["loadedAddresses"]["writable"]);
+        let loaded_r = list(&entry["meta"]["loadedAddresses"]["readonly"]);
+        let mut keys = statics.clone();
+        keys.extend(loaded_w.iter().cloned());
+        keys.extend(loaded_r.iter().cloned());
+        let nrs = header.num_required_signatures as usize;
+        let nros = header.num_readonly_signed_accounts as usize;
+        let nrou = header.num_readonly_unsigned_accounts as usize;
+        let writable = |i: usize| -> bool {
+            if i < statics.len() {
+                if i < nrs {
+                    i < nrs.saturating_sub(nros)
+                } else {
+                    i < statics.len().saturating_sub(nrou)
+                }
+            } else {
+                i < statics.len() + loaded_w.len()
+            }
+        };
+        let signers: std::collections::HashSet<&String> = statics.iter().take(nrs).collect();
+        let programs: std::collections::HashSet<String> = message
+            .instructions()
+            .iter()
+            .filter_map(|ix| keys.get(ix.program_id_index as usize).cloned())
+            .collect();
+        let tokens: std::collections::HashSet<String> = entry["meta"]["preTokenBalances"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|b| b["accountIndex"].as_u64())
+                    .filter_map(|i| keys.get(i as usize).cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let is_data = |k: &String| {
+            !signers.contains(k)
+                && !tokens.contains(k)
+                && !programs.contains(k)
+                && !crate::reconstruct::is_infra(k)
+        };
+        let data_touched: Vec<String> = keys.iter().filter(|k| is_data(k)).cloned().collect();
+        let data_writes: Vec<String> = keys
+            .iter()
+            .enumerate()
+            .filter(|(i, k)| writable(*i) && is_data(k))
+            .map(|(_, k)| k.clone())
+            .collect();
+        let lookups_json = match message.address_table_lookups() {
+            Some(l) if !l.is_empty() => json!({
+                "transaction": { "message": { "addressTableLookups": l.iter().map(|x| json!({
+                    "accountKey": x.account_key.to_string(),
+                    "writableIndexes": x.writable_indexes,
+                    "readonlyIndexes": x.readonly_indexes,
+                })).collect::<Vec<_>>() } },
+                "meta": { "loadedAddresses": entry["meta"]["loadedAddresses"].clone() }
+            }),
+            _ => serde_json::Value::Null,
+        };
+        BlockTx {
+            index: 0,
+            signature: tx
+                .signatures
+                .first()
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+            tx,
+            entry,
+            keys,
+            programs,
+            data_writes,
+            data_touched,
+            lookups_json,
+        }
+    }
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
 
 struct DriftTarget<'a> {
     /// The target slot.

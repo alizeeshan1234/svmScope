@@ -309,7 +309,24 @@ pub(crate) fn synthesize_lookup_tables(
         let Ok(table_addr) = Address::from_str(table) else {
             continue;
         };
-        let len = entries.iter().map(|(i, _)| i + 1).max().unwrap_or(0);
+        // A table another transaction of the same replay already resolved
+        // keeps its entries: two transactions may index the same table.
+        let existing: Vec<[u8; 32]> = ctx
+            .pre_account(table)
+            .filter(|a| a.owner == owner && a.data.len() >= LOOKUP_TABLE_META_SIZE)
+            .map(|a| {
+                a.data[LOOKUP_TABLE_META_SIZE..]
+                    .as_chunks::<32>()
+                    .0
+                    .to_vec()
+            })
+            .unwrap_or_default();
+        let len = entries
+            .iter()
+            .map(|(i, _)| i + 1)
+            .max()
+            .unwrap_or(0)
+            .max(existing.len());
         // Meta (bincode of `ProgramState::LookupTable`): discriminant 1,
         // deactivation_slot = never, last_extended_slot = 0 so every index
         // is active at any slot, no authority; zero-padded to 56 bytes.
@@ -322,6 +339,7 @@ pub(crate) fn synthesize_lookup_tables(
         data.extend_from_slice(&0u16.to_le_bytes());
         data.resize(LOOKUP_TABLE_META_SIZE, 0);
         let mut addresses = vec![[0u8; 32]; len];
+        addresses[..existing.len()].copy_from_slice(&existing);
         for (i, a) in entries {
             if let Ok(addr) = Address::from_str(&a) {
                 addresses[i] = addr.to_bytes();
@@ -726,6 +744,29 @@ impl ReplayContext {
     /// it from the world (`None`: it did not exist at the target slot). Used by
     /// historical reconstruction to overwrite current-state bytes with the
     /// state rebuilt for the slot. Programs are left alone.
+    /// Load a program's ELF that the replayed transaction itself never
+    /// names: one an earlier transaction of the same block invokes. A no-op
+    /// when the address is already loaded in any form.
+    pub(crate) fn add_program(&mut self, address: Address, elf: Vec<u8>) {
+        if self.loaded.iter().any(|(a, _)| *a == address) {
+            return;
+        }
+        self.loaded.push((address, Loaded::Program(elf)));
+    }
+
+    /// Whether `address` is loaded in any form.
+    pub(crate) fn is_loaded(&self, address: &Address) -> bool {
+        self.loaded.iter().any(|(a, _)| a == address)
+    }
+
+    /// Every loaded data account's address.
+    pub(crate) fn loaded_data_addresses(&self) -> Vec<Address> {
+        self.loaded
+            .iter()
+            .filter_map(|(a, l)| matches!(l, Loaded::Data(_)).then_some(*a))
+            .collect()
+    }
+
     pub(crate) fn set_loaded_data(&mut self, address: Address, account: Option<Account>) {
         match account {
             Some(acc) => {
@@ -1137,7 +1178,7 @@ impl PreState {
     /// Reconstruct an account that existed before the transaction but has since
     /// been closed (so `getMultipleAccounts` returns null). Returns `None` for
     /// accounts that never existed (the transaction creates those itself).
-    fn reconstruct(&self, address: &str) -> Option<Account> {
+    pub(crate) fn reconstruct(&self, address: &str) -> Option<Account> {
         // Rebuild the token base layout. In particular, retain Token-2022
         // ownership: assigning its accounts to the legacy token program makes
         // historical TransferChecked calls fail with IncorrectProgramId.

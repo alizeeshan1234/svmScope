@@ -620,6 +620,118 @@ fn replay_for(
     }
 }
 
+/// `?time=` for `/slot_at`: unix seconds, or an RFC 3339 / ISO 8601 date.
+#[derive(Deserialize)]
+struct SlotAtQuery {
+    time: String,
+    cluster: Option<String>,
+    rpc: Option<String>,
+}
+
+/// GET /slot_at?time=… — the slot nearest a moment in time: estimated from
+/// the tip at 400 ms per slot, then corrected against real block times a
+/// few rounds until within a couple of seconds. Skipped slots borrow the
+/// next block's time.
+async fn slot_at_handler(
+    Query(q): Query<SlotAtQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let target = parse_time(&q.time).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "time must be unix seconds or an ISO 8601 date".to_string(),
+        )
+    })?;
+    let (url, archive) = endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), None);
+    let out = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, svmscope::Error> {
+        let scope = scope_for(url, archive);
+        let client = scope.client();
+        let tip = client
+            .get_slot()
+            .map_err(|_| svmscope::Error::Fixture("cannot read the current slot".into()))?;
+        let block_time_of = |s: u64| {
+            (s..s.saturating_add(8)).find_map(|x| client.get_block_time(x).ok().map(|t| (x, t)))
+        };
+        let (_, tip_time) = block_time_of(tip.saturating_sub(32))
+            .ok_or_else(|| svmscope::Error::Fixture("cannot read the tip's block time".into()))?;
+        if target > tip_time + 60 {
+            return Err(svmscope::Error::Fixture(format!(
+                "{} is in the future",
+                q.time
+            )));
+        }
+        let mut slot = tip
+            .saturating_sub(32)
+            .saturating_sub(((tip_time - target).max(0) as f64 / 0.4) as u64);
+        let mut best = None;
+        for _ in 0..6 {
+            let Some((s, t)) = block_time_of(slot.max(1)) else {
+                break;
+            };
+            best = Some((s, t));
+            let delta = target - t;
+            if delta.abs() <= 2 {
+                break;
+            }
+            slot = (s as i64 + (delta as f64 / 0.4) as i64).max(1) as u64;
+        }
+        let (s, t) =
+            best.ok_or_else(|| svmscope::Error::Fixture("no block near that time".into()))?;
+        Ok(json!({ "slot": s, "block_time": t, "requested": target }))
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
+    out.map(Json).map_err(lib_err)
+}
+
+/// Unix seconds from `text`: digits as-is, else an ISO 8601 date with an
+/// optional time, treated as UTC when no offset is given.
+fn parse_time(text: &str) -> Option<i64> {
+    let t = text.trim();
+    if let Ok(n) = t.parse::<i64>() {
+        return Some(if n > 1_000_000_000_000 { n / 1000 } else { n });
+    }
+    // YYYY-MM-DD[THH:MM[:SS]][Z|±HH:MM]
+    let (date, rest) = t.split_at(t.find('T').unwrap_or(t.len()));
+    let mut parts = date.split('-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: i64 = parts.next()?.parse().ok()?;
+    let d: i64 = parts.next()?.parse().ok()?;
+    let rest = rest.trim_start_matches('T');
+    let (clock, offset) = match rest.find(['Z', '+', '-']) {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let mut hms = clock.split(':');
+    let hh: i64 = hms
+        .next()
+        .filter(|x| !x.is_empty())
+        .map(|x| x.parse().ok())
+        .unwrap_or(Some(0))?;
+    let mm: i64 = hms.next().map(|x| x.parse().ok()).unwrap_or(Some(0))?;
+    let ss: i64 = hms.next().map(|x| x.parse().ok()).unwrap_or(Some(0))?;
+    // Days from civil (Howard Hinnant).
+    let (y2, m2) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let doy = (153 * m2 + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let mut secs = days * 86_400 + hh * 3600 + mm * 60 + ss;
+    if !offset.is_empty() && offset != "Z" {
+        let sign = if offset.starts_with('-') { -1 } else { 1 };
+        let mut o = offset[1..].split(':');
+        let oh: i64 = o.next()?.parse().ok()?;
+        let om: i64 = o.next().map(|x| x.parse().ok()).unwrap_or(Some(0))?;
+        secs -= sign * (oh * 3600 + om * 60);
+    }
+    Some(secs)
+}
+
 /// GET /analyze/:signature — decode + replay a transaction, return JSON.
 async fn analyze_handler(
     Path(signature): Path<String>,
@@ -1923,6 +2035,7 @@ async fn api_index() -> Json<serde_json::Value> {
         }),
         "event_log_programs": ["6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"],
         "replay_window_days": replay_window_days(),
+        "slot_at": "/slot_at?time=<unix seconds | ISO 8601> → the nearest slot",
         "archive": "Any route that replays accepts `archive` (query or body): an archival RPC that honours a historical slot, e.g. Alchemy's Account Archive, for exact state at the transaction's slot. Same opt-in and vetting as `rpc`.",
         "endpoints": {
             "GET  /analyze/{signature}":  "Decode a transaction: CPI tree, balance & token changes, compute, and IDL-decoded accounts.",
@@ -2175,6 +2288,7 @@ async fn main() {
         .route("/account/{address}", get(account_handler))
         .route("/signatures/{address}", get(signatures_handler))
         .route("/replay/{signature}", get(replay_handler))
+        .route("/slot_at", get(slot_at_handler))
         .route("/replay_at_slot/{signature}", get(replay_at_slot_handler))
         .route("/replay_at/{signature}", get(replay_at_handler))
         .route("/analyze_at/{signature}", get(analyze_at_handler))
