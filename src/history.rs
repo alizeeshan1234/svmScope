@@ -70,6 +70,14 @@ static STREAM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static LIMIT_HIT_UNTIL: std::sync::Mutex<Option<HashMap<String, std::time::Instant>>> =
     std::sync::Mutex::new(None);
 const LIMIT_BACKOFF: Duration = Duration::from_secs(300);
+/// Waits between retries of a call the provider answered with its limit,
+/// before the key is backed off: a finished stream stays counted for a
+/// few seconds, so back-to-back calls collide with our own last one.
+const LIMIT_RETRY_WAITS: &[Duration] = &[
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+    Duration::from_secs(20),
+];
 
 fn key_backed_off(key: &str) -> bool {
     let guard = LIMIT_HIT_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
@@ -161,7 +169,16 @@ impl HistoryStream {
         let floor = slot.saturating_sub(max).max(1);
         while !missing.is_empty() && end > floor {
             let start = end.saturating_sub(width).max(floor);
-            let got = self.latest_before_in(&missing, start, end)?;
+            // A window that fails after earlier ones succeeded does not
+            // lose what they found: those versions are exact regardless.
+            let got = match self.latest_before_in(&missing, start, end) {
+                Ok(got) => got,
+                Err(e) if found.is_empty() => return Err(e),
+                Err(e) => {
+                    eprintln!("history stream: {e}; keeping {} found so far", found.len());
+                    break;
+                }
+            };
             missing.retain(|a| !got.contains_key(a));
             found.extend(got);
             end = start;
@@ -265,10 +282,21 @@ impl HistoryStream {
                     deadline: CALL_DEADLINE,
                 };
                 let mut attempt = substreams::stream_accounts(&call);
-                if let Err(e) = &attempt {
-                    if !substreams::is_stream_limit(&e.to_string()) {
-                        std::thread::sleep(Duration::from_secs(2));
-                        attempt = substreams::stream_accounts(&call);
+                // A limit answer right after our own previous call is the
+                // server still counting that finished stream: wait a few
+                // seconds and ask again before giving the key up.
+                for wait in LIMIT_RETRY_WAITS {
+                    match &attempt {
+                        Err(e) if substreams::is_stream_limit(&e.to_string()) => {
+                            std::thread::sleep(*wait);
+                            attempt = substreams::stream_accounts(&call);
+                        }
+                        Err(_) => {
+                            std::thread::sleep(Duration::from_secs(2));
+                            attempt = substreams::stream_accounts(&call);
+                            break;
+                        }
+                        Ok(_) => break,
                     }
                 }
                 match attempt {
