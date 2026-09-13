@@ -566,6 +566,10 @@ pub struct SuiteRequest {
     /// Path to a frozen fixture file for the offline path.
     #[serde(default)]
     pub fixture: Option<String>,
+    /// Replay at this slot (the transaction's own, or any other) before each
+    /// scenario's mutations apply: the world as of then, the what-if on top.
+    #[serde(default)]
+    pub slot: Option<u64>,
     /// Cluster name (mainnet/devnet/testnet/localnet) for the live-signature path.
     #[serde(default)]
     pub cluster: Option<String>,

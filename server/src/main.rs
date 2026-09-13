@@ -481,6 +481,10 @@ fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> String {
 #[derive(Deserialize)]
 struct SimRequest {
     signature: String,
+    /// Replay at this slot (the transaction's own, or any other) before the
+    /// mutations apply: the world as of then, then the what-if on top.
+    #[serde(default)]
+    slot: Option<u64>,
     mutations: Vec<MutationInput>,
     /// Optional clock warp — test time-gated logic without waiting.
     #[serde(default)]
@@ -572,8 +576,8 @@ fn replay_window_days() -> u64 {
 /// cannot be read pass: the engine labels what it cannot prove anyway.
 fn check_replay_window(scope: &Scope, slot: u64) -> Result<(), svmscope::Error> {
     let days = replay_window_days();
-    let block_time = (slot..slot.saturating_add(8))
-        .find_map(|s| scope.client().get_block_time(s).ok());
+    let block_time =
+        (slot..slot.saturating_add(8)).find_map(|s| scope.client().get_block_time(s).ok());
     let Some(t) = block_time else {
         return Ok(());
     };
@@ -588,6 +592,30 @@ fn check_replay_window(scope: &Scope, slot: u64) -> Result<(), svmscope::Error> 
         )));
     }
     Ok(())
+}
+
+/// The replay a what-if builds on: today's state with balances rewound
+/// (no slot), or the world as of `slot` (inside the window).
+fn replay_for(
+    scope: &Scope,
+    signature: &str,
+    slot: Option<u64>,
+) -> Result<svmscope::Replay, svmscope::Error> {
+    let Some(slot) = slot else {
+        return scope.replay(signature);
+    };
+    if slot == 0 {
+        return Err(svmscope::Error::Fixture("slot must be positive".into()));
+    }
+    check_replay_window(scope, slot)?;
+    let landed = scope
+        .landed_slot(signature)?
+        .ok_or_else(|| svmscope::Error::TransactionNotFound(signature.to_string()))?;
+    if slot == landed {
+        scope.replay_at_slot(signature)
+    } else {
+        scope.replay_at(signature, slot)
+    }
 }
 
 /// GET /analyze/:signature — decode + replay a transaction, return JSON.
@@ -651,7 +679,8 @@ async fn simulate_handler(
         req.archive.as_deref(),
     );
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
-        let mut replay = scope_for(url, archive).replay(&req.signature)?;
+        let scope = scope_for(url, archive);
+        let mut replay = replay_for(&scope, &req.signature, req.slot)?;
         replay.set_time_travel(req.time_travel);
         replay.set_features(features);
         Ok(replay.simulate(&mutations)?.result)
@@ -707,7 +736,8 @@ async fn suite_handler(
 
     let result =
         tokio::task::spawn_blocking(move || -> Result<Vec<ScenarioOutcome>, svmscope::Error> {
-            let mut replay = scope_for(url, archive).replay(&signature)?;
+            let scope = scope_for(url, archive);
+            let mut replay = replay_for(&scope, &signature, req.slot)?;
             replay.set_time_travel(req.time_travel);
             replay.set_features(features);
             replay.run_suite(&scenarios)

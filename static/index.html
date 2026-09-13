@@ -2404,6 +2404,9 @@ function renderReplayPanel() {
   $('cfNarrate')?.addEventListener('click', runNarrate);
 }
 // Fetch the baseline replay once and cache it on `analysis.replay`.
+// When the page shows a replay at a slot, what-ifs build on that same world.
+const atSlotParam = () => (analysis?.slot != null ? { slot: analysis.slot } : {});
+
 async function ensureBaseline() {
   if (analysis.replay) return analysis.replay;
   const res = await api('/replay/' + encodeURIComponent(currentSig) + clusterQ());
@@ -2877,7 +2880,7 @@ async function runSuite() {
       return s;
     });
     const res = await api('/simulate_suite', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, scenarios, time_travel: timeTravel, features: activeFeatures, ...clusterParams() }) });
+      body: JSON.stringify({ signature: currentSig, scenarios, time_travel: timeTravel, features: activeFeatures, ...atSlotParam(), ...clusterParams() }) });
     if (!res.ok) throw new Error(await res.text());
     const outcomes = await res.json();
     outcomes.forEach((o, i) => {
@@ -3366,7 +3369,7 @@ async function simulate() {
     // Need the un-mutated baseline for the before/after comparison; fetch it lazily.
     const before = await ensureBaseline();
     const res = await api('/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m), time_travel: timeTravel, features: activeFeatures, ...clusterParams() }) });
+      body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m), time_travel: timeTravel, features: activeFeatures, ...atSlotParam(), ...clusterParams() }) });
     if (!res.ok) throw new Error(await res.text());
     showResult(before, await res.json(), { n: toSend.length });
   } catch (e) { flashSim('error: ' + e.message, true); }
