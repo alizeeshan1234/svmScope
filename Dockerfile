@@ -14,9 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy only what the server crate needs to compile. Everything embedded with
 # `include_str!`/`include_bytes!` must be present during the build:
-# static/index.html (server), symbols/corpus.jsonl.gz (profiler shape corpus)
-# and idls/*.json (bundled IDLs). A missing directory fails the build with
-# "couldn't read src/../<dir>/<file>".
+# static/index.html (server), symbols/corpus.jsonl.gz (profiler shape corpus),
+# idls/*.json (bundled IDLs), seeds/mainnet.txt (recorder seeds) and
+# assets/*.spkg (the account-changes stream package). A missing directory
+# fails the build with "couldn't read src/../<dir>/<file>".
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
 COPY server ./server
@@ -25,6 +26,7 @@ COPY symbols ./symbols
 COPY idls ./idls
 COPY vendor ./vendor
 COPY seeds ./seeds
+COPY assets ./assets
 
 RUN cargo build --release -p svmscope-server --features single-run
 
