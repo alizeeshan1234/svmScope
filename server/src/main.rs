@@ -62,6 +62,8 @@ struct ClusterQuery {
     rpc: Option<String>,
     /// Optional archival RPC for exact historical state; vetted like `rpc`.
     archive: Option<String>,
+    /// For the what-if endpoints: build on the replay as of this slot.
+    slot: Option<u64>,
 }
 
 /// True if `ip` is one the public server must never be tricked into fetching —
@@ -1718,6 +1720,9 @@ async fn replay_at_slot_handler(
 struct CounterfactualQuery {
     /// The account whose lamport balance to search.
     account: String,
+    /// Build on the replay as of this slot (the transaction's own or any
+    /// other inside the window) instead of today's state.
+    slot: Option<u64>,
     /// Search range (lamports); defaults 0 .. 0.1 SOL.
     lo: Option<u64>,
     hi: Option<u64>,
@@ -1761,10 +1766,11 @@ async fn counterfactual_handler(
         ));
     }
     let account = q.account.clone();
+    let at_slot = q.slot;
 
     let out =
         tokio::task::spawn_blocking(move || -> Result<CounterfactualResponse, svmscope::Error> {
-            let replay = scope_for(url, archive).replay(&signature)?;
+            let replay = replay_for(&scope_for(url, archive), &signature, at_slot)?;
             let acct = account.clone();
             let threshold = replay
                 .find_threshold(lo, hi, move |v| vec![Mutation::lamports(acct.clone(), v)])?;
@@ -1821,6 +1827,7 @@ async fn scan_handler(
 ) -> Result<Json<Vec<svmscope::BreakingPoint>>, (StatusCode, String)> {
     let (url, archive) =
         endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+    let at_slot = q.slot;
     let out = tokio::task::spawn_blocking(
         move || -> Result<Vec<svmscope::BreakingPoint>, svmscope::Error> {
             let scope = scope_for(url, archive);
@@ -1830,9 +1837,10 @@ async fn scan_handler(
                 .iter()
                 .map(|a| a.address.clone())
                 .collect();
-            svmscope::scan_breaking_points(
+            let replay = replay_for(&scope, &signature, at_slot)?;
+            svmscope::scan_breaking_points_on(
                 &scope,
-                &signature,
+                &replay,
                 &accounts,
                 svmscope::ScanOptions::default(),
             )

@@ -180,7 +180,7 @@ pub use program::{MethodBuilder, ProgramClient};
 pub use replay::{
     AssertOutcome, FeatureToggle, Mutation, ReplayResult, ScenarioOutcome, TimeTravel,
 };
-pub use scan::{scan_breaking_points, BreakingPoint, ScanOptions};
+pub use scan::{scan_breaking_points, scan_breaking_points_on, BreakingPoint, ScanOptions};
 pub use scope::{
     AccountProvenance, AccountState, Fidelity, FidelityCertificate, OnchainRecord, PatchComparison,
     Provenance, Replay, Replayed, Scope,

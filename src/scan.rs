@@ -79,6 +79,18 @@ pub fn scan_breaking_points(
     opts: ScanOptions,
 ) -> Result<Vec<BreakingPoint>> {
     let replay = scope.replay(signature)?;
+    scan_breaking_points_on(scope, &replay, accounts, opts)
+}
+
+/// [`scan_breaking_points`] on a replay the caller built: the world as of a
+/// slot (see [`Scope::replay_at`]), so every threshold is found against the
+/// state the transaction actually ran in.
+pub fn scan_breaking_points_on(
+    scope: &Scope,
+    replay: &crate::Replay,
+    accounts: &[String],
+    opts: ScanOptions,
+) -> Result<Vec<BreakingPoint>> {
     let baseline = replay.run()?.result.success;
 
     let mut out: Vec<BreakingPoint> = Vec::new();
@@ -98,7 +110,7 @@ pub fn scan_breaking_points(
         if info.lamports > 0 {
             let acct = account.clone();
             if let Some(th) = search_threshold(0, info.lamports.saturating_mul(2), |v| {
-                sim(&replay, &[Mutation::lamports(acct.clone(), v)])
+                sim(replay, &[Mutation::lamports(acct.clone(), v)])
             })? {
                 if th.flips_at <= 1 {
                     out.push(bp(account, "existence", "is closed", info.lamports));
@@ -116,7 +128,7 @@ pub fn scan_breaking_points(
         // Owner program — reassign it (any program that checks ownership breaks).
         let other_owner = if info.owner == SYSTEM { TOKEN } else { SYSTEM };
         if flips(
-            &replay,
+            replay,
             baseline,
             &[Mutation::owner(account.clone(), other_owner)],
         )? {
@@ -137,9 +149,9 @@ pub fn scan_breaking_points(
                 continue; // coption / non-scalar fields we can't safely perturb
             }
             let probed = match f.ty.as_str() {
-                "u64" => probe_u64(&replay, account, f, &mut out)?,
-                "u8" => probe_u8(&replay, baseline, account, f, &mut out)?,
-                "pubkey" => probe_pubkey(&replay, baseline, account, f, &decoded, &mut out)?,
+                "u64" => probe_u64(replay, account, f, &mut out)?,
+                "u8" => probe_u8(replay, baseline, account, f, &mut out)?,
+                "pubkey" => probe_pubkey(replay, baseline, account, f, &decoded, &mut out)?,
                 _ => false,
             };
             if probed {

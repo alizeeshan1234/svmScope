@@ -2486,7 +2486,7 @@ async function runCounterfactual() {
   if (btn) { btn.disabled = true; btn.textContent = 'Searching…'; }
   if (out) out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>binary-searching the flip point…</div>';
   try {
-    const qs = new URLSearchParams({ account: acct, ...clusterParams() }).toString();
+    const qs = new URLSearchParams({ account: acct, ...atSlotParam(), ...clusterParams() }).toString();
     const res = await api('/counterfactual/' + encodeURIComponent(currentSig) + '?' + qs);
     if (!res.ok) throw new Error(await res.text());
     if (out) out.innerHTML = renderCounterfactual(await res.json());
@@ -2518,7 +2518,7 @@ async function runScan() {
   if (btn) { btn.disabled = true; btn.textContent = '⚡ Scanning…'; }
   if (out) out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>testing every account &amp; field…</div>';
   try {
-    const qs = new URLSearchParams(clusterParams()).toString();
+    const qs = new URLSearchParams({ ...atSlotParam(), ...clusterParams() }).toString();
     const res = await api('/scan/' + encodeURIComponent(currentSig) + (qs ? '?' + qs : ''));
     if (!res.ok) throw new Error(await res.text());
     if (out) out.innerHTML = renderBreakingPoints(await res.json());
@@ -2538,7 +2538,7 @@ async function runNarrate() {
   if (btn) { btn.disabled = true; btn.textContent = '📋 Reading…'; }
   if (out) out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>reviewing this transaction…</div>';
   try {
-    const qs = new URLSearchParams(clusterParams()).toString();
+    const qs = new URLSearchParams({ ...atSlotParam(), ...clusterParams() }).toString();
     const res = await api('/scan/' + encodeURIComponent(currentSig) + (qs ? '?' + qs : ''));
     if (!res.ok) throw new Error(await res.text());
     const bps = await res.json();
