@@ -168,6 +168,76 @@ impl Scope {
             .and_then(|e| e["slot"].as_u64())
     }
 
+    /// Up to `limit` mentions of `address` strictly before `signature`,
+    /// newest first, as `(slot, signature)`.
+    fn mentions_before(
+        &self,
+        address: &str,
+        signature: &str,
+        limit: usize,
+    ) -> Option<Vec<(u64, String)>> {
+        let resp: serde_json::Value = self
+            .client
+            .send(
+                RpcRequest::GetSignaturesForAddress,
+                serde_json::json!([address, { "limit": limit, "before": signature }]),
+            )
+            .ok()?;
+        let arr = resp["result"].as_array().or_else(|| resp.as_array())?;
+        Some(
+            arr.iter()
+                .filter_map(|e| Some((e["slot"].as_u64()?, e["signature"].as_str()?.to_string())))
+                .collect(),
+        )
+    }
+
+    /// The version of `address` at its last write before `slot`, found by
+    /// walking its mention history back from `signature` and asking the
+    /// stream for one block per mentioned slot below `slot`: a mention that
+    /// only read the account yields nothing and the walk continues, a few
+    /// stream calls at most. Costs a page of history and one short stream
+    /// call per step, whatever the account's age, where a range search
+    /// would cost its whole silence.
+    fn version_at_last_mention(
+        &self,
+        stream: &crate::history::HistoryStream,
+        address: &str,
+        signature: &str,
+        slot: u64,
+    ) -> Option<crate::records::Version> {
+        let mut cursor = signature.to_string();
+        let mut stream_calls = 0;
+        let mut last_asked: Option<u64> = None;
+        for _ in 0..MENTION_FALLBACK_PAGES {
+            let page = self.mentions_before(address, &cursor, MENTION_PAGE)?;
+            let (_, last_sig) = page.last()?;
+            cursor = last_sig.clone();
+            for (mention_slot, _) in page.iter().filter(|(m, _)| *m < slot) {
+                // Several mentions in one block are one question.
+                if last_asked == Some(*mention_slot) {
+                    continue;
+                }
+                last_asked = Some(*mention_slot);
+                if stream_calls >= MENTION_FALLBACK_STEPS {
+                    return None;
+                }
+                stream_calls += 1;
+                let found = stream
+                    .latest_before_windows(
+                        std::slice::from_ref(&address.to_string()),
+                        mention_slot + 1,
+                        1,
+                        1,
+                    )
+                    .ok()?;
+                if let Some(v) = found.get(address) {
+                    return Some(v.clone());
+                }
+            }
+        }
+        None
+    }
+
     /// The newest transaction mentioning `address` that landed before `slot`,
     /// as `(its slot, its record)`: three calls regardless of how busy the
     /// account is. A signature from the block at `slot` (or the next
@@ -903,6 +973,38 @@ impl Scope {
                         streamed = found;
                     }
                     Err(e) => eprintln!("history stream: {e}"),
+                }
+                // Not written within the search range: ask the account's
+                // own history where it was last mentioned before the
+                // transaction and stream that one block. Only sound when
+                // the target is the landing slot or earlier, since the
+                // cursor is the transaction itself.
+                if slot <= target.landed_slot {
+                    let missing: Vec<&String> = wanted
+                        .iter()
+                        .map(|(k, _)| k)
+                        .filter(|k| !streamed.contains_key(*k))
+                        .take(MENTION_FALLBACK_ACCOUNTS)
+                        .collect();
+                    for key in missing {
+                        if let Some(v) =
+                            self.version_at_last_mention(stream, key, target.signature, slot)
+                        {
+                            if trace {
+                                eprintln!(
+                                    "[reconstruct {:>6.1}s] {key}: last written at slot {}, from its mention history",
+                                    started.elapsed().as_secs_f64(),
+                                    v.slot
+                                );
+                            }
+                            streamed.insert(key.clone(), v);
+                        } else if trace {
+                            eprintln!(
+                                "[reconstruct {:>6.1}s] {key}: no written version at its last mentions",
+                                started.elapsed().as_secs_f64(),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -3391,6 +3493,16 @@ mod preflight_input_tests {
 /// created account (no "before") is diffed against an empty account rather
 /// than dropped; an account absent from `after` is treated as unchanged.
 /// What a historical replay is rebuilding the world as of.
+/// Accounts the mention-history fallback is tried for per replay, and the
+/// mentions walked per account: each step is one RPC call and one stream
+/// call, so this bounds the time a replay spends on quiet accounts.
+const MENTION_FALLBACK_ACCOUNTS: usize = 8;
+const MENTION_FALLBACK_STEPS: usize = 3;
+/// Mentions per history page and pages walked: a hot account has many
+/// mentions in the target block itself, which have to be paged past.
+const MENTION_PAGE: usize = 100;
+const MENTION_FALLBACK_PAGES: usize = 3;
+
 struct DriftTarget<'a> {
     /// The target slot.
     slot: u64,
