@@ -40,6 +40,11 @@ pub struct HistoryStream {
     /// quiet account costs seconds and near-zero egress (about 100,000
     /// slots, eleven hours, in under a minute).
     pub deep_lookback: u64,
+    /// API keys, tried in order. The provider's concurrency limit is per
+    /// account, so keys from different accounts are independent slots; a
+    /// key that answers "limit exceeded" is skipped for a while and the
+    /// next one used.
+    pub keys: Vec<String>,
 }
 
 /// The endpoint the client speaks to; the key travels in `SUBSTREAMS_API_KEY`.
@@ -51,11 +56,27 @@ const BATCH: usize = 60;
 /// The free tier allows two concurrent streams per key; one process keeps
 /// to one at a time so parallel replays queue instead of failing.
 static STREAM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-/// After the provider answers "concurrent stream limit exceeded", stay off
-/// it for this long: the client's own retries against that answer are what
-/// keep the slots occupied, so backing off is the only way they free up.
-static LIMIT_HIT_UNTIL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+/// After a key answers "concurrent stream limit exceeded", stay off it for
+/// this long: the client's own retries against that answer are what keep
+/// the slots occupied, so backing off is the only way they free up.
+static LIMIT_HIT_UNTIL: std::sync::Mutex<Option<HashMap<String, std::time::Instant>>> =
+    std::sync::Mutex::new(None);
 const LIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn key_backed_off(key: &str) -> bool {
+    let guard = LIMIT_HIT_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .as_ref()
+        .and_then(|m| m.get(key))
+        .is_some_and(|t| std::time::Instant::now() < *t)
+}
+
+fn back_off_key(key: &str) {
+    let mut guard = LIMIT_HIT_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .get_or_insert_with(HashMap::new)
+        .insert(key.to_string(), std::time::Instant::now() + LIMIT_BACKOFF);
+}
 
 impl HistoryStream {
     /// From the environment: on when `SUBSTREAMS_API_KEY` is set and the
@@ -63,9 +84,16 @@ impl HistoryStream {
     /// `PATH`). `SVMSCOPE_HISTORY_LOOKBACK` and
     /// `SVMSCOPE_HISTORY_DEEP_LOOKBACK` tune the ranges (slots).
     pub fn from_env() -> Option<HistoryStream> {
-        std::env::var("SUBSTREAMS_API_KEY")
-            .ok()
-            .filter(|k| !k.trim().is_empty())?;
+        let keys: Vec<String> = std::env::var("SUBSTREAMS_API_KEY")
+            .ok()?
+            .split(',')
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(String::from)
+            .collect();
+        if keys.is_empty() {
+            return None;
+        }
         let bin = PathBuf::from(
             std::env::var("SVMSCOPE_SUBSTREAMS_BIN").unwrap_or_else(|_| "substreams".to_string()),
         );
@@ -94,6 +122,7 @@ impl HistoryStream {
             package,
             lookback: num("SVMSCOPE_HISTORY_LOOKBACK", 2_000),
             deep_lookback: num("SVMSCOPE_HISTORY_DEEP_LOOKBACK", 100_000),
+            keys,
         })
     }
 
@@ -117,8 +146,9 @@ impl HistoryStream {
                 .map(|a| format!("account:{a}"))
                 .collect::<Vec<_>>()
                 .join(" || ");
-            let run = || {
+            let run = |key: &str| {
                 Command::new(&self.bin)
+                    .env("SUBSTREAMS_API_KEY", key)
                     .args([
                         "run",
                         "-e",
@@ -141,32 +171,27 @@ impl HistoryStream {
                     .output()
                     .map_err(|e| Error::Fixture(format!("history stream: run substreams: {e}")))
             };
-            // One retry: the client's connection to the registry or the
-            // stream occasionally resets, and a second attempt succeeds.
             let _serial = STREAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            {
-                let until = LIMIT_HIT_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(t) = *until {
-                    if std::time::Instant::now() < t {
-                        return Err(Error::Fixture(
-                            "history stream: backing off after the provider's concurrency limit"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-            let mut output = run()?;
             let limit_hit = |o: &std::process::Output| {
                 String::from_utf8_lossy(&o.stderr).contains("Concurrent stream limit exceeded")
             };
-            if !output.status.success() && !limit_hit(&output) {
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                output = run()?;
-            }
-            if !output.status.success() {
+            // Keys in order, skipping any that hit the limit recently. A
+            // transient failure gets one retry on the same key; a limit
+            // answer backs that key off and moves to the next.
+            let mut last_error = String::from("history stream: every key is backing off");
+            let mut result: Option<std::process::Output> = None;
+            for key in self.keys.iter().filter(|k| !key_backed_off(k)) {
+                let mut output = run(key)?;
+                if !output.status.success() && !limit_hit(&output) {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    output = run(key)?;
+                }
+                if output.status.success() {
+                    result = Some(output);
+                    break;
+                }
                 if limit_hit(&output) {
-                    *LIMIT_HIT_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(std::time::Instant::now() + LIMIT_BACKOFF);
+                    back_off_key(key);
                 }
                 let err = String::from_utf8_lossy(&output.stderr);
                 let last = err
@@ -174,11 +199,14 @@ impl HistoryStream {
                     .rev()
                     .find(|l| !l.trim().is_empty())
                     .unwrap_or("");
-                return Err(Error::Fixture(format!(
+                last_error = format!(
                     "history stream: substreams exited {}: {last}",
                     output.status
-                )));
+                );
             }
+            let Some(output) = result else {
+                return Err(Error::Fixture(last_error));
+            };
             out.extend(parse_jsonl(&String::from_utf8_lossy(&output.stdout), slot));
         }
         Ok(out)
