@@ -459,7 +459,9 @@ certificate names the slot coverage begins at and labels every account: `Recorde
 continuous coverage across it), `MetadataRewind` (balances from the
 transaction's own metadata), `Unchanged` (verified not written since the
 slot), `Reconstructed` (re-executed write history, `exact` or not),
-`Program` (the current ELF, with whether it was upgraded after the slot),
+`Program` (the current ELF, with whether it was upgraded after the slot; a
+program upgraded since runs the bytecode deployed before the slot when the
+stream has it, and is then labelled `Recorded` at its deploy slot),
 `HistoricalArchive`, or `CurrentRpc` (current bytes, may differ: the only
 label the certificate counts as drift, along with an inexact reconstruction
 or an upgraded program).
