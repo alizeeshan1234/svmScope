@@ -1,0 +1,88 @@
+# An always-on recorder on GitHub Actions, free for a public repository.
+#
+# The hosted engine on a free Render instance sleeps whenever nobody is
+# using it, and a sleeping recorder records nothing: the 30-day window then
+# has holes wherever the site was idle. This workflow keeps the window
+# continuous instead. Each run restores the window from the data repository,
+# records for just under the six-hour job limit, pushes its packs (hourly
+# and on the way out), and dispatches the next run ten minutes before it
+# ends so the two overlap and no slot goes unrecorded. A six-hourly schedule
+# restarts the chain if a run ever fails to dispatch its successor.
+#
+# Needs one repository secret: RECORDS_TOKEN, a fine-grained token with
+# contents read/write on the data repository named below. The engine's own
+# code does the rest (see server/src/main.rs, the recorder thread).
+name: recorder
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+
+concurrency:
+  group: recorder-${{ github.run_id }}
+  cancel-in-progress: false
+
+env:
+  DATA_REPO: alizeeshan1234/svmscope-records
+  # The branch whose engine records. Scheduled and dispatched runs start
+  # from the default branch, which carries only this workflow file.
+  ENGINE_BRANCH: exact-replay
+  # Minutes to record before the graceful stop. Six hours is the job limit;
+  # leave room for the build and the final push.
+  RECORD_MINUTES: 320
+  # Minutes into the run at which the next run is dispatched.
+  HANDOFF_MINUTES: 310
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.ENGINE_BRANCH }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: recorder
+      - name: Build the engine
+        run: cargo build --release -p svmscope-server
+      - name: Record
+        env:
+          SVMSCOPE_RECORD_DIR: ${{ runner.temp }}/records
+          SVMSCOPE_RECORD_GITHUB: ${{ env.DATA_REPO }}
+          SVMSCOPE_GITHUB_TOKEN: ${{ secrets.RECORDS_TOKEN }}
+          # The public node, at a gentle interval: never a paid key here.
+          SVMSCOPE_RECORD_RPC_URL: https://api.mainnet-beta.solana.com
+          SVMSCOPE_RECORD_INTERVAL_MS: "4000"
+          SVMSCOPE_RPC_URL: https://api.mainnet-beta.solana.com
+          HOST: 127.0.0.1
+          PORT: "3000"
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ./target/release/server > recorder.log 2>&1 &
+          pid=$!
+          echo "recorder pid $pid"
+          handed_off=0
+          for ((m = 1; m <= RECORD_MINUTES; m++)); do
+            sleep 60
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo "recorder exited early"; tail -50 recorder.log; exit 1
+            fi
+            if (( m == HANDOFF_MINUTES )) && (( handed_off == 0 )); then
+              # The next run starts now and overlaps this one's last minutes.
+              gh workflow run recorder.yml --ref "${{ github.ref_name }}" -R "${{ github.repository }}" && handed_off=1 || echo "dispatch failed; the schedule will restart the chain"
+            fi
+            if (( m % 30 == 0 )); then
+              echo "minute $m:"; grep -E "records queue|recorder:" recorder.log | tail -3 || true
+            fi
+          done
+          # Graceful stop: the recorder pushes everything since its last push.
+          kill -TERM "$pid"
+          for i in $(seq 1 60); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+          echo "--- last log lines"; tail -30 recorder.log
