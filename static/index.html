@@ -434,7 +434,7 @@ body::after {
 }
 
 /* the hero's own search — the main way in */
-.at-time { max-width: 190px; font-size: 12px; }
+.at-time { min-width: 215px; max-width: 240px; font-size: 12px; }
 .page-search {
   display: flex; align-items: center; gap: var(--s-3);
   background: var(--bg-inset); border: 1px solid var(--border); border-radius: var(--r-md);
@@ -2413,7 +2413,7 @@ function renderReplayPanel() {
     : `<div class="slot-cta">
          <button class="btn ghost sm" id="runReplay">▶ Replay now</button>
          <button class="btn ghost sm" id="reconSlot">⟲ Replay as it happened</button>
-         <span class="at-slot"><input id="atSlot" class="mono" type="number" min="1" placeholder="slot" title="Any slot: exact for every account recorded across it"><span class="cu-note">or</span><input id="atTime" class="mono at-time" type="datetime-local" step="1" title="A moment in time: the nearest slot goes into the box"><button class="btn ghost sm" id="reconAt">⟲ Replay at slot</button><span class="cu-note window-note"></span></span>
+         <span class="at-slot"><input id="atSlot" class="mono" type="number" min="1" placeholder="slot" title="Any slot: exact for every account recorded across it"><span class="cu-note">or</span><input id="atTime" class="mono at-time" type="datetime-local" title="A moment in time: the nearest slot goes into the box"><button class="btn ghost sm" id="reconAt">⟲ Replay at slot</button><span class="cu-note window-note"></span></span>
          <button class="btn ghost sm" id="openDebug" title="Step through every instruction and CPI">⋮ Step debugger</button>
          <button class="btn ghost sm" id="openProfile" title="Where the compute went: a flamegraph of every instruction">🔥 Profile compute</button>
        </div>
@@ -2542,7 +2542,7 @@ function renderReplay(r) {
   return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}
     <div class="slot-cta">
       <button class="btn ghost sm" id="reconSlot">⟲ Replay as it happened</button>
-      <span class="at-slot"><input id="atSlot" class="mono" type="number" min="1" placeholder="slot" title="Any slot: exact for every account recorded across it"><span class="cu-note">or</span><input id="atTime" class="mono at-time" type="datetime-local" step="1" title="A moment in time: the nearest slot goes into the box"><button class="btn ghost sm" id="reconAt">⟲ Replay at slot</button><span class="cu-note window-note"></span></span>
+      <span class="at-slot"><input id="atSlot" class="mono" type="number" min="1" placeholder="slot" title="Any slot: exact for every account recorded across it"><span class="cu-note">or</span><input id="atTime" class="mono at-time" type="datetime-local" title="A moment in time: the nearest slot goes into the box"><button class="btn ghost sm" id="reconAt">⟲ Replay at slot</button><span class="cu-note window-note"></span></span>
       <span class="cu-note">Rewind the balances and clock back to the moment this transaction landed, or rebuild the world as of any slot — free, with an accuracy report.</span>
     </div>
     <div id="certPanel"></div>
