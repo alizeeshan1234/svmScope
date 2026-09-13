@@ -2441,6 +2441,20 @@ async function ensureBaseline() {
   analysis.replay = await res.json();
   return analysis.replay;
 }
+// The un-mutated run a what-if is compared against, at the slot the what-if
+// starts from: the page's own replay when it is at that slot, otherwise a
+// replay as of that slot (cached per slot; the engine has its state by then).
+const baselineAtSlot = {};
+async function ensureBaselineAt(slot) {
+  if (slot == null) return ensureBaseline();
+  if (analysis?.slot === slot && analysis.replay) return analysis.replay;
+  if (baselineAtSlot[slot]) return baselineAtSlot[slot];
+  const q = clusterQ();
+  const res = await api('/replay_at/' + encodeURIComponent(currentSig) + q + (q ? '&' : '?') + 'slot=' + slot);
+  if (!res.ok) throw new Error(await res.text());
+  baselineAtSlot[slot] = (await res.json()).result;
+  return baselineAtSlot[slot];
+}
 // Recognise the classic state-drift failure signatures, so a developer sees *why*
 // a replay reverted without having to know each program's error codes.
 function driftHint(r) {
@@ -3395,7 +3409,7 @@ async function simulate() {
   $('simResult').innerHTML = `<div class="status" style="text-align:left;margin:12px 0"><span class="spinner"></span>replaying with mutations${simSlot != null ? ' as of slot ' + fmt(simSlot) : ' against today\'s state'}…</div>`;
   try {
     // Need the un-mutated baseline for the before/after comparison; fetch it lazily.
-    const before = await ensureBaseline();
+    const before = await ensureBaselineAt(simSlotParam().slot);
     const res = await api('/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m), time_travel: timeTravel, features: activeFeatures, ...simSlotParam(), ...clusterParams() }) });
     if (!res.ok) throw new Error(await res.text());
