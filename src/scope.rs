@@ -822,6 +822,9 @@ impl Scope {
                     if cur.executable || (cur.owner == Address::default() && cur.data.is_empty()) {
                         return false;
                     }
+                    if cur.data.len() > crate::history::MAX_STREAM_ACCOUNT_BYTES {
+                        return false; // too big for the client; stays labelled
+                    }
                     // Lookup tables are resolved from the record; the runtime
                     // never reads their bytes here.
                     if cur.owner.to_string() == "AddressLookupTab1e1111111111111111111111111" {
@@ -840,7 +843,12 @@ impl Scope {
                 .map(|(_, key)| key.clone())
                 .collect();
             if !wanted.is_empty() {
-                match stream.latest_before(&wanted, floor_slot.saturating_add(1), stream.lookback) {
+                match stream.latest_before_windows(
+                    &wanted,
+                    floor_slot.saturating_add(1),
+                    stream.lookback,
+                    stream.deep_lookback,
+                ) {
                     Ok(found) => {
                         if trace {
                             eprintln!(
@@ -848,7 +856,7 @@ impl Scope {
                                 started.elapsed().as_secs_f64(),
                                 found.len(),
                                 wanted.len(),
-                                stream.lookback
+                                stream.deep_lookback
                             );
                         }
                         streamed = found;
@@ -1207,59 +1215,6 @@ impl Scope {
                         );
                     }
                     provenance.insert(key.clone(), Provenance::CurrentRpc);
-                }
-            }
-        }
-        // Second try for what is still on today's data: a long range over a
-        // quiet account is cheap (the stream skips blocks it does not touch).
-        if let Some(stream) = self.history.as_ref() {
-            let leftovers: Vec<String> = provenance
-                .iter()
-                .filter(|(_, p)| matches!(p, Provenance::CurrentRpc))
-                .map(|(k, _)| k.clone())
-                .collect();
-            if !leftovers.is_empty() {
-                match stream.latest_before(
-                    &leftovers,
-                    floor_slot.saturating_add(1),
-                    stream.deep_lookback,
-                ) {
-                    Ok(found) => {
-                        for (key, v) in found {
-                            let Ok(addr) = Address::from_str(&key) else {
-                                continue;
-                            };
-                            let current = ctx.pre_account_owned(&key);
-                            let account = v.state.as_ref().map(|st| solana_account::Account {
-                                lamports: crate::history::lamports_for(
-                                    current.as_ref().map(|c| c.lamports),
-                                    st.data.len(),
-                                ),
-                                data: st.data.clone(),
-                                owner: Address::from_str(&st.owner).unwrap_or_default(),
-                                executable: false,
-                                rent_epoch: 0,
-                            });
-                            if trace {
-                                eprintln!(
-                                    "[reconstruct {:>6.1}s] {key}: from the account-changes stream at slot {} (deep)",
-                                    started.elapsed().as_secs_f64(),
-                                    v.slot
-                                );
-                            }
-                            if let Some(s) = self.records.as_deref() {
-                                let stored = account.as_ref().map(|a| AccountState {
-                                    data: a.data.clone(),
-                                    lamports: a.lamports,
-                                    owner: a.owner.to_string(),
-                                });
-                                let _ = s.record(&key, v.slot, stored.as_ref());
-                            }
-                            ctx.set_loaded_data(addr, account);
-                            provenance.insert(key, Provenance::Recorded { slot: v.slot });
-                        }
-                    }
-                    Err(e) => eprintln!("history stream: {e}"),
                 }
             }
         }

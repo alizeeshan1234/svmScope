@@ -53,6 +53,11 @@ pub const ENDPOINT: &str = "accounts.mainnet.sol.streamingfast.io:443";
 pub const PACKAGE: &str = "solana-accounts-foundational";
 /// Accounts per client call: the filter is one expression, kept short.
 const BATCH: usize = 60;
+/// Accounts larger than this are never asked of the stream. The client
+/// renders bytes as base58, which is quadratic: a 1.7 MB order book takes
+/// minutes per version and would eat the egress quota in one replay. Such
+/// accounts stay on today's bytes, labelled.
+pub const MAX_STREAM_ACCOUNT_BYTES: usize = 256 * 1024;
 /// The free tier allows two concurrent streams per key; one process keeps
 /// to one at a time so parallel replays queue instead of failing.
 static STREAM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -126,6 +131,36 @@ impl HistoryStream {
         })
     }
 
+    /// The last change of each of `accounts` strictly before `slot`, searching
+    /// backwards in doubling windows: the first `first` slots, then the next
+    /// `2 * first`, and so on until every account is found or `max` slots
+    /// have been covered. Each window asks only for the accounts still
+    /// missing, so a hot account costs one small window and a quiet one a
+    /// few cheap empty ones; nothing ever streams a busy account across a
+    /// long range.
+    pub fn latest_before_windows(
+        &self,
+        accounts: &[String],
+        slot: u64,
+        first: u64,
+        max: u64,
+    ) -> Result<HashMap<String, Version>> {
+        let mut found: HashMap<String, Version> = HashMap::new();
+        let mut missing: Vec<String> = accounts.to_vec();
+        let mut end = slot;
+        let mut width = first.max(1);
+        let floor = slot.saturating_sub(max).max(1);
+        while !missing.is_empty() && end > floor {
+            let start = end.saturating_sub(width).max(floor);
+            let got = self.latest_before_in(&missing, start, end)?;
+            missing.retain(|a| !got.contains_key(a));
+            found.extend(got);
+            end = start;
+            width = width.saturating_mul(2);
+        }
+        Ok(found)
+    }
+
     /// The last change of each of `accounts` strictly before `slot`, looking
     /// back `lookback` slots. Accounts with no change in the range are absent
     /// from the result: they may be older than the range, or never written.
@@ -135,11 +170,24 @@ impl HistoryStream {
         slot: u64,
         lookback: u64,
     ) -> Result<HashMap<String, Version>> {
-        let mut out = HashMap::new();
         if accounts.is_empty() || slot == 0 {
-            return Ok(out);
+            return Ok(HashMap::new());
         }
         let start = slot.saturating_sub(lookback).max(1);
+        self.latest_before_in(accounts, start, slot)
+    }
+
+    /// The last change of each of `accounts` in `[start, end)`.
+    fn latest_before_in(
+        &self,
+        accounts: &[String],
+        start: u64,
+        slot: u64,
+    ) -> Result<HashMap<String, Version>> {
+        let mut out = HashMap::new();
+        if accounts.is_empty() || slot == 0 || start >= slot {
+            return Ok(out);
+        }
         for chunk in accounts.chunks(BATCH) {
             let filter = chunk
                 .iter()
