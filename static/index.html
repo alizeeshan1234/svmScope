@@ -1782,6 +1782,7 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
               <button class="btn ghost sm" id="stageBtn">＋ Stage all changes</button>
               <span class="spacer"></span>
               <span id="dirtyCount" class="dirty-count"></span>
+              <span class="at-slot" title="The slot whose state the mutated replay starts from: the slot shown above, or any slot in the last 30 days"><input id="simSlot" class="mono" type="number" min="1" placeholder="slot"><span class="cu-note" id="simAtNote"></span></span>
               <button class="btn ghost sm" id="addScenario">＋ Add as test scenario</button>
               <button class="btn" id="simBtn">Simulate ⟶</button>
             </div>
@@ -2399,6 +2400,7 @@ function renderReplayPanel() {
   });
   $('reconSlot')?.addEventListener('click', () => reconstructAtSlot());
   wireReplayAt();
+  wireSimSlot();
   $('cfRun')?.addEventListener('click', runCounterfactual);
   $('cfScanAll')?.addEventListener('click', runScan);
   $('cfNarrate')?.addEventListener('click', runNarrate);
@@ -2406,6 +2408,31 @@ function renderReplayPanel() {
 // Fetch the baseline replay once and cache it on `analysis.replay`.
 // When the page shows a replay at a slot, what-ifs build on that same world.
 const atSlotParam = () => (analysis?.slot != null ? { slot: analysis.slot } : {});
+// The mutation editor and the scenario suite can name their own slot; a typed
+// slot wins over the page's, an empty box follows the page.
+function simSlotParam() {
+  const v = Number($('simSlot')?.value);
+  if (Number.isInteger(v) && v >= 1) return { slot: v };
+  return atSlotParam();
+}
+function wireSimSlot() {
+  const input = $('simSlot'), note = $('simAtNote');
+  if (!input || !note) return;
+  const refresh = () => {
+    const typed = Number(input.value);
+    const own = analysis?.overview?.slot;
+    if (Number.isInteger(typed) && typed >= 1) {
+      note.textContent = typed === own ? 'replays as of the moment it landed' : `replays as of slot ${fmt(typed)}`;
+    } else if (analysis?.slot != null) {
+      note.textContent = analysis.slot === own ? 'replays as of the moment it landed (from the replay above)' : `replays as of slot ${fmt(analysis.slot)} (from the replay above)`;
+    } else {
+      note.textContent = `replays against today's state — type a slot (it landed at ${fmt(own)}) to start from back then`;
+    }
+  };
+  input.placeholder = analysis?.slot != null ? String(analysis.slot) : (analysis?.overview?.slot != null ? String(analysis.overview.slot) : 'slot');
+  input.oninput = refresh;
+  refresh();
+}
 
 async function ensureBaseline() {
   if (analysis.replay) return analysis.replay;
@@ -2764,7 +2791,7 @@ function renderCertificate(d) {
   const listed = (d.accounts || []).length;
   const total = analysis?.overview?.account_count;
   const omitted = total && total > listed ? ` The transaction names ${fmt(total)} accounts; the ${total - listed} not listed are signers, whose balances come from the transaction's own record, and native programs.` : '';
-  const sources = src ? `<div class="cu-note" style="margin:4px 0 2px">Where the state came from: ${src} (<a href="#" id="acctToggle">show every account</a>).${omitted}<div id="acctList" class="drift-list hidden">${rows}</div></div>` : '';
+  const sources = src ? `<div class="cu-note" style="margin:4px 0 2px">Where the state came from: ${src} (<a href="#" id="acctToggle">show every account</a>).${omitted}<div id="certAcctList" class="drift-list hidden">${rows}</div></div>` : '';
   const window = recording ? `<div class="cu-note" style="margin:2px 0 2px">This engine's own recordings begin at slot <span class="mono">${fmt(d.recorded_from)}</span>; earlier slots are served from a public account-changes stream and cached here.</div>` : '';
   return `<div class="cert-card">
     <div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>
@@ -2880,7 +2907,7 @@ async function runSuite() {
       return s;
     });
     const res = await api('/simulate_suite', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, scenarios, time_travel: timeTravel, features: activeFeatures, ...atSlotParam(), ...clusterParams() }) });
+      body: JSON.stringify({ signature: currentSig, scenarios, time_travel: timeTravel, features: activeFeatures, ...simSlotParam(), ...clusterParams() }) });
     if (!res.ok) throw new Error(await res.text());
     const outcomes = await res.json();
     outcomes.forEach((o, i) => {
@@ -3337,7 +3364,7 @@ function renderAnalysis() {
     });
     $('acctToggle')?.addEventListener('click', (e) => {
       e.preventDefault();
-      const l = $('acctList'); if (l) l.classList.toggle('hidden');
+      const l = $('certAcctList'); if (l) l.classList.toggle('hidden');
       e.target.textContent = l && l.classList.contains('hidden') ? 'show every account' : 'hide the list';
     });
   }
@@ -3364,12 +3391,13 @@ async function simulate() {
   try { toSend = [...mutations, ...collectAllEdits()]; } catch (e) { flashSim(e.message, true); return; }
   if (!toSend.length) { flashSim('change at least one field, or stage a mutation', true); return; }
   const btn = $('simBtn'); btn.disabled = true;
-  $('simResult').innerHTML = '<div class="status" style="text-align:left;margin:12px 0"><span class="spinner"></span>replaying with mutations…</div>';
+  const simSlot = simSlotParam().slot;
+  $('simResult').innerHTML = `<div class="status" style="text-align:left;margin:12px 0"><span class="spinner"></span>replaying with mutations${simSlot != null ? ' as of slot ' + fmt(simSlot) : ' against today\'s state'}…</div>`;
   try {
     // Need the un-mutated baseline for the before/after comparison; fetch it lazily.
     const before = await ensureBaseline();
     const res = await api('/simulate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m), time_travel: timeTravel, features: activeFeatures, ...atSlotParam(), ...clusterParams() }) });
+      body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m), time_travel: timeTravel, features: activeFeatures, ...simSlotParam(), ...clusterParams() }) });
     if (!res.ok) throw new Error(await res.text());
     showResult(before, await res.json(), { n: toSend.length });
   } catch (e) { flashSim('error: ' + e.message, true); }
