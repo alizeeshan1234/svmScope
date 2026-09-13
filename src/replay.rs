@@ -649,6 +649,8 @@ impl TimeTravel {
         }
         if let Some(s) = self.at_slot {
             clock.slot = s;
+            // A slot names its epoch; only an explicit epoch below overrides.
+            clock.epoch = s / SLOTS_PER_EPOCH as u64;
         }
         if let Some(e) = self.at_epoch {
             clock.epoch = e;

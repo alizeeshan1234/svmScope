@@ -1463,6 +1463,7 @@ details.tech > summary::before { content: '▸ '; } details.tech[open] > summary
 
 /* aliases for inline styles in templates */
 :root { --muted: var(--text-3); --text: var(--text-1); --line-2: var(--border-strong); }
+.acct-row{display:flex;gap:8px;flex-wrap:wrap;padding:2px 0;border-bottom:1px solid rgba(128,128,128,.12)}
 </style>
 </head>
 <body>
@@ -1920,7 +1921,7 @@ function windowNotice(slot) {
     return `<div class="drift-inline notice">This engine has no recordings, so pool state comes from today's data and the result is labelled approximate. Balances and the clock are exact.${hasEvent ? ' pump.fun curve reserves come from the program\'s own event log.' : ''}</div>`;
   }
   if (slot >= from) return '';
-  return `<div class="drift-inline notice"><b>Slot ${fmt(slot)} is before this engine started recording</b> (slot ${fmt(from)}). Balances and the clock will be exact; pool state for programs without an event log will be today's, and the result will be labelled approximate rather than exact.${hasEvent ? ' pump.fun curve reserves will come from the program\'s own event log.' : ''}</div>`;
+  return `<div class="drift-inline notice"><b>Slot ${fmt(slot)} is before this engine's own recordings begin</b> (slot ${fmt(from)}), so past account bytes are fetched from a public account-changes stream, one account at a time. This usually takes one to three minutes; the certificate then labels every account, and only accounts the stream does not hold stay on today's data.${hasEvent ? ' pump.fun curve reserves come from the program\'s own event log.' : ''}</div>`;
 }
 
 // API base. Empty = same origin (the Rust server serving this page locally).
@@ -2617,11 +2618,16 @@ function wireReplayAt() {
   const input = $('atSlot');
   if (input && analysis?.overview?.slot != null && !input.value) input.placeholder = String(analysis.overview.slot);
   document.querySelectorAll('.window-note').forEach(el => {
-    el.textContent = windowInfo.recordedFrom != null ? `exact from slot ${fmt(windowInfo.recordedFrom)}` : 'no recordings on this engine';
+    el.textContent = windowInfo.recordedFrom != null ? `recorded from slot ${fmt(windowInfo.recordedFrom)} · earlier slots via the account-changes stream` : 'no recordings on this engine';
   });
   const go = () => {
     const v = Number(input?.value);
-    if (!Number.isInteger(v) || v < 1) { input?.focus(); return; }
+    if (!Number.isInteger(v) || v < 1) {
+      input?.focus();
+      const panel = $('certPanel');
+      if (panel) panel.innerHTML = `<div class="drift-inline notice">Type a slot number first (the transaction landed at slot ${fmt(analysis?.overview?.slot)}); any slot in the last 30 days replays exactly.</div>`;
+      return;
+    }
     reconstructAtSlot(v);
   };
   $('reconAt')?.addEventListener('click', go);
@@ -2635,7 +2641,9 @@ async function reconstructAtSlot(slot) {
   if (btn) { btn.disabled = true; btn.textContent = '⟲ Replaying…'; }
   const target = slot != null ? slot : analysis?.overview?.slot;
   const notice = target != null ? windowNotice(target) : '';
-  if (panel) panel.innerHTML = notice + `<div class="status" style="text-align:left"><span class="spinner"></span>${slot != null ? 'rebuilding the world as of slot ' + fmt(slot) : 'reconstructing at the transaction\'s slot'} and replaying…</div>`;
+  const beforeWindow = target != null && windowInfo.recordedFrom != null && target < windowInfo.recordedFrom;
+  const wait = beforeWindow ? ' Fetching past account bytes from the stream: this can take one to three minutes, longer for accounts with a long history.' : '';
+  if (panel) panel.innerHTML = notice + `<div class="status" style="text-align:left"><span class="spinner"></span>${slot != null ? 'rebuilding the world as of slot ' + fmt(slot) : 'reconstructing at the transaction\'s slot'} and replaying…${wait}</div>`;
   try {
     const q = clusterQ();
     const path = '/analyze_at/' + encodeURIComponent(currentSig) + q
@@ -2648,7 +2656,8 @@ async function reconstructAtSlot(slot) {
     analysis = data;
     mutations = [];
     renderAnalysis();
-    $('out').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // Land on the certificate, not the top of the page: that is what changed.
+    ($('certPanel') || $('out')).scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (e) {
     if (panel) panel.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
     if (btn) { btn.disabled = false; btn.textContent = label; }
@@ -2714,8 +2723,25 @@ function renderCertificate(d) {
   const src = Object.entries(d.sources || {})
     .sort((a, b) => b[1] - a[1])
     .map(([k, v]) => `<b>${v}</b> ${esc(names[k] || k)}`).join(' · ');
-  const sources = src ? `<div class="cu-note" style="margin:4px 0 2px">Where the state came from: ${src}</div>` : '';
-  const window = recording ? `<div class="cu-note" style="margin:2px 0 2px">This engine has recorded account state since slot <span class="mono">${fmt(d.recorded_from)}</span>; transactions after that replay exactly for every recorded account.</div>` : '';
+  // Every account with its label, on demand: what "exact" rests on.
+  const labelOf = (a) => {
+    const so = a.source;
+    if (so == null) return '';
+    if (typeof so === 'string') return names[so] || so;
+    const [k, v] = Object.entries(so)[0] || ['', {}];
+    if (k === 'Recorded') return `recorded as it was (slot ${fmt(v.slot)})`;
+    if (k === 'EventLog') return `from the program's event log (slot ${fmt(v.slot)})`;
+    if (k === 'Program') return v.upgraded_since === true ? 'program code, upgraded after this slot' : v.upgraded_since === false ? 'program code, not upgraded since' : 'program code';
+    if (k === 'Unchanged') return v.last_write != null ? `unchanged since slot ${fmt(v.last_write)}` : 'unchanged since';
+    if (k === 'Reconstructed') return `rebuilt from ${v.writes} write${v.writes === 1 ? '' : 's'}${v.exact ? '' : ' (inexact)'}`;
+    return names[k] || k;
+  };
+  const rows = (d.accounts || []).map(a => `<div class="acct-row"><span class="mono">${esc(a.address)}</span> <span class="cu-note">${esc(labelOf(a))}</span></div>`).join('');
+  const listed = (d.accounts || []).length;
+  const total = analysis?.overview?.account_count;
+  const omitted = total && total > listed ? ` The transaction names ${fmt(total)} accounts; the ${total - listed} not listed are signers, whose balances come from the transaction's own record, and native programs.` : '';
+  const sources = src ? `<div class="cu-note" style="margin:4px 0 2px">Where the state came from: ${src} (<a href="#" id="acctToggle">show every account</a>).${omitted}<div id="acctList" class="drift-list hidden">${rows}</div></div>` : '';
+  const window = recording ? `<div class="cu-note" style="margin:2px 0 2px">This engine's own recordings begin at slot <span class="mono">${fmt(d.recorded_from)}</span>; earlier slots are served from a public account-changes stream and cached here.</div>` : '';
   return `<div class="cert-card">
     <div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>
     <div class="cu-note" style="margin:6px 0 2px">${when}${verify}</div>
@@ -3284,6 +3310,11 @@ function renderAnalysis() {
     $('driftToggle')?.addEventListener('click', (e) => {
       e.preventDefault();
       const d = $('driftList'); if (d) d.classList.toggle('hidden');
+    });
+    $('acctToggle')?.addEventListener('click', (e) => {
+      e.preventDefault();
+      const l = $('acctList'); if (l) l.classList.toggle('hidden');
+      e.target.textContent = l && l.classList.contains('hidden') ? 'show every account' : 'hide the list';
     });
   }
   wireCopy($('out'));

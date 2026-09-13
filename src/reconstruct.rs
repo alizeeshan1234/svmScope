@@ -551,6 +551,7 @@ pub(crate) fn is_infra(address: &str) -> bool {
                 | "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" // SPL Token
                 | "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" // Token-2022
                 | "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL" // Associated Token
+                | "So11111111111111111111111111111111111111112" // wrapped SOL mint: fixed
                 | "ComputeBudget111111111111111111111111111111"
                 | "NativeLoader1111111111111111111111111111111"
                 | "BPFLoader2111111111111111111111111111111111"
