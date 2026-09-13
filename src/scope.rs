@@ -1669,8 +1669,11 @@ impl Scope {
             let current = self.accounts_now(&missing);
             let mut found = HashMap::new();
             if let Some(stream) = self.history.as_ref() {
-                let (hot, quiet): (Vec<String>, Vec<String>) =
-                    missing.iter().cloned().partition(|k| written.contains(k));
+                let (hot, quiet): (Vec<String>, Vec<String>) = missing
+                    .iter()
+                    .filter(|k| !current.get(*k).is_some_and(|a| a.executable))
+                    .cloned()
+                    .partition(|k| written.contains(k));
                 let first = crate::history::LARGE_FIRST_WINDOW;
                 for (group, depth) in [
                     (hot, env_u64("SVMSCOPE_PREFIX_LOOKBACK", 4_096)),
@@ -1715,7 +1718,11 @@ impl Scope {
                 };
                 if let Some(acc) = account {
                     if acc.executable {
-                        ctx.add_program(addr, acc.data.clone());
+                        // A program passed as an account: its binary, not
+                        // the loader's pointer bytes.
+                        if let Some(elf) = crate::replay::fetch_program_elf(&self.client, key) {
+                            ctx.add_program(addr, elf);
+                        }
                     } else {
                         ctx.set_loaded_data(addr, Some(acc));
                     }
