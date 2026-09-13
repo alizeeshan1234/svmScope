@@ -706,6 +706,8 @@ fn parse_time(text: &str) -> Option<i64> {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, ""),
     };
+    // Fractional seconds are fine, and ignored.
+    let clock = clock.split('.').next().unwrap_or(clock);
     let mut hms = clock.split(':');
     let hh: i64 = hms
         .next()

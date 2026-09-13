@@ -2733,11 +2733,13 @@ function wireSlotAt() {
   time.addEventListener('change', async () => {
     if (!time.value) return;
     const note = document.querySelector('.window-note');
-    const iso = new Date(time.value).toISOString();
+    // The picker's value is local time; send it as unix seconds.
+    const unix = Math.floor(new Date(time.value).getTime() / 1000);
+    if (!Number.isFinite(unix)) return;
     if (note) note.textContent = 'finding the nearest slot…';
     try {
       const q = clusterQ();
-      const res = await api('/slot_at' + (q ? q + '&' : '?') + 'time=' + encodeURIComponent(iso));
+      const res = await api('/slot_at' + (q ? q + '&' : '?') + 'time=' + unix);
       if (!res.ok) throw new Error(await res.text());
       const d = await res.json();
       slot.value = d.slot;
