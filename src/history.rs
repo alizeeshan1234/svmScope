@@ -51,6 +51,11 @@ const BATCH: usize = 60;
 /// The free tier allows two concurrent streams per key; one process keeps
 /// to one at a time so parallel replays queue instead of failing.
 static STREAM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// After the provider answers "concurrent stream limit exceeded", stay off
+/// it for this long: the client's own retries against that answer are what
+/// keep the slots occupied, so backing off is the only way they free up.
+static LIMIT_HIT_UNTIL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+const LIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(300);
 
 impl HistoryStream {
     /// From the environment: on when `SUBSTREAMS_API_KEY` is set and the
@@ -139,12 +144,30 @@ impl HistoryStream {
             // One retry: the client's connection to the registry or the
             // stream occasionally resets, and a second attempt succeeds.
             let _serial = STREAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            {
+                let until = LIMIT_HIT_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(t) = *until {
+                    if std::time::Instant::now() < t {
+                        return Err(Error::Fixture(
+                            "history stream: backing off after the provider's concurrency limit"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
             let mut output = run()?;
-            if !output.status.success() {
+            let limit_hit = |o: &std::process::Output| {
+                String::from_utf8_lossy(&o.stderr).contains("Concurrent stream limit exceeded")
+            };
+            if !output.status.success() && !limit_hit(&output) {
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 output = run()?;
             }
             if !output.status.success() {
+                if limit_hit(&output) {
+                    *LIMIT_HIT_UNTIL.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(std::time::Instant::now() + LIMIT_BACKOFF);
+                }
                 let err = String::from_utf8_lossy(&output.stderr);
                 let last = err
                     .lines()
