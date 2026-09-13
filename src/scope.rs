@@ -1642,10 +1642,19 @@ impl Scope {
             }
             return None;
         }
+        // Everything below loads into `ctx` only for the duration of the
+        // prefix: on success the baked state goes back into the accounts
+        // the context held before, on failure nothing changes.
+        let backup = ctx.clone();
         // Data accounts the prefix needs that our own transaction does not
         // hold: their bytes at the block's opening, from the stream. Sizes
         // (for the stream's window choice) and a today's-data fallback come
-        // from one batched RPC read.
+        // from one batched RPC read. Accounts a prefix transaction writes
+        // are searched further back than ones it only reads: a quiet config
+        // it reads is today's bytes anyway, and a wide window over hundreds
+        // of accounts costs minutes and the egress quota.
+        let written: std::collections::HashSet<&String> =
+            prefix.iter().flat_map(|t| t.data_writes.iter()).collect();
         let missing: Vec<String> = need
             .iter()
             .filter(|k| {
@@ -1660,17 +1669,20 @@ impl Scope {
             let current = self.accounts_now(&missing);
             let mut found = HashMap::new();
             if let Some(stream) = self.history.as_ref() {
-                // These accounts were written in this very block, so they
-                // are hot: a short first window finds them, and a wide one
-                // would stream every change of hundreds of busy accounts.
-                match stream.latest_before_windows(
-                    &missing,
-                    slot,
-                    crate::history::LARGE_FIRST_WINDOW,
-                    stream.deep_lookback,
-                ) {
-                    Ok(f) => found = f,
-                    Err(e) => eprintln!("history stream: {e}"),
+                let (hot, quiet): (Vec<String>, Vec<String>) =
+                    missing.iter().cloned().partition(|k| written.contains(k));
+                let first = crate::history::LARGE_FIRST_WINDOW;
+                for (group, depth) in [
+                    (hot, env_u64("SVMSCOPE_PREFIX_LOOKBACK", 4_096)),
+                    (quiet, env_u64("SVMSCOPE_PREFIX_READ_LOOKBACK", 256)),
+                ] {
+                    if group.is_empty() {
+                        continue;
+                    }
+                    match stream.latest_before_windows(&group, slot, first, depth) {
+                        Ok(f) => found.extend(f),
+                        Err(e) => eprintln!("history stream: {e}"),
+                    }
                 }
             }
             for key in &missing {
@@ -1797,17 +1809,22 @@ impl Scope {
                             failed.err
                         );
                     }
+                    *ctx = backup;
                     return None;
                 }
             }
         }
-        // Bake the state after the prefix into the context: from here on
-        // the replay, its diffs and its what-ifs start from these bytes.
-        for addr in ctx.loaded_data_addresses() {
+        // Bake the state after the prefix into the accounts the context
+        // held before it: from here on the replay, its diffs and its
+        // what-ifs start from these bytes, and nothing loaded only for the
+        // prefix stays behind.
+        let mut baked = backup;
+        for addr in baked.loaded_data_addresses() {
             if let Some(acc) = svm.get_account(&addr) {
-                ctx.set_loaded_data(addr, Some(acc));
+                baked.set_loaded_data(addr, Some(acc));
             }
         }
+        *ctx = baked;
         if trace {
             eprintln!(
                 "[reconstruct {:>6.1}s] block prefix: {} transaction(s) replayed before this one, inputs {}",
@@ -4108,11 +4125,23 @@ impl BlockTx {
             }
         };
         let signers: std::collections::HashSet<&String> = statics.iter().take(nrs).collect();
-        let programs: std::collections::HashSet<String> = message
+        let mut programs: std::collections::HashSet<String> = message
             .instructions()
             .iter()
             .filter_map(|ix| keys.get(ix.program_id_index as usize).cloned())
             .collect();
+        // Programs reached through CPI, from the record's inner instructions.
+        if let Some(groups) = entry["meta"]["innerInstructions"].as_array() {
+            for g in groups {
+                for ix in g["instructions"].as_array().into_iter().flatten() {
+                    if let Some(i) = ix["programIdIndex"].as_u64() {
+                        if let Some(k) = keys.get(i as usize) {
+                            programs.insert(k.clone());
+                        }
+                    }
+                }
+            }
+        }
         let tokens: std::collections::HashSet<String> = entry["meta"]["preTokenBalances"]
             .as_array()
             .map(|a| {
@@ -4162,6 +4191,13 @@ impl BlockTx {
             lookups_json,
         }
     }
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
