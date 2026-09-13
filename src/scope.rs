@@ -348,6 +348,14 @@ impl Scope {
                 .map(String::from)
                 .ok_or_else(|| Error::NoSignatures(input.to_string()));
         }
+        // A signature is 64 bytes of base58; anything else is neither an
+        // address nor a signature and never reaches the RPC.
+        let is_signature = bs58::decode(input).into_vec().is_ok_and(|b| b.len() == 64);
+        if !is_signature {
+            return Err(Error::InvalidAddress(format!(
+                "{input}: not a transaction signature or an address"
+            )));
+        }
         Ok(input.to_string())
     }
 
@@ -1379,7 +1387,80 @@ impl Scope {
                 }
             }
         }
+        // Same-block predecessors: every source above is block-granular, so
+        // an account another transaction wrote earlier in this very block is
+        // the block's opening state, not what this transaction saw. Label
+        // it; token accounts keep their rewound balance, which is exact.
+        if own_slot {
+            let preceded = self.same_block_writes_before(slot, target.signature);
+            for (key, writes) in preceded {
+                let is_token = ctx.pre_account_owned(&key).is_some_and(|a| {
+                    let o = a.owner.to_string();
+                    o == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+                        || o == "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+                });
+                if is_token {
+                    continue;
+                }
+                if let Some(p) = provenance.get_mut(&key) {
+                    if matches!(
+                        p,
+                        Provenance::Recorded { .. } | Provenance::Unchanged { .. }
+                    ) {
+                        if trace {
+                            eprintln!(
+                                "[reconstruct {:>6.1}s] {key}: written by {writes} earlier transaction(s) in the same block",
+                                started.elapsed().as_secs_f64(),
+                            );
+                        }
+                        *p = Provenance::SameBlock { writes };
+                    }
+                }
+            }
+        }
         provenance
+    }
+
+    /// Accounts that earlier successful transactions in `signature`'s block
+    /// wrote before it, with how many did: one `getBlock` at account
+    /// detail. Empty when the block cannot be read.
+    fn same_block_writes_before(&self, slot: u64, signature: &str) -> HashMap<String, usize> {
+        let mut out = HashMap::new();
+        let block: serde_json::Value = match self.client.send(
+            RpcRequest::GetBlock,
+            json!([slot, {
+                "encoding": "json",
+                "transactionDetails": "accounts",
+                "maxSupportedTransactionVersion": 0,
+                "rewards": false
+            }]),
+        ) {
+            Ok(b) => b,
+            Err(_) => return out,
+        };
+        let Some(txs) = block["transactions"].as_array() else {
+            return out;
+        };
+        for t in txs {
+            let sigs = t["transaction"]["signatures"].as_array();
+            if sigs.and_then(|s| s.first()).and_then(|s| s.as_str()) == Some(signature) {
+                break;
+            }
+            if !t["meta"]["err"].is_null() {
+                continue;
+            }
+            let Some(keys) = t["transaction"]["accountKeys"].as_array() else {
+                continue;
+            };
+            for k in keys {
+                if k["writable"].as_bool() == Some(true) {
+                    if let Some(a) = k["pubkey"].as_str() {
+                        *out.entry(a.to_string()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Reconstruct the world for an **unsigned / not-yet-sent** transaction
@@ -1905,6 +1986,15 @@ pub enum Provenance {
         /// The slot of the transaction whose event supplied the fields.
         slot: u64,
     },
+    /// Written by an earlier transaction in the same block. Every source
+    /// here is block-granular (a version at the end of the previous block),
+    /// so those writes are not in the bytes: the account is the block's
+    /// opening state, `writes` transactions behind what this one saw. A
+    /// price moved by a swap just before this one is the typical case.
+    SameBlock {
+        /// Earlier successful transactions in the block that wrote it.
+        writes: usize,
+    },
     /// An executable program, loaded as its current ELF. A program's bytes
     /// only change on an upgrade, which the loader stamps with its slot.
     Program {
@@ -2125,6 +2215,7 @@ impl Replay {
                         a.source,
                         Provenance::CurrentRpc
                             | Provenance::MetadataEstimate
+                            | Provenance::SameBlock { .. }
                             | Provenance::Reconstructed { exact: false, .. }
                             | Provenance::Program {
                                 upgraded_since: Some(true)
@@ -3496,8 +3587,8 @@ mod preflight_input_tests {
 /// Accounts the mention-history fallback is tried for per replay, and the
 /// mentions walked per account: each step is one RPC call and one stream
 /// call, so this bounds the time a replay spends on quiet accounts.
-const MENTION_FALLBACK_ACCOUNTS: usize = 8;
-const MENTION_FALLBACK_STEPS: usize = 3;
+const MENTION_FALLBACK_ACCOUNTS: usize = 4;
+const MENTION_FALLBACK_STEPS: usize = 2;
 /// Mentions per history page and pages walked: a hot account has many
 /// mentions in the target block itself, which have to be paged past.
 const MENTION_PAGE: usize = 100;

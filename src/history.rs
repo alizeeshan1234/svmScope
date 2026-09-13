@@ -62,9 +62,42 @@ pub const LARGE_ACCOUNT_BYTES: usize = 64 * 1024;
 pub const LARGE_FIRST_WINDOW: u64 = 16;
 /// One call may take this long before it is abandoned.
 const CALL_DEADLINE: Duration = Duration::from_secs(300);
-/// The free tier allows two concurrent streams per account; one process
-/// keeps to one at a time so parallel replays queue instead of failing.
-static STREAM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The free tier allows two concurrent streams per account, so one process
+/// keeps at most that many in flight (`SVMSCOPE_STREAM_PARALLEL`, default
+/// 2) and further replays queue instead of failing.
+static STREAM_SLOTS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+static STREAM_FREED: std::sync::Condvar = std::sync::Condvar::new();
+
+fn stream_parallel() -> usize {
+    std::env::var("SVMSCOPE_STREAM_PARALLEL")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(2)
+}
+
+/// A held stream slot; released on drop.
+struct StreamSlot;
+
+impl StreamSlot {
+    fn acquire() -> StreamSlot {
+        let limit = stream_parallel();
+        let mut held = STREAM_SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+        while *held >= limit {
+            held = STREAM_FREED.wait(held).unwrap_or_else(|e| e.into_inner());
+        }
+        *held += 1;
+        StreamSlot
+    }
+}
+
+impl Drop for StreamSlot {
+    fn drop(&mut self) {
+        let mut held = STREAM_SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+        *held = held.saturating_sub(1);
+        STREAM_FREED.notify_one();
+    }
+}
 /// After a key answers "concurrent stream limit exceeded", stay off it for
 /// this long so whatever holds its slots can drain.
 static LIMIT_HIT_UNTIL: std::sync::Mutex<Option<HashMap<String, std::time::Instant>>> =
@@ -264,7 +297,7 @@ impl HistoryStream {
                 .map(|a| format!("account:{a}"))
                 .collect::<Vec<_>>()
                 .join(" || ");
-            let _serial = STREAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _slot = StreamSlot::acquire();
             // Keys in order, skipping any that hit the limit recently. A
             // transient failure gets one retry on the same key; a limit
             // answer backs that key off and moves to the next.

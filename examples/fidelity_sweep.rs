@@ -344,6 +344,7 @@ fn provenance_label(p: &Provenance, is_program: bool) -> &'static str {
         Provenance::Program { .. } => "program",
         Provenance::Unchanged { .. } => "unchanged",
         Provenance::Recorded { .. } => "recorded",
+        Provenance::SameBlock { .. } => "same-block",
         Provenance::MetadataRewind => "metadata",
         Provenance::EventLog { .. } => "event-log",
         Provenance::MetadataEstimate => "metadata~",

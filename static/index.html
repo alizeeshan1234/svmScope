@@ -2693,7 +2693,8 @@ function renderCertificate(d) {
   const err = errText ? `<div class="err-box">${esc(errText)}</div>` : '';
   const upgraded = (d.accounts || []).filter(a => a.source && a.source.Program && a.source.Program.upgraded_since === true).map(a => a.address);
   const estimated = (d.accounts || []).filter(a => a.source === 'MetadataEstimate').map(a => a.address);
-  const stale = (d.drifted || []).filter(a => !upgraded.includes(a) && !estimated.includes(a));
+  const sameBlock = (d.accounts || []).filter(a => a.source && a.source.SameBlock).map(a => a.address);
+  const stale = (d.drifted || []).filter(a => !upgraded.includes(a) && !estimated.includes(a) && !sameBlock.includes(a));
   const n = stale.length;
   const recording = d.recorded_from != null;
   const fromEvents = (d.accounts || []).filter(a => a.source && a.source.EventLog).map(a => a.address);
@@ -2702,6 +2703,9 @@ function renderCertificate(d) {
     : '';
   const estimateNote = estimated.length
     ? `<div class="drift-inline"><b>${estimated.length}</b> balance${estimated.length === 1 ? ' is' : 's are'} <b>estimated from the transaction's own record</b> (its balances ${d.slot < d.landed_slot ? 'just before' : 'right after'} it landed) because something else touched ${estimated.length === 1 ? 'that account' : 'those accounts'} in between and they weren't being recorded: ${estimated.map(a => `<span class="mono">${esc(a)}</span>`).join(', ')}.</div>`
+    : '';
+  const sameBlockNote = sameBlock.length
+    ? `<div class="drift-inline"><b>${sameBlock.length}</b> account${sameBlock.length === 1 ? ' was' : 's were'} <b>written by earlier transactions in the same block</b>, and every state source is block-granular, so this replay starts from the block's opening state for ${sameBlock.length === 1 ? 'it' : 'them'}. The outcome can differ from what landed (a price moved by a swap just before this one): ${sameBlock.map(a => `<span class="mono">${esc(a)}</span>`).join(', ')}.</div>`
     : '';
   const upgradedNote = upgraded.length
     ? `<div class="drift-inline"><b>${upgraded.length}</b> program${upgraded.length === 1 ? ' was' : 's were'} <b>upgraded after this slot</b>, so the code that ran back then differs from the code loaded now: ${upgraded.map(a => `<span class="mono">${esc(a)}</span>`).join(', ')}.</div>`
@@ -2713,12 +2717,13 @@ function renderCertificate(d) {
     ? `<div class="drift-inline"><b>${n}</b> account${n === 1 ? '' : 's'} still ${n === 1 ? 'uses' : 'use'} <b>today's data</b>, so those parts may differ from back then
          (<a href="#" id="driftToggle">show which</a>). ${fixNote}
          <div id="driftList" class="drift-list hidden">${stale.map(esc).join('<br>')}</div></div>`
-    : (upgraded.length || estimated.length ? '' : `<div class="drift-inline">Every account is as it was at that moment — this replay is exact.</div>`);
+    : (upgraded.length || estimated.length || sameBlock.length ? '' : `<div class="drift-inline">Every account is as it was at that moment — this replay is exact.</div>`);
   const verify = d.verifiable && atOwn ? ' · matches the real on-chain result' : '';
   // Where each account's bytes came from, in plain words.
   const names = {
     Recorded: 'recorded as it was', MetadataRewind: 'balance from the transaction', MetadataEstimate: 'balance estimated from the transaction', EventLog: "from the program's event log", Unchanged: 'unchanged since',
     Reconstructed: 'rebuilt from history', Program: 'program code', HistoricalArchive: 'archive', CurrentRpc: "today's data", Fixture: 'fixture',
+    SameBlock: 'changed earlier in the same block',
   };
   const src = Object.entries(d.sources || {})
     .sort((a, b) => b[1] - a[1])
@@ -2733,6 +2738,7 @@ function renderCertificate(d) {
     if (k === 'EventLog') return `from the program's event log (slot ${fmt(v.slot)})`;
     if (k === 'Program') return v.upgraded_since === true ? 'program code, upgraded after this slot' : v.upgraded_since === false ? 'program code, not upgraded since' : 'program code';
     if (k === 'Unchanged') return v.last_write != null ? `unchanged since slot ${fmt(v.last_write)}` : 'unchanged since';
+    if (k === 'SameBlock') return `written by ${v.writes} earlier transaction${v.writes === 1 ? '' : 's'} in the same block (state from before them)`;
     if (k === 'Reconstructed') return `rebuilt from ${v.writes} write${v.writes === 1 ? '' : 's'}${v.exact ? '' : ' (inexact)'}`;
     return names[k] || k;
   };
@@ -2745,7 +2751,7 @@ function renderCertificate(d) {
   return `<div class="cert-card">
     <div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>
     <div class="cu-note" style="margin:6px 0 2px">${when}${verify}</div>
-    ${sources}${window}${err}${eventNote}${upgradedNote}${estimateNote}${drift}
+    ${sources}${window}${err}${eventNote}${sameBlockNote}${upgradedNote}${estimateNote}${drift}
   </div>`;
 }
 
