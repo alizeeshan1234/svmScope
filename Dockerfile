@@ -34,18 +34,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libssl3 curl \
     && rm -rf /var/lib/apt/lists/*
 
-# The Substreams client: the historical replay's source of past account
-# bytes (see README, "Recording state"). Only used when SUBSTREAMS_API_KEY
-# is set; harmless otherwise.
-ARG SUBSTREAMS_VERSION=v1.22.0
-RUN curl -sSL "https://github.com/streamingfast/substreams/releases/download/${SUBSTREAMS_VERSION}/substreams_linux_x86_64.tar.gz" \
-    | tar -xz -C /usr/local/bin substreams \
-    && chmod +x /usr/local/bin/substreams \
-    && mkdir -p /usr/local/share/svmscope \
-    && curl -sSL -o /usr/local/share/svmscope/solana-accounts-foundational.spkg \
-       "https://spkg.io/streamingfast/solana-accounts-foundational-v0.1.1.spkg"
-ENV SVMSCOPE_SUBSTREAMS_PACKAGE=/usr/local/share/svmscope/solana-accounts-foundational.spkg
-
 COPY --from=build /app/target/release/server /usr/local/bin/svmscope-server
 
 # Drop root: the server needs no privileges at runtime. /data is where the

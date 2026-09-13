@@ -809,7 +809,7 @@ impl Scope {
         };
         let mut streamed: HashMap<String, crate::records::Version> = HashMap::new();
         if let Some(stream) = self.history.as_ref() {
-            let wanted: Vec<String> = account_keys
+            let wanted: Vec<(String, usize)> = account_keys
                 .iter()
                 .enumerate()
                 .filter(|(index, key)| {
@@ -821,9 +821,6 @@ impl Scope {
                     };
                     if cur.executable || (cur.owner == Address::default() && cur.data.is_empty()) {
                         return false;
-                    }
-                    if cur.data.len() > crate::history::MAX_STREAM_ACCOUNT_BYTES {
-                        return false; // too big for the client; stays labelled
                     }
                     // Lookup tables are resolved from the record; the runtime
                     // never reads their bytes here.
@@ -840,15 +837,15 @@ impl Scope {
                     });
                     !covered
                 })
-                .map(|(_, key)| key.clone())
+                .map(|(_, key)| {
+                    let size = ctx.pre_account_owned(key).map_or(0, |a| a.data.len());
+                    (key.clone(), size)
+                })
                 .collect();
             if !wanted.is_empty() {
-                match stream.latest_before_windows(
-                    &wanted,
-                    floor_slot.saturating_add(1),
-                    stream.lookback,
-                    stream.deep_lookback,
-                ) {
+                // Size decides the first window: a large account is asked
+                // over a few slots at a time (see `history`).
+                match stream.latest_before_sized(&wanted, floor_slot.saturating_add(1)) {
                     Ok(found) => {
                         if trace {
                             eprintln!(

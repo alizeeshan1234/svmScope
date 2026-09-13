@@ -6,10 +6,10 @@
 //! Market) carries every changed account's bytes per slot on a rolling
 //! window of about three months, with a free tier and no card. This module
 //! asks it, on demand, for the last change of each wanted account before a
-//! slot, by running the `substreams` client as a subprocess over a bounded
-//! slot range. What it returns is exact at the target slot: the stream
-//! records every change, so "no newer change before the slot" means the
-//! bytes are the bytes at that slot.
+//! slot, over a native gRPC client (see [`crate::substreams`]) and a
+//! bounded slot range. What it returns is exact at the target slot: the
+//! stream records every change, so "no newer change before the slot" means
+//! the bytes are the bytes at that slot.
 //!
 //! Every version fetched is handed back to the caller to write into its own
 //! record store, so the stream is asked once per account and slot, never
@@ -18,27 +18,25 @@
 use {
     crate::error::{Error, Result},
     crate::records::Version,
+    crate::substreams::{self, AccountsAt, Modules},
     crate::AccountState,
-    std::{collections::HashMap, path::PathBuf, process::Command},
+    std::{collections::HashMap, sync::Arc, time::Duration},
 };
 
-/// The account-changes stream, reachable through the `substreams` client.
+/// The account-changes stream.
 #[derive(Debug, Clone)]
 pub struct HistoryStream {
-    /// Path to the `substreams` binary.
-    pub bin: PathBuf,
-    /// The account-changes endpoint.
+    /// The account-changes endpoint, `https://host:port`.
     pub endpoint: String,
-    /// The package and module that filter by account.
-    pub package: String,
+    /// The package's module graph, sent with every call.
+    pub modules: Arc<Modules>,
     /// Slots streamed before the target on the first try: enough for any
-    /// account that changes every few minutes.
+    /// small account that changes every few minutes.
     pub lookback: u64,
-    /// Slots streamed on the second try, for accounts the first missed.
-    /// In production mode the server sends nothing for blocks without a
-    /// matching account and skips executing them, so a long range over a
-    /// quiet account costs seconds and near-zero egress (about 100,000
-    /// slots, eleven hours, in under a minute).
+    /// The furthest the search looks back, in slots. In production mode the
+    /// server sends nothing for blocks without a matching account and skips
+    /// executing them, so a long range over a quiet account costs seconds
+    /// and near-zero egress.
     pub deep_lookback: u64,
     /// API keys, tried in order. The provider's concurrency limit is per
     /// account, so keys from different accounts are independent slots; a
@@ -47,26 +45,31 @@ pub struct HistoryStream {
     pub keys: Vec<String>,
 }
 
-/// The endpoint the client speaks to; the key travels in `SUBSTREAMS_API_KEY`.
-pub const ENDPOINT: &str = "accounts.mainnet.sol.streamingfast.io:443";
-/// The published package that filters account changes by address or owner.
-pub const PACKAGE: &str = "solana-accounts-foundational";
-/// Accounts per client call: the filter is one expression, kept short.
+/// The endpoint the client speaks to; the key travels in an `x-api-key` header.
+pub const ENDPOINT: &str = "https://accounts.mainnet.sol.streamingfast.io:443";
+/// The published package that filters account changes by address or owner,
+/// bundled so no registry lookup ever happens.
+pub const PACKAGE: &[u8] = include_bytes!("../assets/solana-accounts-foundational-v0.1.1.spkg");
+/// The package's map module.
+const MODULE: &str = "filtered_accounts";
+/// Accounts per call: the filter is one expression, kept short.
 const BATCH: usize = 60;
-/// Accounts larger than this are never asked of the stream. The client
-/// renders bytes as base58, which is quadratic: a 1.7 MB order book takes
-/// minutes per version and would eat the egress quota in one replay. Such
-/// accounts stay on today's bytes, labelled.
-pub const MAX_STREAM_ACCOUNT_BYTES: usize = 256 * 1024;
-/// The free tier allows two concurrent streams per key; one process keeps
-/// to one at a time so parallel replays queue instead of failing.
+/// Accounts at least this large are searched in short windows: the stream
+/// sends every change in the range, and a busy order book changes every
+/// slot, so a wide window over it would cost its size times the width.
+pub const LARGE_ACCOUNT_BYTES: usize = 64 * 1024;
+/// First window for large accounts, in slots.
+pub const LARGE_FIRST_WINDOW: u64 = 16;
+/// One call may take this long before it is abandoned.
+const CALL_DEADLINE: Duration = Duration::from_secs(300);
+/// The free tier allows two concurrent streams per account; one process
+/// keeps to one at a time so parallel replays queue instead of failing.
 static STREAM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// After a key answers "concurrent stream limit exceeded", stay off it for
-/// this long: the client's own retries against that answer are what keep
-/// the slots occupied, so backing off is the only way they free up.
+/// this long so whatever holds its slots can drain.
 static LIMIT_HIT_UNTIL: std::sync::Mutex<Option<HashMap<String, std::time::Instant>>> =
     std::sync::Mutex::new(None);
-const LIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(300);
+const LIMIT_BACKOFF: Duration = Duration::from_secs(300);
 
 fn key_backed_off(key: &str) -> bool {
     let guard = LIMIT_HIT_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
@@ -84,10 +87,12 @@ fn back_off_key(key: &str) {
 }
 
 impl HistoryStream {
-    /// From the environment: on when `SUBSTREAMS_API_KEY` is set and the
-    /// client is found (`SVMSCOPE_SUBSTREAMS_BIN`, default `substreams` on
-    /// `PATH`). `SVMSCOPE_HISTORY_LOOKBACK` and
-    /// `SVMSCOPE_HISTORY_DEEP_LOOKBACK` tune the ranges (slots).
+    /// From the environment: on when `SUBSTREAMS_API_KEY` is set (one or
+    /// more keys, comma-separated). `SVMSCOPE_SUBSTREAMS_PACKAGE` names a
+    /// local `.spkg` to use instead of the bundled one;
+    /// `SVMSCOPE_SUBSTREAMS_ENDPOINT` another endpoint.
+    /// `SVMSCOPE_HISTORY_LOOKBACK` and `SVMSCOPE_HISTORY_DEEP_LOOKBACK`
+    /// tune the ranges (slots).
     pub fn from_env() -> Option<HistoryStream> {
         let keys: Vec<String> = std::env::var("SUBSTREAMS_API_KEY")
             .ok()?
@@ -99,32 +104,36 @@ impl HistoryStream {
         if keys.is_empty() {
             return None;
         }
-        let bin = PathBuf::from(
-            std::env::var("SVMSCOPE_SUBSTREAMS_BIN").unwrap_or_else(|_| "substreams".to_string()),
-        );
-        let found = bin.is_file()
-            || std::env::var_os("PATH")
-                .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(&bin).is_file()));
-        if !found {
-            eprintln!("history stream: `{}` not found; disabled", bin.display());
-            return None;
-        }
         let num = |k: &str, d: u64| {
             std::env::var(k)
                 .ok()
                 .and_then(|v| v.trim().parse().ok())
                 .unwrap_or(d)
         };
-        // A local `.spkg` (`SVMSCOPE_SUBSTREAMS_PACKAGE`) skips the registry
-        // lookup the client otherwise makes on every run.
-        let package = std::env::var("SVMSCOPE_SUBSTREAMS_PACKAGE")
+        let package = match std::env::var("SVMSCOPE_SUBSTREAMS_PACKAGE") {
+            Ok(path) if !path.trim().is_empty() => match std::fs::read(path.trim()) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    eprintln!("history stream: read {path}: {e}; using the bundled package");
+                    PACKAGE.to_vec()
+                }
+            },
+            _ => PACKAGE.to_vec(),
+        };
+        let modules = match substreams::package_modules(&package) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("history stream: {e}; disabled");
+                return None;
+            }
+        };
+        let endpoint = std::env::var("SVMSCOPE_SUBSTREAMS_ENDPOINT")
             .ok()
-            .filter(|p| !p.trim().is_empty())
-            .unwrap_or_else(|| PACKAGE.to_string());
+            .filter(|e| !e.trim().is_empty())
+            .unwrap_or_else(|| ENDPOINT.to_string());
         Some(HistoryStream {
-            bin,
-            endpoint: ENDPOINT.to_string(),
-            package,
+            endpoint,
+            modules: Arc::new(modules),
             lookback: num("SVMSCOPE_HISTORY_LOOKBACK", 5_000),
             deep_lookback: num("SVMSCOPE_HISTORY_DEEP_LOOKBACK", 100_000),
             keys,
@@ -156,11 +165,53 @@ impl HistoryStream {
             missing.retain(|a| !got.contains_key(a));
             found.extend(got);
             end = start;
-            // Each client call costs tens of seconds of fixed overhead, so
-            // widen fast: 5k, 20k, 80k covers a day in three calls.
+            // Each call costs seconds of fixed overhead, so widen fast:
+            // 5k, 20k, 80k covers a day in three calls.
             width = width.saturating_mul(4);
         }
         Ok(found)
+    }
+
+    /// [`Self::latest_before_windows`] for accounts of known size: small
+    /// ones start at `self.lookback`, large ones (at least
+    /// [`LARGE_ACCOUNT_BYTES`]) at [`LARGE_FIRST_WINDOW`] slots, both
+    /// widening to `self.deep_lookback`. Errors on one group do not lose
+    /// the other's results.
+    pub fn latest_before_sized(
+        &self,
+        accounts: &[(String, usize)],
+        slot: u64,
+    ) -> Result<HashMap<String, Version>> {
+        let mut large: Vec<String> = Vec::new();
+        let mut small: Vec<String> = Vec::new();
+        for (account, size) in accounts {
+            if *size >= LARGE_ACCOUNT_BYTES {
+                large.push(account.clone());
+            } else {
+                small.push(account.clone());
+            }
+        }
+        let mut found = HashMap::new();
+        let mut first_error = None;
+        for (group, first) in [(small, self.lookback), (large, LARGE_FIRST_WINDOW)] {
+            if group.is_empty() {
+                continue;
+            }
+            match self.latest_before_windows(&group, slot, first, self.deep_lookback) {
+                Ok(got) => found.extend(got),
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                }
+            }
+        }
+        match first_error {
+            Some(e) if found.is_empty() => Err(e),
+            Some(e) => {
+                eprintln!("history stream: {e}");
+                Ok(found)
+            }
+            None => Ok(found),
+        }
     }
 
     /// The last change of each of `accounts` strictly before `slot`, looking
@@ -179,7 +230,7 @@ impl HistoryStream {
         self.latest_before_in(accounts, start, slot)
     }
 
-    /// The last change of each of `accounts` in `[start, end)`.
+    /// The last change of each of `accounts` in `[start, slot)`.
     fn latest_before_in(
         &self,
         accounts: &[String],
@@ -196,113 +247,82 @@ impl HistoryStream {
                 .map(|a| format!("account:{a}"))
                 .collect::<Vec<_>>()
                 .join(" || ");
-            let run = |key: &str| {
-                Command::new(&self.bin)
-                    .env("SUBSTREAMS_API_KEY", key)
-                    .args([
-                        "run",
-                        "-e",
-                        &self.endpoint,
-                        &self.package,
-                        "filtered_accounts",
-                        "-s",
-                        &start.to_string(),
-                        "-t",
-                        &slot.to_string(),
-                        "-o",
-                        "jsonl",
-                        "--final-blocks-only",
-                        "--production-mode",
-                        "--limit-processed-blocks",
-                        "0",
-                        "-p",
-                        &format!("filtered_accounts={filter}"),
-                    ])
-                    .output()
-                    .map_err(|e| Error::Fixture(format!("history stream: run substreams: {e}")))
-            };
             let _serial = STREAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let limit_hit = |o: &std::process::Output| {
-                String::from_utf8_lossy(&o.stderr).contains("Concurrent stream limit exceeded")
-            };
             // Keys in order, skipping any that hit the limit recently. A
             // transient failure gets one retry on the same key; a limit
             // answer backs that key off and moves to the next.
-            let mut last_error = String::from("history stream: every key is backing off");
-            let mut result: Option<std::process::Output> = None;
+            let mut last_error = Error::Fixture("history stream: every key is backing off".into());
+            let mut result: Option<Vec<AccountsAt>> = None;
             for key in self.keys.iter().filter(|k| !key_backed_off(k)) {
-                let mut output = run(key)?;
-                if !output.status.success() && !limit_hit(&output) {
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                    output = run(key)?;
+                let call = substreams::Call {
+                    endpoint: &self.endpoint,
+                    api_key: key,
+                    modules: &self.modules,
+                    output_module: MODULE,
+                    params: &filter,
+                    start,
+                    stop: slot,
+                    deadline: CALL_DEADLINE,
+                };
+                let mut attempt = substreams::stream_accounts(&call);
+                if let Err(e) = &attempt {
+                    if !substreams::is_stream_limit(&e.to_string()) {
+                        std::thread::sleep(Duration::from_secs(2));
+                        attempt = substreams::stream_accounts(&call);
+                    }
                 }
-                if output.status.success() {
-                    result = Some(output);
-                    break;
+                match attempt {
+                    Ok(blocks) => {
+                        result = Some(blocks);
+                        break;
+                    }
+                    Err(e) => {
+                        if substreams::is_stream_limit(&e.to_string()) {
+                            back_off_key(key);
+                        }
+                        last_error = Error::Fixture(format!("history stream: {e}"));
+                    }
                 }
-                if limit_hit(&output) {
-                    back_off_key(key);
-                }
-                let err = String::from_utf8_lossy(&output.stderr);
-                let last = err
-                    .lines()
-                    .rev()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("");
-                last_error = format!(
-                    "history stream: substreams exited {}: {last}",
-                    output.status
-                );
             }
-            let Some(output) = result else {
-                return Err(Error::Fixture(last_error));
+            let Some(blocks) = result else {
+                return Err(last_error);
             };
-            out.extend(parse_jsonl(&String::from_utf8_lossy(&output.stdout), slot));
+            out.extend(collect_versions(blocks, slot));
         }
         Ok(out)
     }
 }
 
-/// The last version per account from the client's `jsonl` output, for
-/// blocks strictly before `slot`. Account bytes come base58-encoded.
-pub(crate) fn parse_jsonl(text: &str, slot: u64) -> HashMap<String, Version> {
+/// The last version per account from streamed blocks, for blocks strictly
+/// before `slot`.
+pub(crate) fn collect_versions(blocks: Vec<AccountsAt>, slot: u64) -> HashMap<String, Version> {
     let mut out: HashMap<String, Version> = HashMap::new();
-    for line in text.lines() {
-        let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let Some(block) = rec["@block"].as_u64() else {
-            continue;
-        };
-        if block >= slot {
+    for block in blocks {
+        if block.slot >= slot {
             continue;
         }
-        let Some(accounts) = rec["@data"]["accounts"].as_array() else {
-            continue;
-        };
-        for a in accounts {
-            let Some(address) = a["address"].as_str() else {
-                continue;
-            };
-            let deleted = a["deleted"].as_bool().unwrap_or(false);
-            let state = if deleted {
+        for a in block.accounts {
+            let address = bs58::encode(&a.address).into_string();
+            let state = if a.deleted {
                 None
             } else {
-                let data = a["data"]
-                    .as_str()
-                    .and_then(|s| bs58::decode(s).into_vec().ok())
-                    .unwrap_or_default();
                 Some(AccountState {
-                    data,
+                    data: a.data,
                     // The stream carries no lamports; the caller fills them in
                     // from the account's current balance (see `apply`).
                     lamports: 0,
-                    owner: a["owner"].as_str().unwrap_or_default().to_string(),
+                    owner: bs58::encode(&a.owner).into_string(),
                 })
             };
-            let newer = out.get(address).is_none_or(|v| block >= v.slot);
+            let newer = out.get(&address).is_none_or(|v| block.slot >= v.slot);
             if newer {
-                out.insert(address.to_string(), Version { slot: block, state });
+                out.insert(
+                    address,
+                    Version {
+                        slot: block.slot,
+                        state,
+                    },
+                );
             }
         }
     }
@@ -319,30 +339,55 @@ pub(crate) fn lamports_for(current: Option<u64>, data_len: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use {super::*, crate::substreams::Account};
+
+    fn acct(address: u8, data: &[u8], deleted: bool) -> Account {
+        Account {
+            address: vec![address; 32],
+            owner: vec![7; 32],
+            data: data.to_vec(),
+            deleted,
+        }
+    }
 
     #[test]
     fn keeps_the_last_change_before_the_slot_per_account() {
-        let data = bs58::encode([1u8, 2, 3]).into_string();
-        let later = bs58::encode([9u8]).into_string();
-        let text = format!(
-            "{{\"@block\":100,\"@data\":{{\"accounts\":[{{\"address\":\"A\",\"owner\":\"O\",\"data\":\"{data}\"}}]}}}}\n\
-             {{\"@block\":150,\"@data\":{{\"accounts\":[{{\"address\":\"A\",\"owner\":\"O\",\"data\":\"{later}\"}},{{\"address\":\"B\",\"owner\":\"O\",\"deleted\":true}}]}}}}\n\
-             {{\"@block\":200,\"@data\":{{\"accounts\":[{{\"address\":\"A\",\"owner\":\"O\",\"data\":\"{data}\"}}]}}}}\n\
-             not json\n"
-        );
-        let out = parse_jsonl(&text, 200);
-        let a = &out["A"];
+        let blocks = vec![
+            AccountsAt {
+                slot: 100,
+                accounts: vec![acct(1, &[1, 2, 3], false)],
+            },
+            AccountsAt {
+                slot: 150,
+                accounts: vec![acct(1, &[9], false), acct(2, &[], true)],
+            },
+            AccountsAt {
+                slot: 200,
+                accounts: vec![acct(1, &[1, 2, 3], false)],
+            },
+        ];
+        let out = collect_versions(blocks, 200);
+        let a = &out[&bs58::encode([1u8; 32]).into_string()];
         assert_eq!(a.slot, 150);
         assert_eq!(a.state.as_ref().unwrap().data, vec![9]);
-        assert_eq!(a.state.as_ref().unwrap().owner, "O");
-        assert!(out["B"].state.is_none());
-        assert_eq!(out["B"].slot, 150);
+        assert_eq!(
+            a.state.as_ref().unwrap().owner,
+            bs58::encode([7u8; 32]).into_string()
+        );
+        let b = &out[&bs58::encode([2u8; 32]).into_string()];
+        assert!(b.state.is_none());
+        assert_eq!(b.slot, 150);
     }
 
     #[test]
     fn lamports_fall_back_to_the_rent_minimum() {
         assert_eq!(lamports_for(Some(5), 100), 5);
         assert_eq!(lamports_for(None, 100), 228 * 6_960);
+    }
+
+    #[test]
+    fn the_bundled_package_loads() {
+        let modules = substreams::package_modules(PACKAGE).unwrap();
+        assert!(modules.modules.iter().any(|m| m.name == MODULE));
     }
 }

@@ -156,6 +156,7 @@ mod scope;
 mod search;
 pub mod spec;
 mod submit;
+pub mod substreams;
 mod trace;
 pub(crate) mod utils;
 #[cfg(test)]

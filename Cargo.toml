@@ -28,6 +28,7 @@ include = [
     "/README.md",
     "/CHANGELOG.md",
     "/LICENSE",
+    "/assets/solana-accounts-foundational-v0.1.1.spkg",
 ]
 
 # The HTTP API server lives in its own workspace crate (`server/`,
@@ -72,6 +73,15 @@ solana-instruction = "=3.4.1"
 solana-message = "=4.4.1"
 solana-signer = "=3.0.1"
 sha2 = "0.10"
+# The account-changes stream (`history`): a native gRPC client for the
+# Substreams `Stream.Blocks` call, messages hand-derived from the published
+# protos (no protoc at build time). tokio only runs that one call; the rest
+# of the library stays blocking.
+prost = "0.14"
+tonic = { version = "0.14", default-features = false, features = ["channel", "tls-ring", "tls-webpki-roots", "gzip"] }
+tonic-prost = "0.14"
+http = "1"
+tokio = { version = "1", features = ["rt", "time"] }
 
 [features]
 # The profiler is on by default so `cargo install svmscope` profiles out of the
