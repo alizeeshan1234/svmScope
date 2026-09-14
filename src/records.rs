@@ -35,7 +35,8 @@ use {
     solana_client::{rpc_client::RpcClient, rpc_request::RpcRequest},
     std::{
         collections::{BTreeSet, HashMap},
-        io::{Read, Write},
+        hash::{Hash, Hasher},
+        io::{Read, Seek, SeekFrom, Write},
         path::PathBuf,
         sync::Mutex,
     },
@@ -58,6 +59,14 @@ pub trait StateStore: Send + Sync {
     fn latest_at_or_before(&self, address: &str, slot: u64) -> Result<Option<Version>>;
     /// Record `state` as the version of `address` at `slot`.
     fn record(&self, address: &str, slot: u64, state: Option<&AccountState>) -> Result<()>;
+    /// Whether `state` equals the newest recorded version of `address`: what
+    /// the poller asks four hundred times every two seconds. The default
+    /// materialises the newest version; a store can answer from a digest.
+    fn latest_is(&self, address: &str, state: Option<&AccountState>) -> Result<bool> {
+        Ok(self
+            .latest_at_or_before(address, u64::MAX)?
+            .is_some_and(|v| v.state.as_ref() == state))
+    }
     /// Add `address` to the watched set (idempotent).
     fn watch(&self, address: &str) -> Result<()>;
     /// Every watched address.
@@ -300,6 +309,122 @@ fn materialize_all(records: &[Record]) -> Result<Vec<Version>> {
     Ok(out)
 }
 
+/// Walk one log, materialising each version in turn and handing it to `f`
+/// without keeping the others: the memory of one state, not of the chain.
+/// `thin`, `export_since` and restores use this; a hot account's log holds
+/// thousands of versions and materialising them all at once is what used to
+/// take the free instance past its 512 MB.
+fn for_each_version(
+    bytes: &[u8],
+    mut f: impl FnMut(u64, Option<&AccountState>) -> Result<()>,
+) -> Result<()> {
+    let mut current: Option<AccountState> = None;
+    for e in index_of(bytes) {
+        let payload = bytes
+            .get(e.offset..e.offset + e.len)
+            .ok_or_else(|| Error::Fixture("record store: index out of range".into()))?;
+        current = match e.kind {
+            KIND_FULL => Some(decode_full(payload)?),
+            KIND_DIFF => {
+                let base = current
+                    .as_ref()
+                    .ok_or_else(|| Error::Fixture("record store: diff without base".into()))?;
+                Some(apply_diff(base, payload)?)
+            }
+            _ => None,
+        };
+        f(e.slot, current.as_ref())?;
+    }
+    Ok(())
+}
+
+/// Encodes a chain one version at a time, keeping only the previous state.
+struct ChainWriter {
+    out: Vec<u8>,
+    prev: Option<AccountState>,
+    since_full: usize,
+    count: usize,
+}
+
+impl ChainWriter {
+    fn new() -> Self {
+        ChainWriter {
+            out: Vec::new(),
+            prev: None,
+            since_full: 0,
+            count: 0,
+        }
+    }
+
+    fn push(&mut self, slot: u64, state: Option<&AccountState>) {
+        let (kind, payload) = match (state, self.prev.as_ref()) {
+            (None, _) => (KIND_ABSENT, Vec::new()),
+            (Some(s), Some(base)) if self.since_full < FULL_EVERY => match encode_diff(base, s) {
+                Some(d) => (KIND_DIFF, d),
+                None => (KIND_FULL, encode_full(s)),
+            },
+            (Some(s), _) => (KIND_FULL, encode_full(s)),
+        };
+        self.since_full = if kind == KIND_FULL {
+            0
+        } else {
+            self.since_full + 1
+        };
+        self.prev = state.cloned();
+        write_record(
+            &mut self.out,
+            &Record {
+                slot,
+                kind,
+                payload,
+            },
+        );
+        self.count += 1;
+    }
+}
+
+/// A digest of a state for the poller's "unchanged?" question.
+fn state_digest(state: Option<&AccountState>) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match state {
+        None => 0u8.hash(&mut h),
+        Some(s) => {
+            1u8.hash(&mut h);
+            s.lamports.hash(&mut h);
+            s.owner.hash(&mut h);
+            s.data.hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+/// Which slots survive thinning as of `now`, mirroring [`thinned`] on slots
+/// alone so a log can be thinned without materialising it.
+fn kept_slots(slots: &[u64], now: u64) -> Vec<bool> {
+    let dense_from = now.saturating_sub(DENSE_SLOTS);
+    let keep_from = now.saturating_sub(RETENTION_SLOTS);
+    let mut keep = vec![false; slots.len()];
+    let mut last_bucket: Option<(u64, usize)> = None;
+    for (i, &slot) in slots.iter().enumerate() {
+        if slot < keep_from {
+            continue;
+        }
+        if slot >= dense_from {
+            keep[i] = true;
+            continue;
+        }
+        let bucket = slot / SPARSE_BUCKET;
+        if let Some((b, prev)) = last_bucket {
+            if b == bucket {
+                keep[prev] = false; // newest per bucket wins
+            }
+        }
+        keep[i] = true;
+        last_bucket = Some((bucket, i));
+    }
+    keep
+}
+
 /// Encode `versions` (slot-ordered) as a fresh chain: fulls where required,
 /// diffs elsewhere.
 fn encode_chain(versions: &[Version]) -> Vec<Record> {
@@ -396,6 +521,9 @@ fn index_of(bytes: &[u8]) -> Vec<Entry> {
 pub struct LogStore {
     root: PathBuf,
     index: Mutex<HashMap<String, Vec<Entry>>>,
+    /// Digest of each account's newest version, so the poller's
+    /// "unchanged?" costs a hash, not a log read.
+    latest: Mutex<HashMap<String, u64>>,
     watched: Mutex<BTreeSet<String>>,
     /// Contiguous polled ranges `(first, last)`, ascending.
     coverage: Mutex<Vec<(u64, u64)>>,
@@ -446,6 +574,7 @@ impl LogStore {
         Ok(LogStore {
             root,
             index: Mutex::new(index),
+            latest: Mutex::new(HashMap::new()),
             watched: Mutex::new(watched),
             coverage: Mutex::new(coverage),
         })
@@ -461,6 +590,42 @@ impl LogStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(e) => Err(io_err(e)),
         }
+    }
+
+    /// The bytes `[from, to)` of one log: a lookup reads its chain, not the file.
+    fn read_range(&self, address: &str, from: usize, to: usize) -> Result<Vec<u8>> {
+        let mut f = std::fs::File::open(self.log_path(address)).map_err(io_err)?;
+        f.seek(SeekFrom::Start(from as u64)).map_err(io_err)?;
+        let mut out = vec![0u8; to.saturating_sub(from)];
+        f.read_exact(&mut out).map_err(io_err)?;
+        Ok(out)
+    }
+
+    /// Append an already-encoded, self-contained chain to one log.
+    fn append_chain(&self, address: &str, body: &[u8]) -> Result<usize> {
+        let path = self.log_path(address);
+        let base = std::fs::metadata(&path)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut f| f.write_all(body))
+            .map_err(io_err)?;
+        let added = index_of(body);
+        let n = added.len();
+        self.index
+            .lock()
+            .map_err(lock_err)?
+            .entry(address.to_string())
+            .or_default()
+            .extend(added.into_iter().map(|e| Entry {
+                offset: e.offset + base,
+                ..e
+            }));
+        self.latest.lock().map_err(lock_err)?.remove(address);
+        Ok(n)
     }
 
     fn entries(&self, address: &str) -> Result<Vec<Entry>> {
@@ -491,11 +656,12 @@ impl LogStore {
         while entries[start].kind == KIND_DIFF && start > 0 {
             start -= 1;
         }
-        let bytes = self.read_log(address)?;
+        let from = entries[start].offset;
+        let bytes = self.read_range(address, from, entries[pos].offset + entries[pos].len)?;
         let mut current: Option<AccountState> = None;
         for e in &entries[start..=pos] {
             let payload = bytes
-                .get(e.offset..e.offset + e.len)
+                .get(e.offset - from..e.offset - from + e.len)
                 .ok_or_else(|| Error::Fixture("record store: index out of range".into()))?;
             current = match e.kind {
                 KIND_FULL => Some(decode_full(payload)?),
@@ -521,6 +687,11 @@ impl LogStore {
         for r in &records {
             write_record(&mut bytes, r);
         }
+        self.rewrite_bytes(address, bytes)
+    }
+
+    /// Replace one account's log with `bytes`, an encoded chain.
+    fn rewrite_bytes(&self, address: &str, bytes: Vec<u8>) -> Result<()> {
         let path = self.log_path(address);
         let tmp = path.with_extension("log.tmp");
         std::fs::write(&tmp, &bytes).map_err(io_err)?;
@@ -529,6 +700,7 @@ impl LogStore {
             .lock()
             .map_err(lock_err)?
             .insert(address.to_string(), index_of(&bytes));
+        self.latest.lock().map_err(lock_err)?.remove(address);
         Ok(())
     }
 
@@ -546,12 +718,26 @@ impl LogStore {
             .collect();
         let mut dropped = 0;
         for address in addresses {
-            let versions = materialize_all(&read_records(&self.read_log(&address)?)?)?;
-            let kept = thinned(&versions, now);
-            if kept.len() != versions.len() {
-                dropped += versions.len() - kept.len();
-                self.rewrite(&address, &kept)?;
+            let bytes = self.read_log(&address)?;
+            let slots: Vec<u64> = index_of(&bytes).iter().map(|e| e.slot).collect();
+            let keep = kept_slots(&slots, now);
+            let dropping = keep.iter().filter(|k| !**k).count();
+            if dropping == 0 {
+                continue;
             }
+            // One pass over the log, one state in memory, the kept versions
+            // re-encoded as they go by.
+            let mut w = ChainWriter::new();
+            let mut i = 0;
+            for_each_version(&bytes, |slot, state| {
+                if keep[i] {
+                    w.push(slot, state);
+                }
+                i += 1;
+                Ok(())
+            })?;
+            self.rewrite_bytes(&address, w.out)?;
+            dropped += dropping;
         }
         let keep_from = now.saturating_sub(RETENTION_SLOTS);
         let mut cov = self.coverage.lock().map_err(lock_err)?;
@@ -585,15 +771,20 @@ impl LogStore {
             .collect();
         let mut pack = Vec::new();
         for address in addresses {
-            let versions = materialize_all(&read_records(&self.read_log(&address)?)?)?;
-            let newer: Vec<Version> = versions.into_iter().filter(|v| v.slot > since).collect();
-            if newer.is_empty() {
+            let bytes = self.read_log(&address)?;
+            // The first version pushed is written in full, so the pack stands
+            // on its own from `since`.
+            let mut w = ChainWriter::new();
+            for_each_version(&bytes, |slot, state| {
+                if slot > since {
+                    w.push(slot, state);
+                }
+                Ok(())
+            })?;
+            if w.count == 0 {
                 continue;
             }
-            let mut body = Vec::new();
-            for r in &encode_chain(&newer) {
-                write_record(&mut body, r);
-            }
+            let body = w.out;
             put_str(&mut pack, &address);
             pack.extend_from_slice(&(body.len() as u32).to_le_bytes());
             pack.extend_from_slice(&body);
@@ -653,6 +844,15 @@ impl LogStore {
                 continue;
             }
             self.watch(&address)?;
+            // A pack's chain is self-contained, so when it only adds newer
+            // versions (a fresh store, or the next hourly pack) it is appended
+            // as bytes. Only an overlap needs the versions merged.
+            let newest_here = self.entries(&address)?.last().map(|e| e.slot);
+            let oldest_incoming = index_of(body).first().map(|e| e.slot);
+            if newest_here.is_none() || oldest_incoming > newest_here {
+                added += self.append_chain(&address, body)?;
+                continue;
+            }
             let incoming = materialize_all(&read_records(body)?)?;
             let existing = materialize_all(&read_records(&self.read_log(&address)?)?)?;
             let mut merged: HashMap<u64, Version> =
@@ -740,7 +940,36 @@ impl StateStore for LogStore {
                 offset: offset + HEADER_LEN,
                 len: record.payload.len(),
             });
+        self.latest
+            .lock()
+            .map_err(lock_err)?
+            .insert(address.to_string(), state_digest(state));
         Ok(())
+    }
+
+    fn latest_is(&self, address: &str, state: Option<&AccountState>) -> Result<bool> {
+        let cached = self.latest.lock().map_err(lock_err)?.get(address).copied();
+        let digest = match cached {
+            Some(d) => d,
+            None => {
+                // First question about this account since the store opened:
+                // one chain read, then the digest answers.
+                let d = match self.entries(address)?.last() {
+                    None => return Ok(false),
+                    Some(_) => state_digest(
+                        self.version_at(address, u64::MAX)?
+                            .and_then(|v| v.state)
+                            .as_ref(),
+                    ),
+                };
+                self.latest
+                    .lock()
+                    .map_err(lock_err)?
+                    .insert(address.to_string(), d);
+                d
+            }
+        };
+        Ok(digest == state_digest(state))
     }
 
     fn watch(&self, address: &str) -> Result<()> {
@@ -837,9 +1066,7 @@ pub fn poll_once(
                     owner: value["owner"].as_str().unwrap_or_default().to_string(),
                 })
             };
-            let unchanged = store
-                .latest_at_or_before(address, u64::MAX)?
-                .is_some_and(|v| v.state == state);
+            let unchanged = store.latest_is(address, state.as_ref())?;
             if !unchanged {
                 store.record(address, slot, state.as_ref())?;
                 recorded += 1;
