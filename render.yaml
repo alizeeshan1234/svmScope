@@ -1,20 +1,39 @@
-# Render.com blueprint — deploy svmscope from GitHub with no local Docker or CLI.
-#   1. Push (done).
-#   2. render.com → New → Blueprint → connect this repo.
-#   3. Set SVMSCOPE_RPC_URL in the dashboard (your own RPC; the public one is rate-limited).
-# Builds the Dockerfile remotely on Render's builders.
+# Render.com blueprint — deploy svmscope from a prebuilt image.
+#
+# The image is built by GitHub Actions (.github/workflows/image.yml) on every
+# push to master and published to ghcr.io/alizeeshan1234/svmscope. Render only
+# pulls it, so a deploy costs none of the free plan's pipeline minutes (a Rust
+# build on Render's builders burns ~20 of the 500 a month).
+#
+# One-time setup:
+#   1. Let the workflow publish the image once (Actions → image), then make the
+#      package public: github.com/alizeeshan1234?tab=packages → svmscope →
+#      Package settings → Change visibility → Public. Render pulls public
+#      images with no credentials.
+#   2. A service's runtime cannot change after creation, so delete the old
+#      Dockerfile-built `svmscope` service and sync this blueprint again
+#      (Render → Blueprints → the repo → Sync). It recreates `svmscope` as an
+#      image service under the same URL, svmscope.onrender.com.
+#   3. Re-enter the `sync: false` values below in the dashboard.
+#   4. Settings → Deploy Hook → copy the URL into the repository secret
+#      RENDER_DEPLOY_HOOK, so each published image deploys itself.
 services:
   - type: web
     name: svmscope
-    runtime: docker
-    dockerfilePath: ./Dockerfile
+    runtime: image
+    image:
+      url: ghcr.io/alizeeshan1234/svmscope:latest
     plan: free
     healthCheckPath: /api
     envVars:
       - key: PORT
         value: "3000"
       - key: SVMSCOPE_RPC_URL
-        sync: false # set your RPC endpoint in the Render dashboard
+        sync: false # your own RPC endpoint; the public one is rate-limited
+      # Past account bytes for exact replay at any slot in the window come
+      # from StreamingFast's account-changes Substreams (free tier, no card).
+      - key: SUBSTREAMS_API_KEY
+        sync: false # one or more Graph Market keys, comma-separated
       # Exact historical replay: record watched accounts and keep the 30-day
       # window in a GitHub repository's release assets (see README).
       - key: SVMSCOPE_RECORD_DIR
@@ -23,3 +42,9 @@ services:
         sync: false # owner/repo of the data repository
       - key: SVMSCOPE_GITHUB_TOKEN
         sync: false # fine-grained token, Contents read/write on that repo only
+      # The free instance has 512 MB. One stream call at a time and a shorter
+      # same-block prefix keep an old-slot replay under it.
+      - key: SVMSCOPE_STREAM_PARALLEL
+        value: "1"
+      - key: SVMSCOPE_PREFIX_MAX_TXS
+        value: "40"
