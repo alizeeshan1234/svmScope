@@ -77,7 +77,7 @@
 
 /* ---------- base ---------- */
 * { box-sizing: border-box; }
-html { scroll-behavior: auto; }
+html { scroll-behavior: auto; color-scheme: dark; }
 body {
   margin: 0;
   font-family: var(--font-sans);
@@ -228,6 +228,10 @@ main { max-width: 1080px; margin: 0 auto; padding: var(--s-6) var(--s-6) 96px; }
 
 /* the hero's own search — the main way in */
 .at-time { min-width: 215px; max-width: 240px; font-size: 12px; }
+/* Native date/time pickers and selects draw their own controls; tell the browser the page is dark so the calendar glyph and the dropdown are light. */
+input, select, textarea { color-scheme: dark; }
+input[type=datetime-local]::-webkit-calendar-picker-indicator { filter: invert(1) brightness(.85); opacity: .8; cursor: pointer; }
+input[type=datetime-local]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
 .page-search {
   display: flex; align-items: center; gap: var(--s-3);
   background: var(--bg-inset); border: 1px solid var(--border); border-radius: var(--r-md);
