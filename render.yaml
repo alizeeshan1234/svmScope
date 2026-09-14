@@ -19,7 +19,7 @@
 #      RENDER_DEPLOY_HOOK, so each published image deploys itself.
 services:
   - type: web
-    name: svmscope
+    name: svmscope-engine
     runtime: image
     image:
       url: ghcr.io/alizeeshan1234/svmscope:latest

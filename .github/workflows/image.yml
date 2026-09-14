@@ -3,8 +3,8 @@
 # deploys a prebuilt image and spends none of its pipeline minutes building.
 #
 # Every push to master publishes ghcr.io/<owner>/svmscope:latest and :<sha>.
-# When the RENDER_DEPLOY_HOOK secret is set (Render → the service → Settings
-# → Deploy Hook), the workflow pings it and Render pulls the new image.
+# With the RENDER_API_KEY and RENDER_SERVICE_ID secrets set, the workflow
+# then asks Render to deploy, and Render pulls the new image.
 name: image
 on:
   push:
@@ -50,8 +50,14 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Tell Render to pull the new image
-        if: ${{ env.HOOK != '' }}
+      # Render has no build to do: it pulls the image just pushed. The
+      # service id and an API key live in the repository secrets.
+      - name: Tell Render to deploy the new image
+        if: ${{ env.KEY != '' }}
         env:
-          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
-        run: curl -fsS -X POST "$HOOK" > /dev/null && echo "deploy requested"
+          KEY: ${{ secrets.RENDER_API_KEY }}
+          SERVICE: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          curl -fsS -X POST "https://api.render.com/v1/services/$SERVICE/deploys" \
+            -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+            -d '{"clearCache":"do_not_clear"}' > /dev/null && echo "deploy requested"
