@@ -1950,7 +1950,7 @@ function wireSimSlot() {
   if (!input || !note) return;
   const refresh = () => {
     const typed = Number(input.value);
-    const own = analysis?.overview?.slot;
+    const own = analysis?.landed_slot ?? analysis?.overview?.slot;
     if (Number.isInteger(typed) && typed >= 1) {
       note.textContent = typed === own ? 'the state the moment it landed' : `the state as of slot ${fmt(typed)}`;
     } else if (analysis?.slot != null) {
