@@ -261,6 +261,44 @@ fn github_queue() -> Option<svmscope::records::github::GithubQueue> {
 /// Set on SIGTERM / Ctrl-C: the recorder pushes its unpushed tail to the
 /// queue and stops, so a redeploy loses nothing that was recorded.
 static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Finished as-of replays, keyed by endpoint, signature and slot. The world
+/// at a past slot does not change, so the second person to open the same
+/// link, or the same person coming back, gets the answer at once instead of
+/// waiting minutes for the stream again. Bounded and time-limited.
+type AtCache =
+    std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<serde_json::Value>)>;
+static AT_CACHE: std::sync::LazyLock<std::sync::Mutex<AtCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+const AT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+const AT_CACHE_MAX: usize = 200;
+
+fn at_cache_get(key: &str) -> Option<std::sync::Arc<serde_json::Value>> {
+    let cache = AT_CACHE.lock().ok()?;
+    let (at, v) = cache.get(key)?;
+    (at.elapsed() < AT_CACHE_TTL).then(|| std::sync::Arc::clone(v))
+}
+
+fn at_cache_put(key: String, value: serde_json::Value) -> std::sync::Arc<serde_json::Value> {
+    let value = std::sync::Arc::new(value);
+    if let Ok(mut cache) = AT_CACHE.lock() {
+        cache.retain(|_, (at, _)| at.elapsed() < AT_CACHE_TTL);
+        if cache.len() >= AT_CACHE_MAX {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(
+            key,
+            (std::time::Instant::now(), std::sync::Arc::clone(&value)),
+        );
+    }
+    value
+}
 /// Set by the recorder thread once its final push is done (or it never ran).
 static RECORDER_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
@@ -1717,13 +1755,21 @@ fn replay_at_response(
 async fn analyze_at_handler(
     Path(signature): Path<String>,
     Query(q): Query<AtSlotQuery>,
-) -> Result<Json<svmscope::AnalysisAt>, (StatusCode, String)> {
+) -> Result<Json<std::sync::Arc<serde_json::Value>>, (StatusCode, String)> {
     if q.slot == Some(0) {
         return Err((StatusCode::BAD_REQUEST, "slot must be positive".to_string()));
     }
     let (url, archive) =
         endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
     let slot = q.slot;
+    let key = format!(
+        "analyze_at|{url}|{}|{signature}|{}",
+        archive.as_deref().unwrap_or(""),
+        slot.map_or("own".to_string(), |s| s.to_string())
+    );
+    if let Some(hit) = at_cache_get(&key) {
+        return Ok(Json(hit));
+    }
     let out = tokio::task::spawn_blocking(move || {
         let scope = scope_for(url, archive);
         if let (Some(slot), Ok(tip)) = (slot, scope.client().get_slot()) {
@@ -1750,7 +1796,10 @@ async fn analyze_at_handler(
         )
     })?;
     match out {
-        Ok(v) => Ok(Json(v)),
+        Ok(v) => match serde_json::to_value(&v) {
+            Ok(value) => Ok(Json(at_cache_put(key, value))),
+            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("encode: {e}"))),
+        },
         Err(svmscope::Error::Fixture(msg)) if msg.contains("in the future") => {
             Err((StatusCode::BAD_REQUEST, msg))
         }
@@ -1763,7 +1812,7 @@ async fn analyze_at_handler(
 async fn replay_at_handler(
     Path(signature): Path<String>,
     Query(q): Query<AtSlotQuery>,
-) -> Result<Json<ReplayAtSlotResponse>, (StatusCode, String)> {
+) -> Result<Json<std::sync::Arc<serde_json::Value>>, (StatusCode, String)> {
     let Some(slot) = q.slot else {
         return Err((StatusCode::BAD_REQUEST, "slot is required".to_string()));
     };
@@ -1772,6 +1821,13 @@ async fn replay_at_handler(
     }
     let (url, archive) =
         endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+    let key = format!(
+        "replay_at|{url}|{}|{signature}|{slot}",
+        archive.as_deref().unwrap_or("")
+    );
+    if let Some(hit) = at_cache_get(&key) {
+        return Ok(Json(hit));
+    }
     let out = tokio::task::spawn_blocking(move || {
         let scope = scope_for(url, archive);
         if let Ok(tip) = scope.client().get_slot() {
@@ -1792,7 +1848,10 @@ async fn replay_at_handler(
         )
     })?;
     match out {
-        Ok(v) => Ok(Json(v)),
+        Ok(v) => match serde_json::to_value(&v) {
+            Ok(value) => Ok(Json(at_cache_put(key, value))),
+            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("encode: {e}"))),
+        },
         Err(svmscope::Error::Fixture(msg)) if msg.contains("in the future") => {
             Err((StatusCode::BAD_REQUEST, msg))
         }

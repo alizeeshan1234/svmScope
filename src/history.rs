@@ -175,7 +175,7 @@ impl HistoryStream {
         Some(HistoryStream {
             endpoint,
             modules: Arc::new(modules),
-            lookback: num("SVMSCOPE_HISTORY_LOOKBACK", 5_000),
+            lookback: num("SVMSCOPE_HISTORY_LOOKBACK", 20_000),
             deep_lookback: num("SVMSCOPE_HISTORY_DEEP_LOOKBACK", 100_000),
             keys,
         })
@@ -215,9 +215,9 @@ impl HistoryStream {
             missing.retain(|a| !got.contains_key(a));
             found.extend(got);
             end = start;
-            // Each call costs seconds of fixed overhead, so widen fast:
-            // 5k, 20k, 80k covers a day in three calls.
-            width = width.saturating_mul(4);
+            // Each call costs about twelve seconds of fixed overhead, so
+            // widen fast: 20k then 80k covers the deep lookback in two calls.
+            width = width.saturating_mul(5);
         }
         Ok(found)
     }
