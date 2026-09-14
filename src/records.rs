@@ -338,6 +338,54 @@ fn for_each_version(
     Ok(())
 }
 
+/// A log walked one version at a time, pull-style, so two logs can be
+/// merged in slot order with one state each in memory.
+struct VersionWalker<'a> {
+    bytes: &'a [u8],
+    entries: Vec<Entry>,
+    at: usize,
+    current: Option<AccountState>,
+}
+
+impl<'a> VersionWalker<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        VersionWalker {
+            bytes,
+            entries: index_of(bytes),
+            at: 0,
+            current: None,
+        }
+    }
+
+    fn peek_slot(&self) -> Option<u64> {
+        self.entries.get(self.at).map(|e| e.slot)
+    }
+
+    /// Advance to the next version; `Ok(None)` at the end.
+    fn next(&mut self) -> Result<Option<(u64, Option<AccountState>)>> {
+        let Some(e) = self.entries.get(self.at).copied() else {
+            return Ok(None);
+        };
+        self.at += 1;
+        let payload = self
+            .bytes
+            .get(e.offset..e.offset + e.len)
+            .ok_or_else(|| Error::Fixture("record store: index out of range".into()))?;
+        self.current = match e.kind {
+            KIND_FULL => Some(decode_full(payload)?),
+            KIND_DIFF => {
+                let base = self
+                    .current
+                    .as_ref()
+                    .ok_or_else(|| Error::Fixture("record store: diff without base".into()))?;
+                Some(apply_diff(base, payload)?)
+            }
+            _ => None,
+        };
+        Ok(Some((e.slot, self.current.clone())))
+    }
+}
+
 /// Encodes a chain one version at a time, keeping only the previous state.
 struct ChainWriter {
     out: Vec<u8>,
@@ -855,19 +903,43 @@ impl LogStore {
                 added += self.append_chain(&address, body)?;
                 continue;
             }
-            let incoming = materialize_all(&read_records(body)?)?;
-            let existing = materialize_all(&read_records(&self.read_log(&address)?)?)?;
-            let mut merged: HashMap<u64, Version> =
-                existing.into_iter().map(|v| (v.slot, v)).collect();
-            for v in incoming {
-                if let std::collections::hash_map::Entry::Vacant(e) = merged.entry(v.slot) {
-                    e.insert(v);
-                    added += 1;
+            // An overlap: walk both chains in slot order, the existing
+            // version winning a tie, and re-encode as they go by.
+            let existing_bytes = self.read_log(&address)?;
+            let mut here = VersionWalker::new(&existing_bytes);
+            let mut there = VersionWalker::new(body);
+            let mut w = ChainWriter::new();
+            loop {
+                match (here.peek_slot(), there.peek_slot()) {
+                    (None, None) => break,
+                    (Some(_), None) => {
+                        if let Some((slot, st)) = here.next()? {
+                            w.push(slot, st.as_ref());
+                        }
+                    }
+                    (None, Some(_)) => {
+                        if let Some((slot, st)) = there.next()? {
+                            w.push(slot, st.as_ref());
+                            added += 1;
+                        }
+                    }
+                    (Some(a), Some(b)) if a <= b => {
+                        if let Some((slot, st)) = here.next()? {
+                            w.push(slot, st.as_ref());
+                        }
+                        if a == b {
+                            there.next()?; // same slot: the version already here stands
+                        }
+                    }
+                    (Some(_), Some(_)) => {
+                        if let Some((slot, st)) = there.next()? {
+                            w.push(slot, st.as_ref());
+                            added += 1;
+                        }
+                    }
                 }
             }
-            let mut all: Vec<Version> = merged.into_values().collect();
-            all.sort_by_key(|v| v.slot);
-            self.rewrite(&address, &all)?;
+            self.rewrite_bytes(&address, w.out)?;
         }
         Ok(added)
     }
