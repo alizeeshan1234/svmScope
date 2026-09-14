@@ -1004,6 +1004,41 @@ impl Scope {
         } else {
             slot
         };
+        // Accounts this transaction closed: they held lamports before it and
+        // none after, and today there is nothing at the address. Today's bytes
+        // (an empty system-owned slot) are wrong for them by construction; a
+        // settled receipt, a filled order or a burned position must come from
+        // the stream, keyed by its last write, like any other data account.
+        let closed_by_tx: std::collections::HashSet<String> = {
+            let pre = tx["meta"]["preBalances"].as_array();
+            let post = tx["meta"]["postBalances"].as_array();
+            account_keys
+                .iter()
+                .enumerate()
+                .filter(|(index, key)| {
+                    *index >= num_signers && !is_infra(key) && !programs.contains(*key)
+                })
+                .filter(|(index, _)| {
+                    let at = |side: Option<&Vec<serde_json::Value>>| {
+                        side.and_then(|a| a.get(*index)).and_then(|v| v.as_u64())
+                    };
+                    at(pre).is_some_and(|l| l > 0) && at(post) == Some(0)
+                })
+                .filter(|(_, key)| {
+                    ctx.pre_account_owned(key).is_none_or(|c| {
+                        !c.executable && c.owner == Address::default() && c.data.is_empty()
+                    })
+                })
+                .map(|(_, key)| key.clone())
+                .collect()
+        };
+        if trace && !closed_by_tx.is_empty() {
+            eprintln!(
+                "[reconstruct {:>6.1}s] closed by this transaction, gone today: {}",
+                started.elapsed().as_secs_f64(),
+                closed_by_tx.iter().cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
         let mut streamed: HashMap<String, crate::records::Version> = HashMap::new();
         if let Some(stream) = self.history.as_ref() {
             let wanted: Vec<(String, usize)> = account_keys
@@ -1014,10 +1049,13 @@ impl Scope {
                         return false;
                     }
                     let Some(cur) = ctx.pre_account_owned(key) else {
-                        return false;
+                        return closed_by_tx.contains(*key);
                     };
-                    if cur.executable || (cur.owner == Address::default() && cur.data.is_empty()) {
+                    if cur.executable {
                         return false;
+                    }
+                    if cur.owner == Address::default() && cur.data.is_empty() {
+                        return closed_by_tx.contains(*key);
                     }
                     // Lookup tables are resolved from the record; the runtime
                     // never reads their bytes here.
@@ -1063,12 +1101,15 @@ impl Scope {
                 // the target is the landing slot or earlier, since the
                 // cursor is the transaction itself.
                 if slot <= target.landed_slot {
-                    let missing: Vec<&String> = wanted
+                    // Closed accounts first: for them today's bytes are
+                    // certainly wrong, for the others only possibly.
+                    let mut missing: Vec<&String> = wanted
                         .iter()
                         .map(|(k, _)| k)
                         .filter(|k| !streamed.contains_key(*k))
-                        .take(MENTION_FALLBACK_ACCOUNTS)
                         .collect();
+                    missing.sort_by_key(|k| !closed_by_tx.contains(*k));
+                    missing.truncate(MENTION_FALLBACK_ACCOUNTS);
                     for key in missing {
                         if let Some(v) =
                             self.version_at_last_mention(stream, key, target.signature, slot)
@@ -1171,6 +1212,75 @@ impl Scope {
             let current = ctx.pre_account_owned(key);
             if current.as_ref().is_some_and(|c| c.executable) {
                 continue;
+            }
+            if closed_by_tx.contains(key) {
+                // A data account the stream still remembers: its bytes at
+                // the last write, with the record's own pre-balance on top
+                // at the transaction's slot. Only a stream version that is
+                // a real account (owned, or with data) counts; a wallet's
+                // empty version falls through to the balance shortcut.
+                let version = streamed
+                    .get(key)
+                    .and_then(|v| v.state.clone())
+                    .filter(|st| !st.data.is_empty() || st.owner != Address::default().to_string());
+                match (version, Address::from_str(key)) {
+                    (Some(st), Ok(addr)) => {
+                        let v_slot = streamed.remove(key).map_or(slot, |v| v.slot);
+                        let lamports = if own_slot {
+                            seeded.lamports_of(key)
+                        } else {
+                            None
+                        }
+                        .unwrap_or_else(|| crate::history::lamports_for(None, st.data.len()));
+                        // A token account closed by the transaction (a wrapped-SOL
+                        // account, say) carries the record's own pre-amount, which
+                        // beats a version taken before a same-slot predecessor.
+                        let mut data = st.data.clone();
+                        if let (true, Some(amount), true) =
+                            (own_slot, seeded.token_amount(key), data.len() >= 72)
+                        {
+                            data[64..72].copy_from_slice(&amount.to_le_bytes());
+                        }
+                        let account = solana_account::Account {
+                            lamports,
+                            data,
+                            owner: Address::from_str(&st.owner).unwrap_or_default(),
+                            executable: false,
+                            rent_epoch: 0,
+                        };
+                        if trace {
+                            eprintln!(
+                                "[reconstruct {:>6.1}s] {key}: closed since; bytes from the account-changes stream at slot {v_slot}",
+                                started.elapsed().as_secs_f64(),
+                            );
+                        }
+                        if let Some(s) = self.records.as_deref() {
+                            let stored = AccountState {
+                                data: account.data.clone(),
+                                lamports: account.lamports,
+                                owner: account.owner.to_string(),
+                            };
+                            let _ = s.record(key, v_slot, Some(&stored));
+                        }
+                        ctx.set_loaded_data(addr, Some(account));
+                        provenance.insert(key.clone(), Provenance::Recorded { slot: v_slot });
+                        continue;
+                    }
+                    _ => {
+                        if !seeded.token_amount(key).is_some() {
+                            // Nothing to rebuild it from: today's empty slot
+                            // is what runs, and the certificate says so.
+                            if trace {
+                                eprintln!(
+                                    "[reconstruct {:>6.1}s] {key}: closed since and not found in the stream; today's (empty) bytes",
+                                    started.elapsed().as_secs_f64(),
+                                );
+                            }
+                            provenance.insert(key.clone(), Provenance::CurrentRpc);
+                            continue;
+                        }
+                    }
+                }
             }
             let owner = current
                 .as_ref()
