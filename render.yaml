@@ -42,9 +42,9 @@ services:
         sync: false # owner/repo of the data repository
       - key: SVMSCOPE_GITHUB_TOKEN
         sync: false # fine-grained token, Contents read/write on that repo only
-      # The free instance has 512 MB. One stream call at a time and a shorter
-      # same-block prefix keep an old-slot replay under it.
+      # The free instance has 512 MB. Two stream sessions (the account's
+      # limit) and a shorter same-block prefix keep an old-slot replay under it.
       - key: SVMSCOPE_STREAM_PARALLEL
-        value: "1"
+        value: "2"
       - key: SVMSCOPE_PREFIX_MAX_TXS
         value: "40"
