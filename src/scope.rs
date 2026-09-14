@@ -266,13 +266,66 @@ impl Scope {
         )
     }
 
+    /// A batch of JSON-RPC calls in one HTTP request, answered in id order.
+    fn rpc_batch(&self, calls: &[serde_json::Value]) -> Option<Vec<serde_json::Value>> {
+        let http = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .ok()?;
+        let resp: Vec<serde_json::Value> = http
+            .post(self.rpc_url())
+            .json(calls)
+            .send()
+            .ok()?
+            .json()
+            .ok()?;
+        let mut by_id: HashMap<u64, serde_json::Value> = resp
+            .into_iter()
+            .filter_map(|r| Some((r["id"].as_u64()?, r)))
+            .collect();
+        Some(
+            (0..calls.len() as u64)
+                .map(|i| by_id.remove(&i).unwrap_or(serde_json::Value::Null))
+                .collect(),
+        )
+    }
+
+    /// Whether `address` was writable in a transaction record (json encoding):
+    /// the only mentions that can have changed it.
+    fn tx_writes(tx: &serde_json::Value, address: &str) -> bool {
+        let msg = &tx["transaction"]["message"];
+        let keys: Vec<&str> = msg["accountKeys"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|k| k.as_str().or_else(|| k["pubkey"].as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(i) = keys.iter().position(|k| *k == address) {
+            let h = &msg["header"];
+            let req = h["numRequiredSignatures"].as_u64().unwrap_or(1) as usize;
+            let ro_signed = h["numReadonlySignedAccounts"].as_u64().unwrap_or(0) as usize;
+            let ro_unsigned = h["numReadonlyUnsignedAccounts"].as_u64().unwrap_or(0) as usize;
+            return if i < req {
+                i < req.saturating_sub(ro_signed)
+            } else {
+                i < keys.len().saturating_sub(ro_unsigned)
+            };
+        }
+        tx["meta"]["loadedAddresses"]["writable"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|k| k.as_str() == Some(address)))
+    }
+
     /// The version of `address` at its last write before `slot`, found by
-    /// walking its mention history back from `signature` and asking the
-    /// stream for one block per mentioned slot below `slot`: a mention that
-    /// only read the account yields nothing and the walk continues, a few
-    /// stream calls at most. Costs a page of history and one short stream
-    /// call per step, whatever the account's age, where a range search
-    /// would cost its whole silence.
+    /// walking its mention history back from `signature`. Most mentions of a
+    /// config-like account only read it, so the walk fetches each page's
+    /// transactions in one batched call, keeps the mentions where the account
+    /// was writable, and asks the stream for one block per such mention (a
+    /// few stream calls at most). Costs pages of history and a batch of
+    /// transaction records per page, whatever the account's age, where a
+    /// range search would cost its whole silence.
     fn version_at_last_mention(
         &self,
         stream: &crate::history::HistoryStream,
@@ -287,26 +340,42 @@ impl Scope {
             let page = self.mentions_before(address, &cursor, MENTION_PAGE)?;
             let (_, last_sig) = page.last()?;
             cursor = last_sig.clone();
-            for (mention_slot, _) in page.iter().filter(|(m, _)| *m < slot) {
-                // Several mentions in one block are one question.
-                if last_asked == Some(*mention_slot) {
-                    continue;
-                }
-                last_asked = Some(*mention_slot);
-                if stream_calls >= MENTION_FALLBACK_STEPS {
-                    return None;
-                }
-                stream_calls += 1;
-                let found = stream
-                    .latest_before_windows(
-                        std::slice::from_ref(&address.to_string()),
-                        mention_slot + 1,
-                        1,
-                        1,
-                    )
-                    .ok()?;
-                if let Some(v) = found.get(address) {
-                    return Some(v.clone());
+            let below: Vec<&(u64, String)> = page.iter().filter(|(m, _)| *m < slot).collect();
+            for chunk in below.chunks(MENTION_BATCH) {
+                let calls: Vec<serde_json::Value> = chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, sig))| {
+                        json!({ "jsonrpc": "2.0", "id": i as u64, "method": "getTransaction",
+                                "params": [sig, { "encoding": "json", "maxSupportedTransactionVersion": 0 }] })
+                    })
+                    .collect();
+                let answers = self.rpc_batch(&calls)?;
+                for ((mention_slot, _), answer) in chunk.iter().zip(answers.iter()) {
+                    let tx = &answer["result"];
+                    if tx.is_null() || !Self::tx_writes(tx, address) {
+                        continue;
+                    }
+                    // Several writes in one block are one question.
+                    if last_asked == Some(*mention_slot) {
+                        continue;
+                    }
+                    last_asked = Some(*mention_slot);
+                    if stream_calls >= MENTION_FALLBACK_STEPS {
+                        return None;
+                    }
+                    stream_calls += 1;
+                    let found = stream
+                        .latest_before_windows(
+                            std::slice::from_ref(&address.to_string()),
+                            mention_slot + 1,
+                            1,
+                            1,
+                        )
+                        .ok()?;
+                    if let Some(v) = found.get(address) {
+                        return Some(v.clone());
+                    }
                 }
             }
         }
@@ -4234,12 +4303,14 @@ mod preflight_input_tests {
 /// slot (1,000 mentions each): a bot wallet can outrun this, and then the
 /// balance stays an estimate.
 const WALLET_HISTORY_PAGES: usize = 3;
-const MENTION_FALLBACK_ACCOUNTS: usize = 4;
-const MENTION_FALLBACK_STEPS: usize = 2;
+const MENTION_FALLBACK_ACCOUNTS: usize = 8;
+const MENTION_FALLBACK_STEPS: usize = 3;
 /// Mentions per history page and pages walked: a hot account has many
 /// mentions in the target block itself, which have to be paged past.
 const MENTION_PAGE: usize = 100;
-const MENTION_FALLBACK_PAGES: usize = 3;
+const MENTION_FALLBACK_PAGES: usize = 5;
+/// Transaction records fetched per batched RPC call while walking mentions.
+const MENTION_BATCH: usize = 25;
 
 /// A transaction of the target's block, decoded from the block's record,
 /// with what the block-prefix replay needs to know about it.
