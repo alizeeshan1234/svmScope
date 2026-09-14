@@ -11,6 +11,10 @@
       "destination": "/"
     },
     {
+      "source": "/address/:addr*",
+      "destination": "/"
+    },
+    {
       "source": "/flame/:sig*",
       "destination": "/"
     }

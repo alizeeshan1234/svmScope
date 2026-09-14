@@ -1214,6 +1214,23 @@ impl Scope {
                 continue;
             }
             if closed_by_tx.contains(key) {
+                // At a slot after the close the stream's newest version is the
+                // deletion itself: the account is absent there, exactly.
+                if let (Some(v), Ok(addr)) = (streamed.get(key), Address::from_str(key)) {
+                    if v.state.is_none() && slot > landed_slot {
+                        let v_slot = v.slot;
+                        streamed.remove(key);
+                        if trace {
+                            eprintln!(
+                                "[reconstruct {:>6.1}s] {key}: closed at slot {v_slot}, absent at the target",
+                                started.elapsed().as_secs_f64(),
+                            );
+                        }
+                        ctx.set_loaded_data(addr, None);
+                        provenance.insert(key.clone(), Provenance::Recorded { slot: v_slot });
+                        continue;
+                    }
+                }
                 // A data account the stream still remembers: its bytes at
                 // the last write, with the record's own pre-balance on top
                 // at the transaction's slot. Only a stream version that is

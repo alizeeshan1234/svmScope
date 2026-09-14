@@ -589,8 +589,8 @@ fn check_replay_window(scope: &Scope, slot: u64) -> Result<(), svmscope::Error> 
         .unwrap_or(t);
     let age_days = now.saturating_sub(t) / 86_400;
     if age_days as u64 > days {
-        return Err(svmscope::Error::Fixture(format!(
-            "slot {slot} landed {age_days} days ago; replay at slot covers the last {days} days"
+        return Err(svmscope::Error::InvalidSpec(format!(
+            "slot {slot} is {age_days} days old; replays cover the last {days} days"
         )));
     }
     Ok(())
@@ -2284,6 +2284,7 @@ async fn main() {
         .route("/profile/{signature}", get(profile_get_handler))
         .route("/debug/{signature}", get(index))
         .route("/tx/{signature}", get(index))
+        .route("/address/{address}", get(index))
         .route("/flame/{signature}", get(index))
         .route("/instructions/{program}", get(instructions_handler))
         .route("/idl_instructions", post(idl_instructions_handler))

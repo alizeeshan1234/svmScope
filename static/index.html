@@ -1416,6 +1416,8 @@ input.derived { border-color: var(--green-border); color: var(--green); }
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 // One of the line icons from the sprite at the top of the page, sized by CSS.
+// A fetch that never reached the engine reads as a restart, not as a bug.
+const errText = (e) => /Failed to fetch|NetworkError|Load failed/.test(e?.message || '') ? 'The engine did not answer. It may be restarting; try again in a minute.' : (e?.message || String(e));
 const icon = (name, cls = '') => `<svg class="ic${cls ? ' ' + cls : ''}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const short = (a) => a && a.length > 12 ? a.slice(0, 4) + '…' + a.slice(-4) : (a || '');
 const fmt = (n) => Number(n).toLocaleString('en-US');
@@ -1654,7 +1656,7 @@ async function diagnoseIfFailed() {
       ${note}
     </div>`;
   } catch (e) {
-    card.innerHTML = `<div class="err-box">couldn't diagnose: ${esc(e.message)}</div>`;
+    card.innerHTML = `<div class="err-box">couldn't diagnose: ${esc(errText(e))}</div>`;
   }
 }
 
@@ -1907,8 +1909,14 @@ function renderReplayPanel() {
       body: JSON.stringify({ signature: currentSig, mutations: [], time_travel: timeTravel, features: activeFeatures, ...clusterParams() }),
     })
       .then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); })
-      .then(rep => renderReport(rep, $('replay')))
-      .catch(e => { $('replay').innerHTML = `<div class="err-box">${esc(e.message)}</div>`; });
+      .then(rep => {
+        renderReport(rep, $('replay'));
+        // The controls and the what-if box stay available under a shifted
+        // clock or flipped gates: they run under the same environment.
+        $('replay').insertAdjacentHTML('beforeend', replayControls(true) + '<div id="certPanel"></div>' + cfBox());
+        wireReplayPanel();
+      })
+      .catch(e => { $('replay').innerHTML = `<div class="err-box">${esc(errText(e))}</div>`; });
     return;
   }
 
@@ -1918,13 +1926,21 @@ function renderReplayPanel() {
        <div id="certPanel"></div>
        ${cfBox()}`;
   $('replay').innerHTML = body;
+  wireReplayPanel();
+}
+// The replay panel's buttons, whichever path rendered it.
+function wireReplayPanel() {
   $('openDebug')?.addEventListener('click', () => showDebug(currentSig, true));
   $('openProfile')?.addEventListener('click', () => showProfile(currentSig, true));
   $('cuProfileLink')?.addEventListener('click', () => showProfile(currentSig, true));
   $('runReplay')?.addEventListener('click', async () => {
     const b = $('runReplay'); b.disabled = true; b.innerHTML = icon('play') + 'Replaying…';
-    try { await ensureBaseline(); renderReplayPanel(); }
-    catch (e) { $('replay').innerHTML = `<div class="err-box">${esc(e.message)}</div>`; }
+    // A what-if answer already on screen survives the re-render.
+    const keep = ['cfResult', 'cfScanResult', 'cfNarrateResult'].map(id => [id, $(id)?.innerHTML || '']);
+    try {
+      await ensureBaseline(); renderReplayPanel();
+      keep.forEach(([id, html]) => { const el = $(id); if (el && html) el.innerHTML = html; });
+    } catch (e) { $('replay').innerHTML = `<div class="err-box">${esc(errText(e))}</div>`; }
   });
   $('reconSlot')?.addEventListener('click', () => reconstructAtSlot());
   wireReplayAt();
@@ -1934,6 +1950,17 @@ function renderReplayPanel() {
   $('cfRun')?.addEventListener('click', runCounterfactual);
   $('cfScanAll')?.addEventListener('click', runScan);
   $('cfNarrate')?.addEventListener('click', runNarrate);
+}
+// The breaking-point tools look for what would make a passing transaction
+// fail. When it already fails, say so above their answer instead of letting
+// "no breaking points" read as "robust".
+function alreadyFailingNote() {
+  const r = analysis?.replay;
+  const asOf = analysis?.slot != null;
+  const failing = asOf ? (r && !r.success) : (analysis?.overview?.success === false || (r && !r.success));
+  if (!failing) return '';
+  const reason = r && !r.success ? (r.error_name || r.error || '') : '';
+  return `<div class="drift-inline">This transaction already fails ${asOf ? 'at this slot' : 'as it stands'}${reason ? ` (${esc(reason)})` : ''}, so there is nothing to break. The tools below report what changes it, not whether it passes.</div>`;
 }
 // Fetch the baseline replay once and cache it on `analysis.replay`.
 // When the page shows a replay at a slot, what-ifs build on that same world.
@@ -2026,7 +2053,7 @@ function replayControls(withTools) {
       <span class="lbl">or as of</span>
       <input id="atSlot" class="mono" type="number" min="1" placeholder="slot" title="Any slot in the last 30 days">
       <span class="lbl">/</span>
-      <input id="atTime" class="mono at-time" type="datetime-local" title="A moment in time: the nearest slot goes into the box">
+      <input id="atTime" class="mono at-time" type="datetime-local" title="A moment in your local time: the nearest slot goes into the box">
       <button class="btn ghost sm" id="reconAt"><svg class="ic" aria-hidden="true"><use href="#i-replay"/></svg>Replay at slot</button>
       <span class="cu-note window-note"></span>
     </div>
@@ -2092,7 +2119,7 @@ async function runCounterfactual() {
     if (!res.ok) throw new Error(await res.text());
     if (out) out.innerHTML = renderCounterfactual(await res.json());
   } catch (e) {
-    if (out) out.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
+    if (out) out.innerHTML = `<div class="err-box">${esc(errText(e))}</div>`;
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Find it'; }
   }
@@ -2122,9 +2149,9 @@ async function runScan() {
     const qs = new URLSearchParams({ ...atSlotParam(), ...clusterParams() }).toString();
     const res = await api('/scan/' + encodeURIComponent(currentSig) + (qs ? '?' + qs : ''));
     if (!res.ok) throw new Error(await res.text());
-    if (out) out.innerHTML = renderBreakingPoints(await res.json());
+    if (out) out.innerHTML = alreadyFailingNote() + renderBreakingPoints(await res.json());
   } catch (e) {
-    if (out) out.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
+    if (out) out.innerHTML = `<div class="err-box">${esc(errText(e))}</div>`;
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = icon('scan') + 'Scan for all breaking points'; }
   }
@@ -2143,9 +2170,9 @@ async function runNarrate() {
     const res = await api('/scan/' + encodeURIComponent(currentSig) + (qs ? '?' + qs : ''));
     if (!res.ok) throw new Error(await res.text());
     const bps = await res.json();
-    if (out) out.innerHTML = renderNarration(narrateScan(bps));
+    if (out) out.innerHTML = alreadyFailingNote() + renderNarration(narrateScan(bps));
   } catch (e) {
-    if (out) out.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
+    if (out) out.innerHTML = `<div class="err-box">${esc(errText(e))}</div>`;
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = icon('text') + 'Explain in plain English'; }
   }
@@ -2235,6 +2262,7 @@ function renderBreakingPoints(bps) {
 // (clock at now) is never changed underneath the user.
 function wireReplayAt() {
   const input = $('atSlot');
+  if (input && analysis?.slot != null && analysis.slot !== analysis.landed_slot) input.value = analysis.slot;
   document.querySelectorAll('.window-note').forEach(el => {
     el.textContent = `any slot in the last ${windowInfo.windowDays || 30} days — or pick a date and time and the nearest slot fills in`;
     if (windowInfo.recordedFrom != null) el.title = `recorded on this engine from slot ${fmt(windowInfo.recordedFrom)}; earlier slots come from the account-changes stream`;
@@ -2345,7 +2373,7 @@ async function reconstructAtSlot(slot) {
     // Land on the certificate, not the top of the page: that is what changed.
     ($('certPanel') || $('out')).scrollIntoView({ behavior: 'instant', block: 'start' });
   } catch (e) {
-    if (panel) panel.innerHTML = `<div class="err-box">${esc(e.message)}</div>`;
+    if (panel) panel.innerHTML = `<div class="err-box">${esc(errText(e))}</div>`;
     if (btn) { btn.disabled = false; btn.innerHTML = label; }
   } finally {
     clearInterval(tick);
@@ -2582,7 +2610,8 @@ function renderReplaySmall(r) {
 async function runSuite() {
   if (!analysis || !suiteRows.length) return;
   const btn = $('runSuite'); btn.disabled = true;
-  const el = $('suiteResult'); el.className = 'suite-result'; el.innerHTML = '<span class="spinner"></span>running…';
+  const el = $('suiteResult'); el.className = 'suite-result'; el.innerHTML = `<span class="spinner"></span>running ${suiteRows.length} scenarios… <span class="elapsed">0 s</span>`;
+  const t0 = Date.now(), tick = setInterval(() => { const t = el.querySelector('.elapsed'); if (t) t.textContent = `${Math.round((Date.now() - t0) / 1000)} s`; }, 1000);
   try {
     const scenarios = suiteRows.map(r => {
       const s = { name: r.name, expect: r.expect, mutations: r.muts };
@@ -2595,7 +2624,7 @@ async function runSuite() {
     const outcomes = await res.json();
     outcomes.forEach((o, i) => {
       const r = suiteRows[i]; r.status = o.pass ? 'pass' : 'fail'; r.actual = o.actual;
-      r.got = o.actual.success ? '✓ succeeded' : `✗ ${friendlyReason(o.actual)}`;
+      r.got = o.actual.success ? 'succeeded' : `reverted · ${friendlyReason(o.actual)}`;
     });
     const passed = outcomes.filter(o => o.pass).length;
     el.className = 'suite-result ' + (passed === outcomes.length ? 'pass' : 'fail');
@@ -2610,13 +2639,13 @@ async function runSuite() {
            <b>The unmodified transaction reverts on local replay</b> — its on-chain state has moved
            since it landed (<code>${esc(friendlyReason(base.actual))}</code>). This is expected for
            older or complex transactions like swaps, where current pool prices differ from the slot
-           it ran in. The what-if assertions below are only meaningful once the baseline replays
-           cleanly — <b>Freeze fixture</b> to pin the state, or try a <b>recent / simpler</b> transaction.
+           it ran in. Run the suite from the moment it landed instead: open <b>Advanced</b> and type
+           <b>${fmt(analysis?.landed_slot ?? analysis?.overview?.slot)}</b> in the <b>Starting from</b> box, then run again.
          </div>`
       : '';
     renderSuite();
-  } catch (e) { el.className = 'suite-result fail'; el.textContent = 'error: ' + e.message; }
-  finally { btn.disabled = false; }
+  } catch (e) { el.className = 'suite-result fail'; el.textContent = 'error: ' + errText(e); }
+  finally { clearInterval(tick); btn.disabled = false; }
 }
 async function freezeFixture() {
   if (!currentSig) return;
@@ -2660,7 +2689,7 @@ function exportSuite() {
 }
 function addScenarioFromEditor() {
   let muts;
-  try { muts = [...mutations, ...collectAllEdits()]; } catch (e) { flashSim(e.message, true); return; }
+  try { muts = [...mutations, ...collectAllEdits()]; } catch (e) { flashSim(errText(e), true); return; }
   if (!muts.length) { flashSim('stage or edit a change first, then add it as a scenario', true); return; }
   const label = muts.map(m => m._label).join(', ');
   suiteRows.push(makeRow(`Custom — ${label}`, muts.map(({ _label, ...m }) => m), 'any', label));
@@ -2843,7 +2872,7 @@ function stageAll() {
     $('acctList').querySelectorAll('input.f-in.dirty').forEach(i => { i.value = i.dataset.cur; i.classList.remove('dirty'); });
     $('acctList').querySelectorAll('.raw-off, .raw-hex').forEach(i => { i.value = ''; });
     updateDirtyState(); flashSim('');
-  } catch (e) { flashSim(e.message, true); }
+  } catch (e) { flashSim(errText(e), true); }
 }
 function renderStaged() {
   const wrap = $('stagedWrap');
@@ -2889,6 +2918,14 @@ function runInput() {
   try { len = bs58decode(input).length; } catch { /* not base58 */ }
   if (len === 32) return showAddress(input);   // account / program address
   if (len === 64) return analyze();            // transaction signature
+  // Valid base58 of another length is a mistyped signature or address, not a
+  // serialized transaction (every base58 string is also valid base64).
+  if (len != null && len >= 28 && len <= 70) {
+    $('hero').classList.add('hidden'); $('out').classList.add('hidden'); $('txlist').classList.add('hidden');
+    const st = $('status'); st.className = 'status err'; st.classList.remove('hidden');
+    st.textContent = `That is ${len} bytes of base58; a transaction signature is 64 (about 88 characters) and an address is 32 (about 44). Check for a missing or extra character.`;
+    return;
+  }
   // Base64 — a serialized unsigned transaction, or the "Base64 message" wallets
   // in developer mode show on the approval screen. Route it into Simulate,
   // exactly like pasting it in the advanced tab.
@@ -2915,7 +2952,8 @@ function runInput() {
 // Show an explorer-style address page: the account/program overview + its recent
 // transactions to pick from.
 async function showAddress(address) {
-  $('debug').classList.add('hidden');
+  hideAllViews();
+  ['navSim', 'navDebug', 'navProfile'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on');
   $('go').disabled = true;
   $('out').classList.add('hidden'); $('hero').classList.add('hidden'); $('txlist').classList.add('hidden');
   const st = $('status'); st.className = 'status'; st.classList.remove('hidden');
@@ -2927,8 +2965,10 @@ async function showAddress(address) {
     ]);
     st.classList.add('hidden');
     renderAddressPage(address, account, sigs);
+    const path = '/address/' + encodeURIComponent(address);
+    if (location.pathname !== path) history.pushState({ address }, '', path + location.search);
   } catch (e) {
-    st.className = 'status err'; st.classList.remove('hidden'); st.textContent = 'error: ' + e.message;
+    st.className = 'status err'; st.classList.remove('hidden'); st.textContent = 'error: ' + errText(e);
   } finally { $('go').disabled = false; }
 }
 function timeAgo(t) {
@@ -3004,12 +3044,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const v = $('pageSig')?.value.trim();
     if (!v) return;
     $('sig').value = v;
-    analyze();
+    runInput(); // an address opens its page, a signature its analysis: the same routing as the header
   });
 });
 
 async function analyze() {
-  $('debug').classList.add('hidden');
+  hideAllViews();
+  ['navSim', 'navDebug', 'navProfile'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on');
   const sig = $('sig').value.trim(); if (!sig) return;
   currentSig = sig; mutations = []; onchainAnalysis = null;
   $('go').disabled = true; $('txlist').classList.add('hidden'); $('out').classList.add('hidden'); $('hero').classList.add('hidden');
@@ -3032,7 +3073,7 @@ async function analyze() {
     renderAnalysis();
     st.classList.add('hidden'); $('out').classList.remove('hidden');
     pushTxUrl(currentSig);
-  } catch (e) { st.className = 'status err'; st.textContent = 'error: ' + e.message; }
+  } catch (e) { st.className = 'status err'; st.textContent = 'error: ' + errText(e); }
   finally { $('go').disabled = false; }
 }
 // Every analysis gets a link of its own — /tx/<signature> — so a page can be
@@ -3056,7 +3097,8 @@ function renderAnalysis() {
   renderReplayPanel();
   renderStaged(); flashSim('');
   renderAccountList();
-  buildSuite(); renderSuite();
+  if (analysis.slot == null || !suiteRows.length) buildSuite();
+  renderSuite();
   $('exportBox').classList.add('hidden'); $('suiteResult').textContent = '';
   $('acctFilter').value = ''; $('expandAll').textContent = 'Expand all';
   if (analysis.slot != null && analysis.certificate) {
@@ -3108,7 +3150,7 @@ function certificateCard(a) {
 async function simulate() {
   if (!analysis) { flashSim('analyze a transaction first', true); return; }
   let toSend;
-  try { toSend = [...mutations, ...collectAllEdits()]; } catch (e) { flashSim(e.message, true); return; }
+  try { toSend = [...mutations, ...collectAllEdits()]; } catch (e) { flashSim(errText(e), true); return; }
   if (!toSend.length) { flashSim('change at least one field, or stage a mutation', true); return; }
   const btn = $('simBtn'); btn.disabled = true;
   const simSlot = simSlotParam().slot;
@@ -3120,7 +3162,7 @@ async function simulate() {
       body: JSON.stringify({ signature: currentSig, mutations: toSend.map(({ _label, ...m }) => m), time_travel: timeTravel, features: activeFeatures, ...simSlotParam(), ...clusterParams() }) });
     if (!res.ok) throw new Error(await res.text());
     showResult(before, await res.json(), { n: toSend.length });
-  } catch (e) { flashSim('error: ' + e.message, true); }
+  } catch (e) { flashSim('error: ' + errText(e), true); }
   finally { btn.disabled = false; }
 }
 // One result renderer for both quick scenarios and the advanced editor.
@@ -3208,7 +3250,7 @@ async function loadInstructions() {
     showLoadedInstructions();
     $('idlFallback').classList.add('hidden');
   } catch (e) {
-    $('simOut').innerHTML = `<div class="status err" style="text-align:left">${esc(e.message)}</div>`;
+    $('simOut').innerHTML = `<div class="status err" style="text-align:left">${esc(errText(e))}</div>`;
     $('ixPicker').classList.add('hidden');
     // No on-chain IDL? Reveal the paste-your-own-IDL fallback the message promises.
     if (/no on-chain Anchor IDL|no instructions/i.test(e.message)) $('idlFallback').classList.remove('hidden');
@@ -3239,7 +3281,7 @@ async function loadInstructionsFromIdl() {
     if (!loadedIx.length) throw new Error('no instructions found in that IDL');
     showLoadedInstructions();
   } catch (e) {
-    $('simOut').innerHTML = `<div class="status err" style="text-align:left">${esc(e.message)}</div>`;
+    $('simOut').innerHTML = `<div class="status err" style="text-align:left">${esc(errText(e))}</div>`;
   } finally { btn.disabled = false; btn.textContent = 'Load instructions from IDL'; }
 }
 
@@ -3557,7 +3599,7 @@ async function runPreflight() {
     if (!res.ok) throw new Error(await res.text());
     renderReport(await res.json(), $('simOut'));
   } catch (e) {
-    $('simOut').innerHTML = `<div class="status err" style="text-align:left">${esc(e.message)}</div>`;
+    $('simOut').innerHTML = `<div class="status err" style="text-align:left">${esc(errText(e))}</div>`;
   } finally { btn.disabled = false; }
 }
 
@@ -3682,6 +3724,8 @@ document.addEventListener('keydown', e => {
 // other gate can be added by pubkey. Verified live: deactivating the get_sysvar
 // syscall gate makes a Jupiter swap fail (it depends on that syscall).
 const ALL_GATES=[{id:"FuS3FPfJDKSNot99ECLXtp3rueq36hMNStJkPJwWodLh",label:"abort on invalid curve"},{id:"SVn36yVApPLYsa8koK3qUcy14zXDnqkNYWyUh1f4oK1",label:"account hash ignore slot"},{id:"LTHasHQX6661DaDD4S6A2TFi6QBuiwXKv66fB1obfHq",label:"accounts lt hash"},{id:"4d5AKtxoh93Dwm1vHXUU3iRATuMndx1c431KgT2td52r",label:"add compute budget program"},{id:"St8k9dVXP97xT6faW24YmRSYConLbhsMJA4TJTBLmMT",label:"add get minimum delegation instruction to stake program"},{id:"CFK1hRCNy8JJuAAY8Pb2GjLFNdCThS2qwZNe3izzBMgn",label:"add get processed sibling instruction syscall"},{id:"8U4skmMVnF6k2kMvrWbQuRUT3qQSiTYpSjqmhmgfthZu",label:"add new reserved account keys"},{id:"98std1NSHqXi9WYvFShfVepRdCoq1qvsp8fsR2XZtG8g",label:"add set compute unit price ix"},{id:"G6vbf1UBok8MWb8m25ex86aoQHeKTzDKzuZADHkShqm6",label:"add set tx loaded accounts data size instruction"},{id:"Ds87KVeqhbv7Jw8W6avsS1mqz3Mw5J3pRTpPoDQ2QdiJ",label:"add shred type to shred seed"},{id:"decoMktMcnmiq6t3u7g5BfgcQu91nKZr6RvMYf9z1Jb",label:"allow commission decrease at any time"},{id:"Ff8b1fBeB86q8cjq47ZhsQLgv5EkHu3G1C99zjUfAzrq",label:"allow votes to directly update vote state"},{id:"bn2oPgpkzQPT3tohMaAsMVGjhDmmDa4jCaVPqCFmtxM",label:"alt bn128 little endian"},{id:"2ry7ygxiYURULZCrypHhveanvP5tzZ4toRwVp89oCNSj",label:"apply cost tracker during replay"},{id:"Vo5siZ442SaZBKPXNocthiXysNviW4UYPwRFggmbgAp",label:"bank transaction count fix"},{id:"Ffswd3egL3tccB6Rv3XY6oqfdzn913vUcjCSnpvCKpfx",label:"better error codes for tx lamport check"},{id:"AnAP9zPV4KL7czAPQbFhpDKV2tx7g4UGNbK9wvXwjaRo",label:"bls pubkey management in vote account"},{id:"9gxu85LYRAcZL38We8MYJ4A9AwgBBPtVBAqebMcT1241",label:"cap accounts data allocations per transaction"},{id:"9k5ijzTbYPtjzu8wj2ErH9v45xecHzQ1x4PMYMMxFgdM",label:"cap bpf program instruction accounts"},{id:"DdLwVYuvDz26JohmgSbA7mjpJFgX5zP2dkp8qsF2C33V",label:"cap transaction accounts data size"},{id:"3ccR6QpxGYsAbWyfevEtBNGfWV4xBffxRj2tD6A9i39F",label:"check init vote data"},{id:"nWBqjr3gpETbiaVj3CBJ3HFC5TMdnJDGt21hnvSTvVZ",label:"check physical overlapping"},{id:"GmC19j9qLn2RFk5NduX6QXaDhVpGncVVBzyM8e9WMz2F",label:"check slice translation size"},{id:"3uRVPBpyEJRo1emLCrq38eLRFGcu6uKSpUXqGvU8T7SZ",label:"check syscall outputs do not overlap"},{id:"5Pecy6ie6XGm22pc9d4P9W5c31BugcFBuy6hsP2zkETv",label:"checked arithmetic in fee validation"},{id:"Bj2jmUsM2iRhfdLLDSTkhM5UQRQvQHm57HSmPibPtEyu",label:"clean up delegation errors"},{id:"Eg7tXEwMZzS98xaZ1YHUbdRHsaYZiCsSaR6sKgxreoaj",label:"commission rate in basis points"},{id:"noRuG2kzACwgaY7TVmLRnUNPLKNVQE1fb7X55YWBehp",label:"commission updates only allowed in first half of epoch"},{id:"86HpNqzutEZwLcPxS6EHDcMNYWk6ikhteg9un7Y2PBKE",label:"compact vote state updates"},{id:"6YsBCejwK96GZCkJ6mkZ4b68oP63z2PLoQmWjC7ggTqZ",label:"consume blockstore duplicate proofs"},{id:"wLckV1a64ngtcKPRGU4S4grVTestXjmNjxBjaKZrAcn",label:"cost model requested write lock cost"},{id:"6sPDzwyARRExKH52LECxcGoqziH8G7SZofwuxi8Ja331",label:"create account allow prefund"},{id:"BUS12ciZ5gCoFafUHWW8qaFMMtwFQGVxjsDheWLdqBE2",label:"credits auto rewind"},{id:"eca6zf6JJRjQsYYPkBHF3N32MTzur4n2WL4QiiacPCL",label:"curve25519 restrict msm length"},{id:"7rcw5UtqgDTBBv2EcynNfYckgdAaH1MAsCjKgXMkN7Ri",label:"curve25519 syscall enabled"},{id:"8kEuAshXLsgkUEdcFVLqrjCGGHVWFW99ZZpxvAzzMtBp",label:"dedupe config program signers"},{id:"J2QdYx8crLbTVK8nur1jeLsmc3krDbfjoxoea2V1Uy5Q",label:"default units per instruction"},{id:"LTDSzjZKFJMKHYpNycG1FrWwGGTaFFwqEFjB5GGLNVD",label:"define ltds fee only semantics"},{id:"76dHtohc2s5dR3ahJyBxs7eJJVipFkaPdih9CLgTTb4B",label:"delay commission updates"},{id:"GmuBvtFb2aHfSfMXpuFeWZGHyDeCLPS79s48fmCWCfM5",label:"delay visibility of program deployment"},{id:"3E3jV7v9VcdJL8iYZUMax9DiDno8j7EWUVbhm9RtShj2",label:"demote program write locks"},{id:"B7H2caeia4ZFcpE3QcgMqbiWiBtWrdBRBSJ1DY6Ktxbq",label:"deplete cu meter on vm failure"},{id:"rent6iVy6PDoViPBeJ6k5EJQrkj62h7DPyLbWGHwjrC",label:"deprecate rent exemption threshold"},{id:"GaBtBJvmS4Arjj5W1NmFcyvPjsHN38UGYDq2MDwbs9Qu",label:"deprecate rewards sysvar"},{id:"6Uf8S75PVh91MYgPQSHnjRAPQq6an5BDv9vomrCwDqLe",label:"deprecate unused legacy vote plumbing"},{id:"EQUMpNFr7Nacb1sva56xn1aLfBxppEoSBH8RRVdkcD1x",label:"disable account loader special case"},{id:"3XgNukcZWf9o3HdA3fpJbm94XFc4qpvTXc8h1wxYwiPi",label:"disable bpf deprecated load instructions"},{id:"7WeS1vfPRgeeoXArLh7879YcB9mgE9ktjPDtajXeWfXn",label:"disable bpf loader instructions"},{id:"4yuaYAj2jGMGTh1sSmi4G2eFscsDq8qjugJXZoBN6YEa",label:"disable bpf unresolved symbols at runtime"},{id:"4UDcAfQ6EcA6bdcadkeHpkarkhZGJ7Bpq7wTAiRMjkoi",label:"disable builtin loader ownership chains"},{id:"B9cdB55u4jQsDNsdTK525yE9dmSc5Ga7YBaBrDFvEhM9",label:"disable cpi setting executable and rent epoch"},{id:"79HWsX9rpnnJBPcdNURVqygpMAfxdrAirzAGAVmf92im",label:"disable deploy of alloc free syscall"},{id:"GTUMCZ8LTNxVfxdrw7ZsDFTxXb7TutYkzJnFwinpE6dg",label:"disable deprecated loader"},{id:"2jXx2yDmGysmBKfKYNgLj2DQyAQv6mMk2BPh4eSbyB4H",label:"disable fee calculator"},{id:"JAN1trEUEtZjgXYzNBYHU9DYd7GnThhXfFP7SzPXkPsG",label:"disable fees sysvar"},{id:"2B2SBNbUcr438LtGXNcJNBP2GBSxjx81F945SdSkUSfC",label:"disable partitioned rent collection"},{id:"DTVTkmw3JSofd8CJVJte8PXEbxNQ2yZijvVr3pe2APPj",label:"disable rehash for rent epoch"},{id:"CJzY83ggJHqPGDq8VisV3U91jDJLuEaALZooBrXtnnLU",label:"disable rent fees collection"},{id:"turbnbNRp22nwZCmgVVXFSshz7H7V23zMzQgA46YpmQ",label:"disable turbine fanout experiments"},{id:"zkdoVwnSFnSLtGJG7irJPEYUpmb4i7sGMGcnN6T9rnC",label:"disable zk elgamal proof program"},{id:"disCA4efguFL6Wqa4pGdG7jpjC7C5uiKzKnhEBqchBe",label:"discard unexpected data complete shreds"},{id:"75m6ysz33AfLA5DDEzWM1obBrnPQRSsdVQ2nRmc8Vuu1",label:"do support realloc"},{id:"GV49KKQdBNaiv2pgqhS2Dy3GWYJGXMTVYbYkdk91orRy",label:"drop legacy shreds"},{id:"4Di3y24QFLt5QEUPZtbnjyfQKfm6ZMTfa6Dw1psfoMKU",label:"drop redundant turbine path"},{id:"5KLGJSASDVxKPjLCDWNtnABLpZjsQSrYZ8HKwcEdAMC8",label:"drop unchained merkle shreds"},{id:"ed9tNscbWLYBooxWA7FE2B5KHWs8A6sxfY8EzezEcoo",label:"ed25519 precompile verify strict"},{id:"6ppMXNYLhVd7GcsZ5uV11wQEW7spppiMVfqQv5SXhDpX",label:"ed25519 program enabled"},{id:"EJJewYSddEEtSZHiqugnvhQHiWyZKjkFDQASd7oKSagn",label:"enable alt bn128 compression syscall"},{id:"bn1hKNURMGQaQoEVxahcEAcqiX3NwRs6hgKKNSLeKxH",label:"enable alt bn128 g2 syscalls"},{id:"A16q37opZdQMCbe5qJ6xpBB9usykfv8jZaMkxvZQi4GJ",label:"enable alt bn128 syscall"},{id:"b1sgUiJ3qu7hYm3tNDyyqZNQd6gLGJmJppnLNa93PCQ",label:"enable bls12 381 syscall"},{id:"8Zs9W7D9MpSEtUWSQdGniZk2cNmV22y6FLJwCx53asme",label:"enable bpf loader extend program ix"},{id:"5x3825XS7M2A3Ekbn5VGGkvFoAg5qrRWkTrY4bARP1GL",label:"enable bpf loader set authority checked ix"},{id:"7uZBkJXJ1HkuP6R3MJfZs7mLwymBcDbKdqbF51ZWLier",label:"enable chained merkle shreds"},{id:"4EJQtF2pkRyawwcTVfQutzq4Sa5hRhibF6QAK1QXhtEX",label:"enable durable nonce"},{id:"7Vced912WrRnfjaiKRiNBcbuFw7RrnLv3E3z95Y4GTNc",label:"enable early verification of account modifications"},{id:"FKe75t4LXxGaQnVHdUKM6DSFifVVraGZ8LyNo7oPwy1Z",label:"enable get epoch stake syscall"},{id:"FNKCMBzYUdjhHyPdsKG2LSmdzH8TCHXn3ytj8RNBS4nG",label:"enable gossip duplicate proof ingestion"},{id:"FL9RsQA6TVUoh5xJQ9d936RHSebA1NLQqe3Zv9sXZRpr",label:"enable poseidon syscall"},{id:"J4HFT8usBxpcF63y46t1upYobJgChmKyZPm5uTBRg25Z",label:"enable program redeployment cooldown"},{id:"Hr1nUA9b7NJ6eChS26o7Vi8gYYDDwWD3YeBfzJkTbU86",label:"enable request heap frame ix"},{id:"JE86WkYvTrzW8HgNmrHY7dFYpCmSptUpKupbo2AdQ9cG",label:"enable sbpf v1 deployment and execution"},{id:"F6UVKh1ujTEFK3en2SyAL3cdVnqko1FVEXWhmdLRu6WP",label:"enable sbpf v2 deployment and execution"},{id:"5cC3foj77CWun58pC51ebHFUWavHWKarWyR5UUik7dnC",label:"enable sbpf v3 deployment and execution"},{id:"srremy31J5Y25FrAApwVb9kZcfXbusYMMsvTK9aWv5q",label:"enable secp256r1 precompile"},{id:"tSynMCspg4xFiCj1v3TDb4c7crMR5tSBhLz4sF7rrNA",label:"enable tower sync ix"},{id:"PaymEPK2oqwT9TXAVfadjztH2H6KfLEB9Hhd5Q5frvP",label:"enable transaction loading failure fees"},{id:"D31EFnLgdiysi84Woo3of4JMu7VmasUS3Z7j9HYXCeLY",label:"enable turbine fanout experiments"},{id:"5JsG4NWH8Jbrqdd8uL6BNwnyZK3dQSoieRXG5vmofj9y",label:"enable vote address leader schedule"},{id:"fixfecLZYMfkGzwq6NJA11Yw6KYztzXiK9QcL3K78in",label:"enforce fixed fec set"},{id:"5GpmAKxaGsWWbPp4bNXFLJxZVvG92ctxf7jQnzTQjF3n",label:"epoch accounts hash"},{id:"8199Q2gMD2kwgfopK5qqVWuDbegLgpuFUFHCcUJQDN8b",label:"error on syscall bpf function hash collisions"},{id:"EMX9Q7TVFAmQ9V1CggAkhMzhXSg8ECp7fHrWQX2G1chf",label:"evict invalid stakes cache entries"},{id:"7GUcYgq4tVtaqNCKT3dho9r4665Qp5TxCZ27Qgjx3829",label:"executables incur cpi data cost"},{id:"GE7fRxmW46K6EmCD9AMZSbnaJ2e3LfqCZzdHi9hmYAgi",label:"filter stake delegation accounts"},{id:"3gtZPqvPpsbXZVCx6hceMfWxtsmrjMzmg8C7PLKSxS2d",label:"filter votes outside slot hashes"},{id:"bn2puAyxUx6JUabAxYdKdJ5QHbNNmKw8dCGuGCyRrFN",label:"fix alt bn128 multiplication input length"},{id:"bnYzodLwmybj7e1HAe98yZrdJTd7we69eMMLgCXqKZm",label:"fix alt bn128 pairing length check"},{id:"6iyggb5MTcsvdcugX7bEKbHV8c6jdLbpHwkncrgLMhfo",label:"fix recent blockhashes"},{id:"36PRUK2Dz6HWYdG9SpjeAsF5F3KxnFCakA2BZMbtMhSb",label:"fixed memcpy nonoverlapping check"},{id:"DeS7sR48ZcFTUmt5FFEVDr1v1bh73aAbZiZq3SYr8Eh8",label:"formalize loaded transaction data size"},{id:"7XRJcS5Ud5vxGB54JbK9N2vBZVwnwdBNeJW1ibRgD9gx",label:"full inflation \u00b7 mainnet \u00b7 certusone \u00b7 enable"},{id:"CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq",label:"get sysvar syscall enabled"},{id:"2R72wpcQ7qV7aTJWUumdn8u5wmmTyXbK7qzEy7YSAgyY",label:"include account index in rent error"},{id:"H6iVbVaDZgDphcPbcZwc5LoznMPWQfnJ1AM7L1xzqvt5",label:"increase cpi account info limit"},{id:"25vqsfjk7Nv1prsQJmA4Xu1bN61s8LXCBGUPp8Rfy1UF",label:"incremental snapshot only incremental hash calculation"},{id:"dupPajaLy2SSn8ko42aZz4mHANDNrLe8Nw8VQgFecLa",label:"index erasure conflict duplicate proofs"},{id:"H3kBSaKdeiUsyHmeHqjJYNc27jesXZ6zWj3zWkowQbkV",label:"instructions sysvar owned by sysvar"},{id:"HooKD5NC9QNxk25QuzCssB8ecrEzGt6eXEPBUxWp1LaR",label:"last restart slot sysvar"},{id:"E8MkiWZNNPGU6n55jkGzyj8ghUmjCHRmDFdYYFYHxWhQ",label:"leave nonce on success"},{id:"DhsYfRjxfnh2g7HKJYSzT79r74Afa1wbHkAgHndrA1oy",label:"libsecp256k1 0 5 upgrade enabled"},{id:"54KAoNiUERNoWWUhTWWwXgym94gzoXFVnHyQwPA18V9A",label:"libsecp256k1 fail on bad count2"},{id:"6aHuNsUmwSzCEMjrBzBCYaxHAyAcQBjVES92JigHBDuC",label:"limit instruction accounts"},{id:"GQALDaC48fEhZGWRj9iL5Q889emJKcj3aCvHF7VCbbF4",label:"limit max instruction trace length"},{id:"7g9EUwj4j7CS21Yx1wvgWLjSZeh5aPq8x9kpoPwXM8n8",label:"limit secp256k1 recovery id"},{id:"YbbRLkvenrocjGPGyoQE4wjnvYzTgfsk38NFmcYK7a5",label:"loader v3 minimum extend program size"},{id:"GDH5TVdbTPUpRnXaRyQqiKUa7uZAbZ28Q2N9bhbKoMLm",label:"loosen cpi size restriction"},{id:"RENtePQcDLrAbxAsP3k8dwVcnNYQ466hi2uKvALjnXx",label:"mask out rent epoch in vm serialization"},{id:"CBkDroRDqm8HwHe6ak9cguPjUomrASEkfmxEaZ5CNNxz",label:"max tx account locks"},{id:"21AWDosvp3pBamFW91KB35pNoaoZVTM7ess8nr2nt53B",label:"merge nonce error into system error"},{id:"mrkPjRg79B2oK2ZLgd7S3AfEJaX9B6gAF3H9aEykRUS",label:"merkle conflict duplicate proofs"},{id:"C97eKZygrkU4JxJsZdjgbUY7iQR7rKTr4NyDWo2E5pRm",label:"migrate address lookup table program to core bpf"},{id:"2Fr57nzzkLYXW695UdDxDeR5fhnZWSttZeZYemrnpGFV",label:"migrate config program to core bpf"},{id:"4eohviozzEeivk1y9UbrnekbAFMDQyJz5JjA9Y6gyvky",label:"migrate feature gate program to core bpf"},{id:"6M4oQ6eXneVhtLoiAr4yRYQY43eVLjrKbiDZDJc892yk",label:"migrate stake program to core bpf"},{id:"9ypxGLzkMxi89eDerRKXWDXe44UY2z4hBig4mDhNq5Dp",label:"move precompile verification to svm"},{id:"74CoWuBmt3rUVUrCb2JiSTvh6nXyBWUsK4SaMj3CtE3T",label:"move serialized len ptr in cpi"},{id:"7bTK6Jis8Xpfrs8ZoUfiMDPazTcdPcTWheZFJTA5Z6X4",label:"move stake and move lamports ixs"},{id:"8pgXCMNXC8qyEFypuwpXyRxLXZdpM4Qo72gJ6k87A6wL",label:"native programs consume cu"},{id:"4kpdyrcj5jS47CZb2oJGfVxjYbsMm2Kx97gFyZrxxwXz",label:"no overflow rent distribution"},{id:"3u3Er5Vc2jVcwz4xr2GJeSAXT3fAj6ADHZ4BJMZiScFd",label:"nonce must be advanceable"},{id:"HxrEu1gXuH7iD3Puua1ohd5n4iUKJyFNtNxk9DVJkvgr",label:"nonce must be authorized"},{id:"BiCU7M5w8ZCMykVSyhZ7Q3m2SWoR2qrEQ86ERcDX77ME",label:"nonce must be writable"},{id:"CpkdQmspsaZZ8FVAouQTtTWZkc8eeQ7V3uj7dWz543rZ",label:"on load preserve rent epoch for rent exempt accounts"},{id:"265hPS8k8xJ37ot82KEgjRunsUp5w4n4Q4VwwiN9i9ps",label:"optimize epoch boundary updates"},{id:"PERzQrt5gBD1XEe2c9XdFWqwgHY3mr7cYWbm5V772V8",label:"partitioned epoch rewards superfeature"},{id:"4RWNif6C2WCNiKVW7otP4G7dkmkHGyKQWRpuZ1pxKU5m",label:"pico inflation"},{id:"poUdAqRXXsNmfqAZ6UqpjbeYgwBygbfQLEvWSqVhSnb",label:"poseidon enforce padding"},{id:"HH3MUYReL2BvqqA3oEcAa7txju5GY6G4nxJ51zvsEjEZ",label:"preserve rent epoch for rent exempt accounts"},{id:"4ApgRX3ud6p7LNMJmsuaAcZY5HWctGPr5obAsjB3A54d",label:"prevent calling precompiles as programs"},{id:"812kqX67odAp5NFwM8D2N24cku7WTm9CHUTFUXaDkWPn",label:"prevent crediting accounts that end rent paying"},{id:"Fab5oP3DmsLYCiQZXdjyqT3ukFFPrsmqhXU4WU1AWVVF",label:"prevent rent paying rent recipients"},{id:"5xXZc66h4UdB6Yq7FzdBxBiRAFMMScMLwHxk2QZDaNZL",label:"provide instruction data offset in vm r2"},{id:"DpJREPyuMZ5nDfU6H3WTqSqUFSXAfw8u7xqmWtEwJDcP",label:"quick bail on panic"},{id:"htsptAwi2yRoZH83SKaUXykeZGtZHgxkS2QwW1pssR8",label:"raise account cu limit"},{id:"P1BCUMpAC7V2GRBRiJCNUgpMyWZhoqt3LKo712ePqsz",label:"raise block limits to 100m"},{id:"5oMCU3JPaFLr8Zr4ct7yFA7jdk6Mw1RmB8K4u9ZbS42z",label:"raise block limits to 50m"},{id:"6oMCUgfY6BzZ6jwB681J6ju5Bh6CjVXbd7NeWYqiXBSu",label:"raise block limits to 60m"},{id:"3aJdcZqxoLpSBxgeYGjPwaYS1zzcByxUDqJkbzWAH1Zb",label:"record instruction in transaction context push"},{id:"EBeznQDjcPG8491sFsKZYBi5S5jTVXMpAKNDJMQPS2kq",label:"reduce required deploy balance"},{id:"GwtDQBghCTBgmX2cpEGNPxTEBUTQRaDMGTr5qychdGMj",label:"reduce stake warmup cooldown"},{id:"zkexuyPRdyTVbZqEAREueqL2xvvoBhRgth9xGSc1tMN",label:"reenable zk elgamal proof program"},{id:"3NKRSwpySNwD3TvP5pHnRmkAQRsdkXWRr1WaQh8p4PWX",label:"reject callx r10"},{id:"9kdtFSrXHQg3hKkbXkQ6trJ3Ja1xpJ22CTFSNAciEwmL",label:"reject empty instruction without program"},{id:"7txXZZD6Um59YoLMF7XUNimbMjsqsWhc7g2EniiTrmp1",label:"reject non rent exempt vote withdraws"},{id:"ALBk3EWdeAg2WAGf6GPDUf1nynyNqCdEVmgouG7rpuCj",label:"reject vote account close unless zero credit epoch"},{id:"FKAcEvNgSY79RpqsPNUV5gDyumopH4cEHqUxyfm8b8Ap",label:"relax authority signer check for lookup table creation"},{id:"4WeHX6QoXCCwqbSFgi6dxnB6QsPo6YApaNTH7P4MLQ99",label:"relax intrabatch account locks"},{id:"rexav5eNTUSNT1K2N7cfRjnthwhcP5BC25v2tA4rW4h",label:"relax programdata account check migration"},{id:"LTdLt9Ycbyoipz5fLysCi1NnDnASsZfmJLJXts5ZxZz",label:"remove accounts delta hash"},{id:"FXs1zh47QbNnhXcnB6YiAQoJ4sGB91tKF3UFHLcKT7PM",label:"remove accounts executable flag checks"},{id:"2HmTkCj9tXuPE4ueHzdD7jPeMf9JGCoZh5AsyoATiWEe",label:"remove bpf loader incorrect program id"},{id:"A8xyMHZovGXFkorFqEmVH2PKGLiBip5JD7jt4zsUWo4H",label:"remove congestion multiplier from fee calculation"},{id:"EfhYd3SafzGT472tYQDUc4dPd2xdEfKs5fwkowUgVt4W",label:"remove deprecated request unit ix"},{id:"HTTgmruMYRZEntyL3EdCDdnS6e4D5wRq1FA7kQsb66qq",label:"remove native loader"},{id:"BtVN7YjDzNE6Dk7kTT7YTDgMNUZTNgiSJgsdzAeTg2jF",label:"remove rounding in fee calculation"},{id:"2GCrNXbzmt4xrwdcKS2RdsLzsgu4V5zHAemW57pcHT6a",label:"remove simple vote from cost model"},{id:"BKCPBQQBZqggVnFso5nQ8rQ4RwwogYwjuUt9biBjxwNF",label:"rent for sysvars"},{id:"ptokFjwyJtrwCa9Kgo9xoDS59V4QccBGEaRFnRPnSdP",label:"replace spl token with p token"},{id:"CCu4boMmfLuqcmfTLPHQiUo22ZdUsXjgzPAURYaWt1Bw",label:"requestable heap size"},{id:"D4jsDcXaqdW8tDAWn8H4R25Cdns2YwLneujSL1zvjW6R",label:"require custodian for locked stake authorize"},{id:"BkFDxiJQWZXGTZaJQxH7wVEHkAmwCgSEVkrvswFfRJPD",label:"require rent exempt accounts"},{id:"D2aip4BBr8NPWtU9vLrwrBvbuaQ8w1zV38zFLxx4pfBV",label:"require rent exempt split destination"},{id:"7VVhpg5oAjAmnmz1zCcSHb2Z9ecZB2FQqpnEwReka9Zm",label:"require static nonce account"},{id:"8FdwgyHFEjhAdjWfV2vfqk7wA1g9X3fQpKH7SBpEv3kC",label:"require static program ids in transaction"},{id:"C9oAhLxDBm3ssWtJx1yBGzPY55r2rArHmN1pbQn6HogH",label:"reserve minimal cus for builtin instructions"},{id:"DwScAzPUjuv65TMbDnFY7AgwmotzWy3xpEJMXM3hZFaB",label:"return data syscall enabled"},{id:"BTWmtJC8U5ZLMbBUUA1k6As62sYjPEjAiNAT55xYGdJU",label:"revise turbine epoch stakes"},{id:"3opE3EzAKnUftUDURkzMgwpNgimBAypW1mNDYH4x4Zg7",label:"reward full priority fee"},{id:"CE2et8pqgyQMP2mQRg3CgvX8nJBKUArMu3wfiQiQKY1y",label:"round up heap size"},{id:"E3PHP7w8kB7np3CTQ1qQ2tW3KCtjRSXBQgW9vM2mWv2Y",label:"secp256k1 program enabled"},{id:"6RvdSWHh8oh72Dp7wMTS2DBkf3fRPtChfNrAo3cZZoXJ",label:"secp256k1 recover syscall enabled"},{id:"C5fh68nJ7uyKAuYZg2x9sEQ5YrVf3dkW6oojNBSc3Jvo",label:"send to tpu vote port"},{id:"Gea3ZkK2N4pHuVZVxWcnAtS6UEDdyumdYt4pFcKjA3ar",label:"separate nonce from blockhash"},{id:"5wAGiy15X1Jb2hkHnPDCM8oB9V42VNA9ftNVFK84dEgv",label:"set exempt rent epoch max"},{id:"JDn5q3GBeqzvUa7z67BbmVHVdE3EbUAjvFep3weR3jxX",label:"simplify alt bn128 syscall error codes"},{id:"5ZCcFAzJ1zsFKe1KSZa9K92jhx7gkcKj97ci2DBo1vwj",label:"simplify writable program account check"},{id:"CGB2jM8pwZkeeiXQ66kBMyBR6Np61mggL7XUsmLjVcrw",label:"skip rent rewrites"},{id:"LTsNAP8h1voEVVToMNBNqoiNQex4aqfUrbFhRH3mSQ2",label:"snapshots lt hash"},{id:"6uaHcKPGUy4J7emLBgUTeufhJdiwhngW6a1R9B7c2ob9",label:"sol log data syscall enabled"},{id:"FaTa4SpiaSNH44PGC4z8bnGVTkSRYaWvrBs3KTu8XQQq",label:"spl associated token account v1 0 4"},{id:"FaTa17gVKoqbh38HcfiQonPsAaQViyDCCSg71AubYZw8",label:"spl associated token account v1 1 0"},{id:"E5JiFDQCwyC6QfT9REFyMpfK2mHcmv1GUDySU1Ue7TYv",label:"spl token v2 multisig fix"},{id:"BL99GYhdjjcv6ys22C9wPgn2aTVERDbPHHo4NbS3hgp7",label:"spl token v2 self transfer fix"},{id:"FToKNBYyiF4ky9s8WsmLBXHCht17Ek7RXaLZGHzzQhJ1",label:"spl token v2 set authority fix"},{id:"Ftok2jhqAqxUWEiCVRrfRs9DPppWP8cgTB7NQNKL88mS",label:"spl token v3 3 0 release"},{id:"Ftok4njE8b7tDffYkC5bAbCaQv5sL6jispYrprzatUwN",label:"spl token v3 4 0"},{id:"sTKz343FM8mqtyGvYWvbLpTThw3ixRM4Xk8QvZ985mw",label:"stake allow zero undelegated amount"},{id:"437r62HoAdUb63amq3D7ENnBLDhHT2xY8eFkLJYVKK4x",label:"stake deactivate delinquent instruction"},{id:"meRgp4ArRPhD3KtCY9c5yAf2med7mBLsjKTPeVUHqBL",label:"stake merge with unmatched credits observed"},{id:"SAdVFw3RZvzbo6DvySbSdBnHN4gkzSTH9dSxesyKKPj",label:"stake program advance activating credits observed"},{id:"FQnc7U4koHqWgRvFaBJjZnV8VPg6L6wWK33yJeDp4yvV",label:"stake split uses rent sysvar"},{id:"HFpdDDNQjvcXnXKec697HDDsyk6tFoWS2o8fkxuhQZpL",label:"stakes remove delegation if inactive"},{id:"64ixypL1HPu8WtJhNSMb9mSgfFaJvsANuRkTbHyuLfnx",label:"static instruction limit"},{id:"EYVpEP7uzH1CoXzbD6PubGhYmnxRXPeq3PPsm1ba3gpo",label:"stop sibling instruction search at parent"},{id:"16FMCmgLzCNNz6eTwGanbyN2ZxvTBSLuQ6DZhgeMshg",label:"stop truncating strings in syscalls"},{id:"CHaChatUnR3s6cPyPMMGNJa3VdQQ8PNH2JqdD4LpCKnB",label:"switch to chacha8 turbine"},{id:"Cdkc8PPTeTNUPoZEfCY5AyetUrEdkZtNPMgz58nqyaHD",label:"switch to new elf parser"},{id:"EDGMC5kxFxGk4ixsNkGt8bW7QL5hDMXnbwaZvYMwNfzF",label:"syscall parameter address restrictions"},{id:"HyrbKftCdJ5CrUfEti6x26Cj7rZLNe32weugk7tLcWb8",label:"syscall saturated math"},{id:"BrTR9hzw4WBGFP65AJMbpAo64DcA3U6jdPSga9fMV5cS",label:"system transfer zero check"},{id:"tvcF6b1TRz353zKuhBjinZkKzjmihXmBAHJdjNYw1sQ",label:"timely vote credits"},{id:"5ekBxc8itEnPv4NzGJtr8BVVQLNMQuLMNQQj7pHoLNZ9",label:"tx wide compute cap"},{id:"3uFHb9oKdGfgZGJK9EHaAXN4USvnQtAFC13Fh5gGFS5B",label:"update hashes per tick"},{id:"EWme9uFqfy1ikK1jhJs8fM5hxWnK336QJpbscNtizkTU",label:"update hashes per tick2"},{id:"8C8MCtsab5SsfammbzvYz65HHauuUYdbY2DZ4sznH6h5",label:"update hashes per tick3"},{id:"8We4E7DPwF2WfAN8tRTtWQNhi98B99Qpuj7JoZ3Aikgg",label:"update hashes per tick4"},{id:"BsKLKAn1WM4HVhPRDsjosmqSg2J8Tq5xP2s2daDS6Ni4",label:"update hashes per tick5"},{id:"FKu1qYwLQSiehz644H6Si65U5ZQ2cp9GxsyFUfYcuADv",label:"update hashes per tick6"},{id:"28s7i3htzhahXQKqmS2ExzbEoUypg9krwvtK2M9UWXh9",label:"update rewards from cached accounts"},{id:"2h63t332mGCCsWK2nqqqHhN4U9ayyqhLVFvczznHDoTZ",label:"update syscall base costs"},{id:"STk5Xj8hdAx3sTzmtJ3QysKkq6X2A3yj73JtxttiRyk",label:"upgrade bpf stake program to v5"},{id:"8sKQrMQoUHtQSUP83SPG4ta2JDjSAiWs7t5aJ9uEd6To",label:"use default units in fee calculation"},{id:"vcmrbYbiMVKaq1snKP6eCacNDcr6qZvpCNUjmk6gxvZ",label:"validate chained block id"},{id:"vcmrw431aNM8ngQ46derkZXipoTGQdbHkEygBDh12dA",label:"validate chained block id 2"},{id:"prpFrMtgNmzaNzkPJg9o753fVvbHKqNrNTm76foJ2wm",label:"validate fee collector account"},{id:"VAT9huvhPjRN9cyrPytq9rwvEJ3J4ADtjdncgZRyANJ",label:"validator admission ticket"},{id:"EVW9B5xD9FFK7vw1SBARwMA4s5eRo5eKJdKpsBikzKBz",label:"verify tx signatures len"},{id:"3KZZ6Ks1885aGBQ45fwRcPXVBCtzUvxhUTkwKMR41Tca",label:"versioned tx message enabled"},{id:"6tRxEYKuy2L5nnv5bgn7iT28MxUbYxp5h7F3Ncf1exrT",label:"vote authorize with seed"},{id:"ffecLRhhakKSGhMuc6Fz2Lnfq4uT9q3iu9ZsNaPLxPc",label:"vote only full fec sets"},{id:"BcWknVcgvonN8sL4HE4XFuEVgfcee5MwxWPAgP6ZV89X",label:"vote stake checked instructions"},{id:"7axKe5BTYBDD87ftzWbk5DfzWMGyRvqmWTduuo22Yaqy",label:"vote state add vote latency"},{id:"CveezY6FDLVBToHDcvJRmtMouqzsmj4UXYh5ths5G5Uv",label:"vote state update credit per dequeue"},{id:"G74BkWBzmsByZ1kxHy44H3wjwp5hp7JbrGRuDpco22tY",label:"vote state update root fix"},{id:"Gx4XFcrVMt4HUvPzTpTSVkdDVgcDSjKhDN1RqRS6KDuZ",label:"vote state v4"},{id:"AVZS3ZsN4gi6Rkx2QUibYuSJG3S6QHib7xCYhG6vGJxU",label:"vote withdraw authority may change authorized voter"},{id:"GvDsGDkH5gyzwpDhxNixx8vtx1kwYHH13RiNAPw27zXb",label:"warp timestamp again"},{id:"3BX6SBeEBibHaVQXywdkcgyUk6evfYZkHdztXiDtEpFS",label:"warp timestamp with a vengeance"},{id:"zkhiy5oLowR7HY4zogXjCjeMXyruLqBwSWH21qcFtnv",label:"zk elgamal proof program enabled"}];
+// A gate by its name where one is known, else by its short address.
+const gateName = (id) => (FEATURE_GATES.find(g => g.id === id) || {}).name || (ALL_GATES.find(g => g.id === id) || {}).label || short(id);
 const FEATURE_GATES = [
   { id: 'CLCoTADvV64PSrnR6QXty6Fwrt9Xc6EdxSJE4wLRePjq', name: 'sol_get_sysvar syscall',            note: 'cheap sysvar reads; many programs depend on it' },
   { id: '6TkHkRmP7JZy1fdM6fg5uXn76wChQBWGokHBJzrLB3mj', name: 'raise CPI nesting limit to 8',      note: 'deeper cross-program call chains' },
@@ -3755,13 +3799,13 @@ function refreshFeatures() {
   $('featLabel').textContent = n ? `${n} feature${n === 1 ? '' : 's'}` : 'Features';
   $('featBtn').classList.toggle('warped', !!n);
   $('featState').textContent = n
-    ? activeFeatures.map(f => `${short(f.id)} ${f.active ? 'on' : 'off'}`).join(' · ')
+    ? activeFeatures.map(f => `${gateName(f.id)} ${f.active ? 'on' : 'off'}`).join(' · ')
     : "Running under mainnet's active feature set.";
   const b = $('featBanner');
   if (b) {
     b.classList.toggle('hidden', !n);
     if (n) b.innerHTML = `${icon('flag')}<span>Replaying with ${n} feature gate${n === 1 ? '' : 's'} flipped: ` +
-      `${activeFeatures.map(f => esc(short(f.id)) + (f.active ? ' on' : ' off')).join(', ')}. Everything below runs under this feature set.</span>` +
+      `${activeFeatures.map(f => esc(gateName(f.id)) + (f.active ? ' on' : ' off')).join(', ')}. Everything below runs under this feature set.</span>` +
       `<button class="rst" id="featReset">reset</button>`;
     if (n) $('featReset')?.addEventListener('click', () => { activeFeatures = []; renderFeatList(); refreshFeatures(); onClockChanged(); });
   }
@@ -3788,7 +3832,7 @@ $('navSim').addEventListener('click', () => showSim(true));
 $('navAnalyze').addEventListener('click', () => showSim(false));
 $('brand').addEventListener('click', () => {
   $('debug').classList.add('hidden');
-  if (/^\/(debug|tx)\//.test(location.pathname)) history.pushState({}, '', '/' + location.search);
+  if (/^\/(debug|tx|address|flame)\//.test(location.pathname)) history.pushState({}, '', '/' + location.search);
   // Logo is always "home" — return to the landing hero regardless of state.
   showSim(false);
   $('status').classList.add('hidden');
@@ -3954,7 +3998,7 @@ function renderWatch() {
     return `<tr><td class="lab">${item.role ? `<span class="role">${esc(item.role)}</span>` : ''}${copyPill(item.address)} ${item.field ? '<b>' + esc(item.field) + '</b>' : 'SOL balance'}<span class="x" data-r="${r}" title="stop watching"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></span></td><td>${esc(fmtWatch(item, tl.start))}</td>${cells}</tr>`;
   }).join('');
   const head = `<tr><th>watching</th><th>start</th>${tops.map((s, k) => `<th class="col${(dbgCursor !== null ? k === dbgCursor : trace.steps[dbgSel] && s.index === trace.steps[dbgSel].index) ? ' on' : ''}" data-k="${k}" title="${esc(s.name || s.program)}">${k}</th>`).join('')}</tr>`;
-  box.innerHTML = `<h2>Watch <span class="count">${dbgWatch.length}</span> <span class="hint">${dbgWatch.length ? 'one column per step · green = changed here · click a column to jump' : 'pin a balance or a field from any step (hover a value, click watch) and see it change step by step'}</span></h2>` +
+  box.innerHTML = `<h2>Watch <span class="count">${dbgWatch.length}</span> <span class="hint">${dbgWatch.length ? 'one column per step · tinted = changed here (green up, red down) · click a column to jump' : 'pin a balance or a field from any step (hover a value, click watch) and see it change step by step'}</span></h2>` +
     (dbgWatch.length ? `<table class="wt">${head}${rows}</table>` : '');
   box.querySelectorAll('.x').forEach(x => x.addEventListener('click', () => { dbgWatch.splice(Number(x.dataset.r), 1); renderWatch(); }));
   box.querySelectorAll('[data-k]').forEach(c => c.addEventListener('click', ev => { if (ev.target.closest('.addr-pill')) return; const k = Number(c.dataset.k); const s = tops[k]; if (!s) return; if (dbgCursor !== null && k > dbgCursor) dbgCursor = k; selectStep(trace.steps.indexOf(s)); }));
@@ -4694,8 +4738,15 @@ window.addEventListener('popstate', e => {
     if (analysis && currentSig === e.state.tx) { hideAllViews(); $('out').classList.remove('hidden'); $('navAnalyze').classList.add('on'); }
     else { $('sig').value = e.state.tx; analyze(); }
   }
+  else if (e.state && e.state.address) { $('sig').value = e.state.address; showAddress(e.state.address); }
   else if (!$('debug').classList.contains('hidden')) $('dbgBack').click();
   else if (!$('profile').classList.contains('hidden')) showProfLanding();
+  else if (location.pathname === '/') {
+    // Back past the first analysis: the landing, with the analysis kept in
+    // memory so Forward is instant.
+    hideAllViews(); $('hero').classList.remove('hidden');
+    ['navSim', 'navDebug', 'navProfile'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on');
+  }
 });
 // ---------------- compute profiler ----------------
 let prof = null, profFrame = 0, profZoom = [], profSymbols = {};   // program → { elf_b64: .debug, so_b64?: .so of the same build }
@@ -4943,6 +4994,11 @@ if (location.pathname.startsWith('/flame/')) {
   if (sig) { $('sig').value = sig; showProfile(sig, false); }
 }
 
+// Deep link: /address/<address> opens the account or program page directly.
+if (location.pathname.startsWith('/address/')) {
+  const address = decodeURIComponent(location.pathname.slice('/address/'.length)).replace(/\/$/, '');
+  if (address) { $('sig').value = address; history.replaceState({ address }, '', location.pathname + location.search); showAddress(address); }
+}
 // Deep link: /tx/<signature> opens the analysis directly.
 if (location.pathname.startsWith('/tx/')) {
   const sig = decodeURIComponent(location.pathname.slice('/tx/'.length)).replace(/\/$/, '');
