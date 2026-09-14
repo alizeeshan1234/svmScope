@@ -318,6 +318,71 @@ impl Scope {
             .is_some_and(|a| a.iter().any(|k| k.as_str() == Some(address)))
     }
 
+    /// The slots of the newest mentions of `address` below `slot` in which the
+    /// account was writable, newest first, up to `want` of them: the only
+    /// mentions that can have changed it. Pages back from `before` (a
+    /// signature) or from now; each page's transactions come in one batched
+    /// call. Most mentions of a config-like account or a program's data only
+    /// read it, and those are skipped without a stream call.
+    fn writable_mention_slots(
+        &self,
+        address: &str,
+        before: Option<&str>,
+        slot: u64,
+        want: usize,
+    ) -> Vec<u64> {
+        let mut out: Vec<u64> = Vec::new();
+        let mut cursor: Option<String> = before.map(String::from);
+        for _ in 0..MENTION_FALLBACK_PAGES {
+            let page = match cursor.as_deref() {
+                Some(c) => self.mentions_before(address, c, MENTION_PAGE),
+                None => self.signatures(address, MENTION_PAGE).ok().map(|v| {
+                    v.into_iter()
+                        .filter_map(|s| Some((s.slot?, s.signature)))
+                        .collect()
+                }),
+            };
+            let Some(page) = page else { break };
+            let Some((_, last_sig)) = page.last() else {
+                break;
+            };
+            cursor = Some(last_sig.clone());
+            let below: Vec<&(u64, String)> = page.iter().filter(|(m, _)| *m < slot).collect();
+            for chunk in below.chunks(MENTION_BATCH) {
+                let calls: Vec<serde_json::Value> = chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, sig))| {
+                        json!({ "jsonrpc": "2.0", "id": i as u64, "method": "getTransaction",
+                                "params": [sig, { "encoding": "json", "maxSupportedTransactionVersion": 0 }] })
+                    })
+                    .collect();
+                let Some(answers) = self.rpc_batch(&calls) else {
+                    return out;
+                };
+                for ((mention_slot, _), answer) in chunk.iter().zip(answers.iter()) {
+                    let tx = &answer["result"];
+                    if tx.is_null()
+                        || tx["meta"]["err"].is_object()
+                        || !Self::tx_writes(tx, address)
+                    {
+                        continue;
+                    }
+                    if out.last() != Some(mention_slot) {
+                        out.push(*mention_slot);
+                    }
+                    if out.len() >= want {
+                        return out;
+                    }
+                }
+            }
+            if page.len() < MENTION_PAGE {
+                break;
+            }
+        }
+        out
+    }
+
     /// The version of `address` at its last write before `slot`, found by
     /// walking its mention history back from `signature`. Most mentions of a
     /// config-like account only read it, so the walk fetches each page's
@@ -333,50 +398,19 @@ impl Scope {
         signature: &str,
         slot: u64,
     ) -> Option<crate::records::Version> {
-        let mut cursor = signature.to_string();
-        let mut stream_calls = 0;
-        let mut last_asked: Option<u64> = None;
-        for _ in 0..MENTION_FALLBACK_PAGES {
-            let page = self.mentions_before(address, &cursor, MENTION_PAGE)?;
-            let (_, last_sig) = page.last()?;
-            cursor = last_sig.clone();
-            let below: Vec<&(u64, String)> = page.iter().filter(|(m, _)| *m < slot).collect();
-            for chunk in below.chunks(MENTION_BATCH) {
-                let calls: Vec<serde_json::Value> = chunk
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (_, sig))| {
-                        json!({ "jsonrpc": "2.0", "id": i as u64, "method": "getTransaction",
-                                "params": [sig, { "encoding": "json", "maxSupportedTransactionVersion": 0 }] })
-                    })
-                    .collect();
-                let answers = self.rpc_batch(&calls)?;
-                for ((mention_slot, _), answer) in chunk.iter().zip(answers.iter()) {
-                    let tx = &answer["result"];
-                    if tx.is_null() || !Self::tx_writes(tx, address) {
-                        continue;
-                    }
-                    // Several writes in one block are one question.
-                    if last_asked == Some(*mention_slot) {
-                        continue;
-                    }
-                    last_asked = Some(*mention_slot);
-                    if stream_calls >= MENTION_FALLBACK_STEPS {
-                        return None;
-                    }
-                    stream_calls += 1;
-                    let found = stream
-                        .latest_before_windows(
-                            std::slice::from_ref(&address.to_string()),
-                            mention_slot + 1,
-                            1,
-                            1,
-                        )
-                        .ok()?;
-                    if let Some(v) = found.get(address) {
-                        return Some(v.clone());
-                    }
-                }
+        for mention_slot in
+            self.writable_mention_slots(address, Some(signature), slot, MENTION_FALLBACK_STEPS)
+        {
+            let found = stream
+                .latest_before_windows(
+                    std::slice::from_ref(&address.to_string()),
+                    mention_slot + 1,
+                    1,
+                    1,
+                )
+                .ok()?;
+            if let Some(v) = found.get(address) {
+                return Some(v.clone());
             }
         }
         None
@@ -930,18 +964,10 @@ impl Scope {
         };
         let pd_bytes: [u8; 32] = data.get(4..36)?.try_into().ok()?;
         let pd_addr = Address::from(pd_bytes).to_string();
-        // Newest mentions first; a mention that did not write (an authority
-        // change reads it too) yields no version, so try the next one, a
-        // few at most: each is one short stream call.
-        let mentions: Vec<u64> = self
-            .signatures(&pd_addr, 25)
-            .ok()?
-            .into_iter()
-            .filter(|s| !s.err)
-            .filter_map(|s| s.slot)
-            .filter(|s| *s < slot)
-            .take(3)
-            .collect();
+        // Deploys are the mentions that write the programdata account;
+        // verifiers and indexers read it far more often, so only writable
+        // mentions are asked of the stream, a few at most.
+        let mentions = self.writable_mention_slots(&pd_addr, None, slot, MENTION_FALLBACK_STEPS);
         for deploy_slot in mentions {
             let found = stream
                 .latest_before_windows(std::slice::from_ref(&pd_addr), deploy_slot + 1, 1, 1)

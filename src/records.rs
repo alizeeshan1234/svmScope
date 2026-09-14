@@ -270,44 +270,8 @@ fn write_record(out: &mut Vec<u8>, r: &Record) {
     out.extend_from_slice(&r.payload);
 }
 
-fn read_records(bytes: &[u8]) -> Result<Vec<Record>> {
-    let mut out = Vec::new();
-    for e in index_of(bytes) {
-        out.push(Record {
-            slot: e.slot,
-            kind: e.kind,
-            payload: bytes[e.offset..e.offset + e.len].to_vec(),
-        });
-    }
-    Ok(out)
-}
-
 // ---------------------------------------------------------------------------
 // Chains of records for one account
-
-/// The decoded versions of one account, in slot order, used to build and
-/// rewrite logs. Lookups do not need this; they walk the log.
-fn materialize_all(records: &[Record]) -> Result<Vec<Version>> {
-    let mut out: Vec<Version> = Vec::with_capacity(records.len());
-    let mut current: Option<AccountState> = None;
-    for r in records {
-        current = match r.kind {
-            KIND_FULL => Some(decode_full(&r.payload)?),
-            KIND_DIFF => {
-                let base = current
-                    .as_ref()
-                    .ok_or_else(|| Error::Fixture("record store: diff without base".into()))?;
-                Some(apply_diff(base, &r.payload)?)
-            }
-            _ => None,
-        };
-        out.push(Version {
-            slot: r.slot,
-            state: current.clone(),
-        });
-    }
-    Ok(out)
-}
 
 /// Walk one log, materialising each version in turn and handing it to `f`
 /// without keeping the others: the memory of one state, not of the chain.
@@ -475,6 +439,7 @@ fn kept_slots(slots: &[u64], now: u64) -> Vec<bool> {
 
 /// Encode `versions` (slot-ordered) as a fresh chain: fulls where required,
 /// diffs elsewhere.
+#[cfg(test)]
 fn encode_chain(versions: &[Version]) -> Vec<Record> {
     let mut out = Vec::with_capacity(versions.len());
     let mut prev: Option<&AccountState> = None;
@@ -730,7 +695,9 @@ impl LogStore {
         }))
     }
 
-    /// Rewrite one account's log with a new slot-ordered chain.
+    /// Rewrite one account's log with a new slot-ordered chain (the tests'
+    /// reference; the store itself streams).
+    #[cfg(test)]
     fn rewrite(&self, address: &str, versions: &[Version]) -> Result<()> {
         let records = encode_chain(versions);
         let mut bytes = Vec::new();
