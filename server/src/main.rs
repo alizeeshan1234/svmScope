@@ -2254,6 +2254,13 @@ fn ct_eq(a: &str, b: &str) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+// The free instance has 512 MB. glibc's allocator keeps the fragments of the
+// recorder's steady churn (hundreds of account fetches every two seconds)
+// and of each replay's large buffers; mimalloc returns them and the process
+// stays near its working set.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() {
     spawn_recorder();

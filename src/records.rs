@@ -453,7 +453,9 @@ fn encode_chain(versions: &[Version]) -> Vec<Record> {
 
 /// Which of `versions` (slot-ordered) survive thinning as of `now`: every
 /// version inside the dense tier, the newest per [`SPARSE_BUCKET`] in the
-/// sparse tier, nothing beyond retention.
+/// sparse tier, nothing beyond retention. The store thins by slots alone
+/// ([`kept_slots`]); this materialised form is the tests' reference.
+#[cfg(test)]
 fn thinned(versions: &[Version], now: u64) -> Vec<Version> {
     let dense_from = now.saturating_sub(DENSE_SLOTS);
     let keep_from = now.saturating_sub(RETENTION_SLOTS);
@@ -1038,7 +1040,9 @@ pub fn poll_once(
     addresses: &[String],
 ) -> Result<usize> {
     let mut recorded = 0;
-    for chunk in addresses.chunks(100) {
+    // Small chunks: a chunk's JSON answer with big accounts in it is the
+    // largest transient the poller makes, and it is made every two seconds.
+    for chunk in addresses.chunks(25) {
         let resp: serde_json::Value = client
             .send(
                 RpcRequest::GetMultipleAccounts,
