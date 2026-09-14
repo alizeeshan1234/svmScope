@@ -177,6 +177,8 @@ body::before {
 }
 .search .customrpc::placeholder { color: var(--text-3); }
 @media (max-width: 720px) { .search .customrpc { display: none; } }
+/* Phones: the header keeps the network, clock and feature controls; the search lives in the hero and in the bar above the analysis. */
+@media (max-width: 640px) { .search #sig, .search #go { display: none; } .search { flex-basis: auto; flex: 1 1 auto; } .topbar-inner { gap: var(--s-3); padding: var(--s-2) var(--s-4); } main { padding: var(--s-4) var(--s-4) 64px; } }
 
 /* ---------- buttons ---------- */
 .btn {
@@ -636,13 +638,15 @@ body::after {
 .addr-pill.copied { color: var(--green); }
 
 /* ---------- CPI tree ---------- */
-.tree { display: flex; flex-direction: column; }
+.tree { display: flex; flex-direction: column; overflow-x: auto; }
 .tnode { display: flex; align-items: center; gap: var(--s-3); padding: 6px var(--s-2); border-radius: var(--r-sm); }
+.tnode .prog { flex: 0 0 auto; }
 .tnode:hover { background: var(--bg-2); }
 .tnode .rail { color: var(--border-strong); font-family: var(--font-mono); font-size: 12px; white-space: pre; flex: 0 0 auto; }
 .tnode .ix { color: var(--brand-strong); font-family: var(--font-mono); font-size: 11.5px; font-weight: 600; flex: 0 0 auto; width: 24px; }
 .tnode .tail { margin-left: auto; display: flex; gap: var(--s-3); align-items: center; flex: 0 0 auto; }
 .tnode .depth { font-size: 10.5px; color: var(--text-3); font-family: var(--font-mono); }
+
 .tnode .cu { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3); white-space: nowrap; min-width: 72px; text-align: right; }
 .introspect { font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--cyan); background: var(--bg-2); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; white-space: nowrap; }
 .intro-note { font-size: 12.5px; color: var(--text-2); line-height: 1.5; margin: 6px 0 10px; }
@@ -656,7 +660,7 @@ body::after {
 .tnode .ixname {
   font-size: 11.5px; font-weight: 600; color: var(--brand-strong);
   background: var(--brand-soft); border: 1px solid var(--brand-border);
-  border-radius: 6px; padding: 1px 8px; white-space: nowrap;
+  border-radius: 6px; padding: 1px 8px; white-space: nowrap; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
 }
 .tnode.expandable { cursor: pointer; }
 .tnode .ix-caret {
@@ -746,6 +750,8 @@ body::after {
 .subnav a { flex: 0 0 auto; color: var(--text-3); text-decoration: none; font-size: 12.5px; font-weight: 550; padding: 6px var(--s-3); border-radius: var(--r-full); border: 1px solid transparent; transition: color var(--t-fast), background var(--t-fast); }
 .subnav a:hover { color: var(--text-1); background: var(--bg-2); }
 .subnav a.on { color: var(--text-1); background: var(--bg-2); border-color: var(--border); }
+.subnav a:focus { outline: none; }
+.subnav a:focus-visible { box-shadow: var(--ring); }
 @media (max-width: 1280px) { .subnav { top: 104px; } }
 @media (max-width: 860px) { .subnav { top: 58px; } }
 /* Certificate chips: where the state came from, one glance. */
@@ -767,7 +773,15 @@ body::after {
 .adv-head b { color: var(--text-1); }
 .adv-head input { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--text-1); padding: 5px 8px; font-size: 12.5px; width: 13ch; }
 .elapsed { color: var(--text-3); font-variant-numeric: tabular-nums; }
-@media (max-width: 640px) { .replay-primary .btn, .replay-at .btn { width: 100%; } .replay-at input[type=number] { width: 100%; } .at-time { max-width: 100%; } }
+@media (max-width: 640px) {
+  .replay-primary .btn, .replay-at .btn { width: 100%; }
+  .replay-at input[type=number], .replay-at .at-time { width: 100%; max-width: 100%; }
+  .replay-at .lbl:not(:first-child) { display: none; }
+  .tnode .prog > .addr-pill { display: none; }
+  /* Call-tree rows keep their natural width; the card scrolls sideways instead of squeezing the names. */
+  .tnode { width: max-content; min-width: 100%; }
+  .tnode .ixname { flex: 0 0 auto; }
+}
 .at-slot { display: inline-flex; align-items: center; gap: 4px; }
 .ov-banner { margin: 0 0 10px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 12.5px; color: var(--text-2, inherit); background: var(--bg-2, transparent); }
 .ov-banner a { margin-left: 8px; }
@@ -1065,6 +1079,14 @@ input.f-in.dirty { border-color: rgba(251,191,36,.55); box-shadow: 0 0 0 3px rgb
 .srow .rm { background: none; border: 0; color: var(--text-3); cursor: pointer; font-size: 15px; padding: 0 2px; flex: 0 0 auto; transition: color var(--t-fast); }
 .srow .rm:hover { color: var(--red); }
 .srow-logs { border-top: 1px solid var(--border); padding: var(--s-3) var(--s-4); background: var(--bg-inset); }
+/* Phones: a suite row stacks — the scenario on top, its expectation below. */
+@media (max-width: 640px) {
+  .srow-head { flex-wrap: wrap; }
+  .srow .info { flex: 1 0 calc(100% - 72px); }
+  .srow .expect-sel { order: 1; flex: 1 1 100%; flex-wrap: wrap; margin-left: 32px; }
+  .srow input.contains { flex: 1 1 120px; min-width: 0; width: auto; }
+  .srow .got { order: 1; flex-basis: 100%; margin-left: 32px; }
+}
 
 .export-box { margin-top: var(--s-3); }
 .export-box pre {
@@ -2236,8 +2258,8 @@ function renderOverview(o, compute) {
     const own = analysis.slot === analysis.landed_slot;
     const delta = own ? 'the moment it landed'
       : analysis.slot > analysis.landed_slot
-        ? `slot ${fmt(analysis.slot)}, ${fmt(analysis.slot - analysis.landed_slot)} slots after it landed`
-        : `slot ${fmt(analysis.slot)}, ${fmt(analysis.landed_slot - analysis.slot)} slots before it landed`;
+        ? `slot ${fmt(analysis.slot)}, ${slotsAway(analysis.slot - analysis.landed_slot)} after it landed`
+        : `slot ${fmt(analysis.slot)}, ${slotsAway(analysis.landed_slot - analysis.slot)} before it landed`;
     const c = analysis.certificate || {};
     const stale = (c.drifted || []).filter(a => !(c.accounts || []).some(x => x.address === a && x.source && (x.source.Program || x.source === 'MetadataEstimate'))).length;
     const driftAll = (c.drifted || []).length;
@@ -2294,8 +2316,8 @@ function renderTree(entries) {
     const cu = e.compute_units != null ? `<span class="cu">${fmt(e.compute_units)} CU</span>` : '';
     const intro = e.introspects ? `<span class="introspect" title="This instruction is handed the Instructions sysvar: the program reads the other instructions of this transaction.">introspects</span>` : '';
     const head = `<div class="tnode${hasDetail ? ' expandable' : ''}"${hasDetail ? ` data-ix="${i}"` : ''}>` +
-      `${ix}<span class="rail">${rail}</span>${caret}${progChip(e.program)}${nm}${intro}` +
-      `<span class="tail">${depth > 1 ? `<span class="depth">depth ${depth}</span>` : ''}${cu}</span></div>`;
+      `${ix}<span class="rail"${depth > 1 ? ` title="depth ${depth}"` : ''}>${rail}</span>${caret}${progChip(e.program)}${nm}${intro}` +
+      `<span class="tail">${cu}</span></div>`;
     return head + (hasDetail ? renderIxDetail(e, i) : '');
   }).join('');
   // Toggle a detail panel on click.
@@ -2500,14 +2522,14 @@ function wireSimSlot() {
     const typed = Number(input.value);
     const own = analysis?.overview?.slot;
     if (Number.isInteger(typed) && typed >= 1) {
-      note.textContent = typed === own ? 'replays as of the moment it landed' : `replays as of slot ${fmt(typed)}`;
+      note.textContent = typed === own ? 'the state the moment it landed' : `the state as of slot ${fmt(typed)}`;
     } else if (analysis?.slot != null) {
-      note.textContent = analysis.slot === own ? 'replays as of the moment it landed (from the replay above)' : `replays as of slot ${fmt(analysis.slot)} (from the replay above)`;
+      note.textContent = analysis.slot === own ? 'the state the moment it landed (same as the replay above)' : `the state as of slot ${fmt(analysis.slot)} (same as the replay above)`;
     } else {
-      note.textContent = `replays against today's state — type a slot (it landed at ${fmt(own)}) to start from back then`;
+      note.textContent = `today's state — it landed at slot ${fmt(own)}; type that slot, or any in the last ${windowInfo.windowDays || 30} days, to start from back then`;
     }
   };
-  input.placeholder = analysis?.slot != null ? String(analysis.slot) : (analysis?.overview?.slot != null ? String(analysis.overview.slot) : 'slot');
+  input.placeholder = analysis?.slot != null ? String(analysis.slot) : 'today';
   input.oninput = refresh;
   refresh();
 }
@@ -2554,8 +2576,9 @@ function driftHint(r) {
 // The replay controls: the exact replay first, "as of" a slot or a time
 // below it, the tools last. `withTools` adds the today's-state replay,
 // the debugger and the profiler (wired by the panel that renders them).
+function slotsAway(n) { n = Math.abs(n); return n === 1 ? '1 slot' : `${fmt(n)} slots`; }
 function replayControls(withTools) {
-  const landed = analysis?.overview?.slot;
+  const landed = analysis?.landed_slot ?? analysis?.overview?.slot;
   const tools = withTools
     ? `<div class="replay-tools">
          <button class="btn ghost sm" id="runReplay" title="Re-run against today's on-chain state">▶ Replay against today's state</button>
@@ -2779,9 +2802,9 @@ function renderBreakingPoints(bps) {
 // (clock at now) is never changed underneath the user.
 function wireReplayAt() {
   const input = $('atSlot');
-  if (input && analysis?.overview?.slot != null && !input.value) input.placeholder = String(analysis.overview.slot);
   document.querySelectorAll('.window-note').forEach(el => {
-    el.textContent = windowInfo.recordedFrom != null ? `recorded from slot ${fmt(windowInfo.recordedFrom)} · earlier slots via the account-changes stream` : 'no recordings on this engine';
+    el.textContent = `any slot in the last ${windowInfo.windowDays || 30} days — or pick a date and time and the nearest slot fills in`;
+    if (windowInfo.recordedFrom != null) el.title = `recorded on this engine from slot ${fmt(windowInfo.recordedFrom)}; earlier slots come from the account-changes stream`;
   });
   const go = () => {
     const v = Number(input?.value);
@@ -2811,8 +2834,10 @@ function wireSubnav() {
       const target = document.getElementById(a.dataset.sec);
       if (!target) return;
       if (target.tagName === 'DETAILS') target.open = true;
-      const y = target.getBoundingClientRect().top + window.scrollY - 150;
-      window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
+      const jump = () => window.scrollTo({ top: Math.max(0, target.getBoundingClientRect().top + window.scrollY - 150), behavior: 'instant' });
+      jump();
+      // Images and folds above can still be settling; land again once layout has.
+      requestAnimationFrame(() => requestAnimationFrame(jump));
     };
   });
   // The lit pill is the last section whose top has passed a line a little
@@ -2928,8 +2953,8 @@ function renderCertificate(d) {
         ? `<span class="badge ok"><span class="b-dot"></span>${atOwn ? 'replayed as it happened' : 'succeeds at slot ' + fmt(d.slot)}</span>`
         : `<span class="badge fail"><span class="b-dot"></span>${atOwn ? 'replay failed' : 'fails at slot ' + fmt(d.slot)}</span>`;
   const delta = atOwn ? '' : (d.slot > d.landed_slot
-    ? `${fmt(d.slot - d.landed_slot)} slots after it landed`
-    : `${fmt(d.landed_slot - d.slot)} slots before it landed`);
+    ? `${slotsAway(d.slot - d.landed_slot)} after it landed`
+    : `${slotsAway(d.landed_slot - d.slot)} before it landed`);
   const when = atOwn
     ? `Replayed as of the moment it landed — <span class="mono">${esc(d.clock)}</span>`
     : `Replayed as of slot <span class="mono">${fmt(d.slot)}</span>, ${delta} — <span class="mono">${esc(d.clock)}</span>`;
@@ -3573,8 +3598,17 @@ async function analyze() {
     }
     renderAnalysis();
     st.classList.add('hidden'); $('out').classList.remove('hidden');
+    pushTxUrl(currentSig);
   } catch (e) { st.className = 'status err'; st.textContent = 'error: ' + e.message; }
   finally { $('go').disabled = false; }
+}
+// Every analysis gets a link of its own — /tx/<signature> — so a page can be
+// shared or reloaded like an explorer page. The query string (?api=, ?cluster=)
+// rides along.
+function pushTxUrl(sig) {
+  const path = '/tx/' + encodeURIComponent(sig);
+  if (location.pathname === path) return;
+  history.pushState({ tx: sig }, '', path + location.search);
 }
 // Every section of the page from `analysis` — the on-chain record, or a
 // replay as of a slot (`analysis.slot` set), which carries its own certificate.
@@ -4321,7 +4355,7 @@ $('navSim').addEventListener('click', () => showSim(true));
 $('navAnalyze').addEventListener('click', () => showSim(false));
 $('brand').addEventListener('click', () => {
   $('debug').classList.add('hidden');
-  if (location.pathname.startsWith('/debug/')) history.pushState({}, '', '/');
+  if (/^\/(debug|tx)\//.test(location.pathname)) history.pushState({}, '', '/' + location.search);
   // Logo is always "home" — return to the landing hero regardless of state.
   showSim(false);
   $('status').classList.add('hidden');
@@ -5259,6 +5293,10 @@ document.addEventListener('keydown', e => {
 window.addEventListener('popstate', e => {
   if (e.state && e.state.debug) showDebug(e.state.debug, false);
   else if (e.state && e.state.flame) showProfile(e.state.flame, false);
+  else if (e.state && e.state.tx) {
+    if (analysis && currentSig === e.state.tx) { hideAllViews(); $('out').classList.remove('hidden'); $('navAnalyze').classList.add('on'); }
+    else { $('sig').value = e.state.tx; analyze(); }
+  }
   else if (!$('debug').classList.contains('hidden')) $('dbgBack').click();
   else if (!$('profile').classList.contains('hidden')) showProfLanding();
 });
@@ -5508,6 +5546,11 @@ if (location.pathname.startsWith('/flame/')) {
   if (sig) { $('sig').value = sig; showProfile(sig, false); }
 }
 
+// Deep link: /tx/<signature> opens the analysis directly.
+if (location.pathname.startsWith('/tx/')) {
+  const sig = decodeURIComponent(location.pathname.slice('/tx/'.length)).replace(/\/$/, '');
+  if (sig) { $('sig').value = sig; history.replaceState({ tx: sig }, '', location.pathname + location.search); analyze(); }
+}
 // Deep link: /debug/<signature> opens the debugger directly.
 if (location.pathname.startsWith('/debug/')) {
   const sig = decodeURIComponent(location.pathname.slice('/debug/'.length)).replace(/\/$/, '');

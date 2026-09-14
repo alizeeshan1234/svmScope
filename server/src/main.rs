@@ -2283,6 +2283,7 @@ async fn main() {
         )
         .route("/profile/{signature}", get(profile_get_handler))
         .route("/debug/{signature}", get(index))
+        .route("/tx/{signature}", get(index))
         .route("/flame/{signature}", get(index))
         .route("/instructions/{program}", get(instructions_handler))
         .route("/idl_instructions", post(idl_instructions_handler))

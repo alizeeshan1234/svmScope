@@ -7,6 +7,10 @@
       "destination": "/"
     },
     {
+      "source": "/tx/:sig*",
+      "destination": "/"
+    },
+    {
       "source": "/flame/:sig*",
       "destination": "/"
     }
