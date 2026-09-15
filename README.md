@@ -476,11 +476,14 @@ are marked inexact; the accounts those transactions write are searched
 `SVMSCOPE_PREFIX_LOOKBACK` (1024) slots back in the stream, the ones they
 only read `SVMSCOPE_PREFIX_READ_LOOKBACK` (256), with today's bytes beyond
 that),
+`Absent` (the transaction names it but it held nothing at the slot, with
+`proven` false, counted as drift, when that rests on it being empty today),
 `Program` (the current ELF, with whether it was upgraded after the slot; a
 program upgraded since runs the bytecode deployed before the slot when the
 stream has it, and is then labelled `Recorded` at its deploy slot),
 `HistoricalArchive`, or `CurrentRpc` (current bytes, may differ: the only
-label the certificate counts as drift, along with `SameBlock`, an inexact
+label the certificate counts as drift, along with `SameBlock`, an unproven
+`Absent`, an inexact
 reconstruction or an upgraded program).
 
 ## Roadmap

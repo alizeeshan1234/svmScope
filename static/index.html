@@ -2427,12 +2427,16 @@ function renderCertificate(d) {
   const prefixed = (d.accounts || []).filter(a => a.source && a.source.BlockPrefix).map(a => a.address);
   const prefixedInexact = (d.accounts || []).filter(a => a.source && a.source.BlockPrefix && a.source.BlockPrefix.exact === false).map(a => a.address);
   const prefixTxs = (d.accounts || []).reduce((m, a) => Math.max(m, a.source && a.source.BlockPrefix ? a.source.BlockPrefix.writes : 0), 0);
-  const stale = (d.drifted || []).filter(a => !upgraded.includes(a) && !estimated.includes(a) && !sameBlock.includes(a) && !prefixedInexact.includes(a));
+  const absentUnproven = (d.accounts || []).filter(a => a.source && a.source.Absent && a.source.Absent.proven === false).map(a => a.address);
+  const stale = (d.drifted || []).filter(a => !upgraded.includes(a) && !estimated.includes(a) && !sameBlock.includes(a) && !prefixedInexact.includes(a) && !absentUnproven.includes(a));
   const n = stale.length;
   const recording = d.recorded_from != null;
   const fromEvents = (d.accounts || []).filter(a => a.source && a.source.EventLog).map(a => a.address);
   const eventNote = fromEvents.length
     ? `<div class="drift-inline"><b>${fromEvents.length}</b> account${fromEvents.length === 1 ? "'s" : "s'"} reserves were <b>restored from the program's own event log</b> at that moment (the fields the event carries are exact; the account's other bytes are today's): ${addrList(fromEvents)}.</div>`
+    : '';
+  const absentNote = absentUnproven.length
+    ? `<div class="drift-inline"><b>${absentUnproven.length}</b> account${absentUnproven.length === 1 ? '' : 's'} the transaction names <b>hold nothing today</b>, and nothing was observed at that slot, so the replay treats ${absentUnproven.length === 1 ? 'it' : 'them'} as empty then too.</div>`
     : '';
   const estimateNote = estimated.length
     ? `<div class="drift-inline"><b>${estimated.length}</b> balance${estimated.length === 1 ? ' is' : 's are'} <b>estimated from the transaction's own record</b> (its balances ${d.slot < d.landed_slot ? 'just before' : 'right after'} it landed) because something else touched ${estimated.length === 1 ? 'that account' : 'those accounts'} in between and they weren't being recorded: ${addrList(estimated)}.</div>`
@@ -2463,6 +2467,7 @@ function renderCertificate(d) {
     Reconstructed: 'rebuilt from history', Program: 'program code', HistoricalArchive: 'archive', CurrentRpc: "today's data", Fixture: 'fixture',
     SameBlock: 'changed earlier in the same block',
     BlockPrefix: 'earlier same-block transactions replayed first',
+    Absent: 'empty at that slot',
   };
   const src = Object.entries(d.sources || {})
     .sort((a, b) => b[1] - a[1])
@@ -2476,6 +2481,7 @@ function renderCertificate(d) {
     if (k === 'Recorded') return `recorded as it was (slot ${fmt(v.slot)})`;
     if (k === 'EventLog') return `from the program's event log (slot ${fmt(v.slot)})`;
     if (k === 'Program') return v.upgraded_since === true ? 'program code, upgraded after this slot' : v.upgraded_since === false ? 'program code, not upgraded since' : 'program code';
+    if (k === 'Absent') return v.proven ? 'held nothing at that slot' : 'holds nothing today, with nothing observed at that slot'
     if (k === 'Unchanged') return v.last_write != null ? `unchanged since slot ${fmt(v.last_write)}` : 'unchanged since';
     if (k === 'SameBlock') return v.writes ? `written by ${v.writes} earlier transaction${v.writes === 1 ? '' : 's'} in the same block (state from before them)` : 'the block could not be read, so writes by earlier transactions in the same block could not be ruled out';
     if (k === 'BlockPrefix') return `written by ${v.writes} earlier transaction${v.writes === 1 ? '' : 's'} in the same block, replayed first${v.exact ? '' : " (some of their inputs on today's data)"}`;
@@ -2487,6 +2493,7 @@ function renderCertificate(d) {
     const so = a.source;
     const k = typeof so === 'string' ? so : Object.keys(so || {})[0];
     const v = typeof so === 'string' ? {} : (so || {})[k] || {};
+    if (k === 'Absent') return v && v.proven ? 'exact' : 'drift'
     if (k === 'CurrentRpc' || k === 'MetadataEstimate' || k === 'SameBlock') return 'drift';
     if (k === 'BlockPrefix' && v.exact === false) return 'drift';
     if (k === 'Reconstructed' && v.exact === false) return 'drift';
@@ -2498,7 +2505,7 @@ function renderCertificate(d) {
   const listed = (d.accounts || []).length;
   const total = analysis?.overview?.account_count;
   const omitted = total && total > listed ? `<span class="cu-note">${fmt(total)} accounts in the transaction; the ${total - listed} not listed are signers (balances from its own record) and native programs.</span>` : '';
-  const chipKind = (k) => k === 'CurrentRpc' || k === 'MetadataEstimate' || k === 'SameBlock' ? 'drift' : k === 'EventLog' ? 'soft' : 'exact';
+  const chipKind = (k) => k === 'CurrentRpc' || k === 'MetadataEstimate' || k === 'SameBlock' ? 'drift' : k === 'EventLog' || k === 'Absent' ? 'soft' : 'exact';
   const chips = Object.entries(d.sources || {})
     .sort((a, b) => b[1] - a[1])
     .map(([k, v]) => `<span class="chip ${chipKind(k)}" data-kind="${esc(k)}" title="show these accounts"><span class="dot"></span><b>${v}</b> ${esc(names[k] || k)}</span>`).join('');
@@ -2507,7 +2514,7 @@ function renderCertificate(d) {
   return `<div class="cert-card">
     <div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>
     <div class="cu-note" style="margin:6px 0 2px">${when}${verify}</div>
-    ${sources}${window}${err}${eventNote}${prefixNote}${sameBlockNote}${upgradedNote}${estimateNote}${drift}
+    ${sources}${window}${err}${eventNote}${prefixNote}${sameBlockNote}${upgradedNote}${estimateNote}${absentNote}${drift}
   </div>`;
 }
 

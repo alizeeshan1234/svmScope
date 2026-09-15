@@ -2799,6 +2799,14 @@ pub enum Provenance {
         /// checked (the replay made no lookups at all).
         upgraded_since: Option<bool>,
     },
+    /// The transaction names this account, but it held nothing at the target
+    /// slot, so there were no bytes to load. `proven` is true when a record
+    /// or the stream shows it empty at the slot; false when that rests on it
+    /// being empty today, which the certificate counts as drift.
+    Absent {
+        /// Whether the account's emptiness at the target slot was observed.
+        proven: bool,
+    },
     /// Current bytes verified not written since the target slot: exact.
     Unchanged {
         /// The slot of the newest mention found, when a lookup established
@@ -2997,6 +3005,54 @@ impl Replay {
             })
             .collect();
 
+        // Accounts the transaction names that hold nothing are never loaded,
+        // so without this they would leave the certificate silently — yet
+        // "this account was empty here" is a claim the replay rests on just
+        // as much as any byte it did load. Built-in programs and sysvars the
+        // runtime supplies itself are not accounts of this kind.
+        // Native programs the runtime carries itself: they are never loaded
+        // as accounts and have no state to vouch for.
+        const RUNTIME_BUILTINS: [&str; 6] = [
+            "Vote111111111111111111111111111111111111111",
+            "Stake11111111111111111111111111111111111111",
+            "Config1111111111111111111111111111111111111",
+            "AddressLookupTab1e1111111111111111111111111",
+            "Ed25519SigVerify111111111111111111111111111",
+            "KeccakSecp256k11111111111111111111111111111",
+        ];
+        let loaded: std::collections::HashSet<&str> =
+            accounts.iter().map(|a| a.address.as_str()).collect();
+        let empty_hash = solana_blake3_hasher::hash(&[]).to_string();
+        let absent: Vec<AccountProvenance> = self
+            .ctx
+            .message_account_keys()
+            .into_iter()
+            .filter(|k| {
+                !loaded.contains(k.as_str())
+                    && !crate::reconstruct::is_infra(k)
+                    && !RUNTIME_BUILTINS.contains(&k.as_str())
+            })
+            .map(|address| {
+                let source = match self.provenance.get(&address) {
+                    // Reconstruction established where its emptiness came from.
+                    Some(p) => *p,
+                    None if matches!(self.fidelity, Fidelity::Current) => {
+                        Provenance::Absent { proven: true }
+                    }
+                    // Empty today; nothing observed at the target slot.
+                    None => Provenance::Absent { proven: false },
+                };
+                AccountProvenance {
+                    address,
+                    source,
+                    is_program: false,
+                    hash: empty_hash.clone(),
+                }
+            })
+            .collect();
+        let mut accounts = accounts;
+        accounts.extend(absent);
+
         // In a historical replay, any account still on current-state bytes is a
         // potential drift point. A plainly-current replay isn't "drifted" — it
         // never claimed to be historical.
@@ -3016,6 +3072,7 @@ impl Replay {
                             | Provenance::Program {
                                 upgraded_since: Some(true)
                             }
+                            | Provenance::Absent { proven: false }
                     )
                 })
                 .map(|a| a.address.clone())
