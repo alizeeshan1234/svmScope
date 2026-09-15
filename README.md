@@ -434,11 +434,12 @@ cargo run -p svmscope-server   # → http://127.0.0.1:3000, GET /api lists the s
 A typed TypeScript client lives in [`sdk/`](./sdk). Point it at your own RPC
 endpoint — the public mainnet RPC is heavily rate-limited.
 
-### Recording state for exact historical replay
+### Recording state for historical replay
 
-`replay_at_slot` is exact, without an archive, for every account the server
-has been recording since before the transaction landed. Recording is off
-unless `SVMSCOPE_RECORD_DIR` is set:
+`replay_at_slot` needs no archive. For every account the server has been
+recording since before the transaction landed, it serves the version
+observed across the target slot; what it cannot establish, the certificate
+names. Recording is off unless `SVMSCOPE_RECORD_DIR` is set:
 
 | Variable | Meaning |
 |---|---|

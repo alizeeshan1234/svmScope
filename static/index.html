@@ -1456,7 +1456,7 @@ function windowNotice(slot) {
   const hasEvent = progs.some(p => windowInfo.eventPrograms.includes(p));
   const age = slotAgeDays(slot);
   if (age != null && age > windowInfo.windowDays + 1) {
-    return `<div class="drift-inline notice"><b>Slot ${fmt(slot)} is about ${Math.round(age)} days old</b>, outside the ${windowInfo.windowDays}-day window this engine keeps. It will be refused; any slot in the last ${windowInfo.windowDays} days replays exactly.</div>`;
+    return `<div class="drift-inline notice"><b>Slot ${fmt(slot)} is about ${Math.round(age)} days old</b>, outside the ${windowInfo.windowDays}-day window this engine keeps. It will be refused; any slot in the last ${windowInfo.windowDays} days can be replayed.</div>`;
   }
   if (from == null) {
     return `<div class="drift-inline notice">This engine has no recordings, so pool state comes from today's data and the result is labelled approximate. Balances and the clock are exact.${hasEvent ? ' pump.fun curve reserves come from the program\'s own event log.' : ''}</div>`;
@@ -2272,7 +2272,7 @@ function wireReplayAt() {
     if (!Number.isInteger(v) || v < 1) {
       input?.focus();
       const panel = $('certPanel');
-      if (panel) panel.innerHTML = `<div class="drift-inline notice">Type a slot number first (the transaction landed at slot ${fmt(analysis?.overview?.slot)}); any slot in the last 30 days replays exactly.</div>`;
+      if (panel) panel.innerHTML = `<div class="drift-inline notice">Type a slot number first (the transaction landed at slot ${fmt(analysis?.overview?.slot)}); any slot in the last 30 days can be replayed.</div>`;
       return;
     }
     reconstructAtSlot(v);
@@ -2455,7 +2455,7 @@ function renderCertificate(d) {
     ? `<div class="drift-inline"><b>${upgraded.length}</b> program${upgraded.length === 1 ? ' was' : 's were'} <b>upgraded after this slot</b>, so the code that ran back then differs from the code loaded now: ${addrList(upgraded)}.</div>`
     : '';
   const fixNote = recording
-    ? `They weren't being recorded before this transaction landed; they are now, so later transactions that touch them replay exactly.`
+    ? `They weren't being recorded before this transaction landed; they are now, so later transactions that touch them have those accounts recorded across the slot.`
     : `This engine isn't recording state, so accounts that changed since can't be rewound — the SOL &amp; token balances and the clock are already correct.`;
   const drift = n
     ? `<div class="drift-inline"><b>${n}</b> account${n === 1 ? '' : 's'} still ${n === 1 ? 'uses' : 'use'} <b>today's data</b>, so those parts may differ from back then
