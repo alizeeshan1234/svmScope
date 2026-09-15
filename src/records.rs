@@ -50,6 +50,10 @@ pub struct Version {
     pub slot: u64,
     /// The account, or `None` for "absent at that slot".
     pub state: Option<AccountState>,
+    /// Whether the balance in `state` was observed rather than inferred. A
+    /// version recorded from the account-changes stream has exact bytes and a
+    /// guessed balance; a replay must not present that balance as proven.
+    pub balance_known: bool,
 }
 
 /// Where recorded versions live. Implementations must be safe to share across
@@ -59,6 +63,18 @@ pub trait StateStore: Send + Sync {
     fn latest_at_or_before(&self, address: &str, slot: u64) -> Result<Option<Version>>;
     /// Record `state` as the version of `address` at `slot`.
     fn record(&self, address: &str, slot: u64, state: Option<&AccountState>) -> Result<()>;
+    /// [`record`](Self::record), saying whether the balance was observed. A
+    /// version whose balance was inferred must never read back as observed.
+    fn record_with_balance(
+        &self,
+        address: &str,
+        slot: u64,
+        state: Option<&AccountState>,
+        balance_known: bool,
+    ) -> Result<()> {
+        let _ = balance_known;
+        self.record(address, slot, state)
+    }
     /// Whether `state` equals the newest recorded version of `address`: what
     /// the poller asks four hundred times every two seconds. The default
     /// materialises the newest version; a store can answer from a digest.
@@ -113,6 +129,16 @@ const COVERAGE_ENTRY: &str = "";
 const KIND_FULL: u8 = 0;
 const KIND_DIFF: u8 = 1;
 const KIND_ABSENT: u8 = 2;
+/// Set on a record's kind when its lamport balance was inferred rather than
+/// observed — the account-changes stream carries bytes but no balance. Older
+/// logs have the bit clear, so they read back as observed, which is what they
+/// were when the poller wrote them.
+const KIND_BALANCE_UNKNOWN: u8 = 0x80;
+
+/// The kind without its flag bits.
+fn base_kind(kind: u8) -> u8 {
+    kind & !KIND_BALANCE_UNKNOWN
+}
 /// `slot u64 | kind u8 | len u32` precede every payload.
 const HEADER_LEN: usize = 13;
 
@@ -288,8 +314,8 @@ fn for_each_version(
             .get(e.offset..e.offset + e.len)
             .ok_or_else(|| Error::Fixture("record store: index out of range".into()))?;
         current = match e.kind {
-            KIND_FULL => Some(decode_full(payload)?),
-            KIND_DIFF => {
+            k if base_kind(k) == KIND_FULL => Some(decode_full(payload)?),
+            k if base_kind(k) == KIND_DIFF => {
                 let base = current
                     .as_ref()
                     .ok_or_else(|| Error::Fixture("record store: diff without base".into()))?;
@@ -336,8 +362,8 @@ impl<'a> VersionWalker<'a> {
             .get(e.offset..e.offset + e.len)
             .ok_or_else(|| Error::Fixture("record store: index out of range".into()))?;
         self.current = match e.kind {
-            KIND_FULL => Some(decode_full(payload)?),
-            KIND_DIFF => {
+            k if base_kind(k) == KIND_FULL => Some(decode_full(payload)?),
+            k if base_kind(k) == KIND_DIFF => {
                 let base = self
                     .current
                     .as_ref()
@@ -377,7 +403,7 @@ impl ChainWriter {
             },
             (Some(s), _) => (KIND_FULL, encode_full(s)),
         };
-        self.since_full = if kind == KIND_FULL {
+        self.since_full = if base_kind(kind) == KIND_FULL {
             0
         } else {
             self.since_full + 1
@@ -417,8 +443,13 @@ fn kept_slots(slots: &[u64], now: u64) -> Vec<bool> {
     let keep_from = now.saturating_sub(RETENTION_SLOTS);
     let mut keep = vec![false; slots.len()];
     let mut last_bucket: Option<(u64, usize)> = None;
+    // The newest version before the window still answers every slot inside it
+    // for an account nobody has written since. Dropping it because of its own
+    // age leaves the window with nothing to stand on.
+    let mut anchor: Option<usize> = None;
     for (i, &slot) in slots.iter().enumerate() {
         if slot < keep_from {
+            anchor = Some(i);
             continue;
         }
         if slot >= dense_from {
@@ -433,6 +464,9 @@ fn kept_slots(slots: &[u64], now: u64) -> Vec<bool> {
         }
         keep[i] = true;
         last_bucket = Some((bucket, i));
+    }
+    if let Some(i) = anchor {
+        keep[i] = true;
     }
     keep
 }
@@ -454,7 +488,11 @@ fn encode_chain(versions: &[Version]) -> Vec<Record> {
             },
             (Some(s), _) => (KIND_FULL, encode_full(s)),
         };
-        since_full = if kind == KIND_FULL { 0 } else { since_full + 1 };
+        since_full = if base_kind(kind) == KIND_FULL {
+            0
+        } else {
+            since_full + 1
+        };
         prev = v.state.as_ref();
         out.push(Record {
             slot: v.slot,
@@ -662,14 +700,15 @@ impl LogStore {
             return Ok(None);
         };
         let target = entries[pos];
-        if target.kind == KIND_ABSENT {
+        if base_kind(target.kind) == KIND_ABSENT {
             return Ok(Some(Version {
                 slot: target.slot,
                 state: None,
+                balance_known: true,
             }));
         }
         let mut start = pos;
-        while entries[start].kind == KIND_DIFF && start > 0 {
+        while base_kind(entries[start].kind) == KIND_DIFF && start > 0 {
             start -= 1;
         }
         let from = entries[start].offset;
@@ -680,8 +719,8 @@ impl LogStore {
                 .get(e.offset - from..e.offset - from + e.len)
                 .ok_or_else(|| Error::Fixture("record store: index out of range".into()))?;
             current = match e.kind {
-                KIND_FULL => Some(decode_full(payload)?),
-                KIND_DIFF => {
+                k if base_kind(k) == KIND_FULL => Some(decode_full(payload)?),
+                k if base_kind(k) == KIND_DIFF => {
                     let base = current
                         .as_ref()
                         .ok_or_else(|| Error::Fixture("record store: diff without base".into()))?;
@@ -693,6 +732,7 @@ impl LogStore {
         Ok(Some(Version {
             slot: target.slot,
             state: current,
+            balance_known: target.kind & KIND_BALANCE_UNKNOWN == 0,
         }))
     }
 
@@ -932,6 +972,16 @@ impl StateStore for LogStore {
     }
 
     fn record(&self, address: &str, slot: u64, state: Option<&AccountState>) -> Result<()> {
+        self.record_with_balance(address, slot, state, true)
+    }
+
+    fn record_with_balance(
+        &self,
+        address: &str,
+        slot: u64,
+        state: Option<&AccountState>,
+        balance_known: bool,
+    ) -> Result<()> {
         let entries = self.entries(address)?;
         if entries.last().is_some_and(|e| e.slot >= slot) {
             return Ok(()); // never write out of order
@@ -939,10 +989,10 @@ impl StateStore for LogStore {
         let since_full = entries
             .iter()
             .rev()
-            .take_while(|e| e.kind == KIND_DIFF)
+            .take_while(|e| base_kind(e.kind) == KIND_DIFF)
             .count();
         let prev_state = match entries.last() {
-            Some(e) if e.kind != KIND_ABSENT => {
+            Some(e) if base_kind(e.kind) != KIND_ABSENT => {
                 self.version_at(address, u64::MAX)?.and_then(|v| v.state)
             }
             _ => None,
@@ -954,6 +1004,11 @@ impl StateStore for LogStore {
                 None => (KIND_FULL, encode_full(s)),
             },
             (Some(s), _) => (KIND_FULL, encode_full(s)),
+        };
+        let kind = if balance_known || base_kind(kind) == KIND_ABSENT {
+            kind
+        } else {
+            kind | KIND_BALANCE_UNKNOWN
         };
         let record = Record {
             slot,
@@ -1123,6 +1178,28 @@ pub fn poll_once(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn retention_keeps_the_newest_version_before_the_window() {
+        // A quiet account: written once, long before the window, then never
+        // again. Dropping that version for its own age leaves every slot in
+        // the window unanswerable.
+        let now = RETENTION_SLOTS + 1_000_000;
+        let old = now - RETENTION_SLOTS - 500_000;
+        let keep = kept_slots(&[old], now);
+        assert_eq!(
+            keep,
+            vec![true],
+            "the only anchor before the window was dropped"
+        );
+
+        // With versions inside the window too, the anchor is still kept, and
+        // it is the newest one before the cutoff, not every older one.
+        let older = old - 100_000;
+        let inside = now - 10;
+        let keep = kept_slots(&[older, old, inside], now);
+        assert_eq!(keep, vec![false, true, true]);
+    }
     use super::*;
 
     fn temp_root(name: &str) -> PathBuf {
@@ -1244,6 +1321,7 @@ mod tests {
         let now = 10_000_000u64;
         let dense_from = now - DENSE_SLOTS;
         let mut versions = vec![Version {
+            balance_known: true,
             slot: 1000, // beyond retention
             state: Some(state(1)),
         }];
@@ -1252,17 +1330,20 @@ mod tests {
         let bucket_start = (old / SPARSE_BUCKET) * SPARSE_BUCKET;
         for i in 0..10u64 {
             versions.push(Version {
+                balance_known: true,
                 slot: bucket_start + i,
                 state: Some(state(i as u8)),
             });
         }
         versions.push(Version {
+            balance_known: true,
             slot: bucket_start + SPARSE_BUCKET + 1,
             state: Some(state(42)),
         });
         // Dense tier: all kept.
         for i in 0..5u64 {
             versions.push(Version {
+                balance_known: true,
                 slot: dense_from + 100 + i,
                 state: Some(state(i as u8)),
             });

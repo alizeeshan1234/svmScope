@@ -457,7 +457,11 @@ window are served from the stream on demand and cached into the window.
 Address lookup tables are rebuilt from the transaction's own record, so a
 table closed or extended since never blocks a replay. The fidelity
 certificate names the slot coverage begins at and labels every account: `Recorded` (a version observed before the slot with
-continuous coverage across it), `MetadataRewind` (balances from the
+continuous coverage across it — polling rounds are at most
+`MAX_COVERAGE_GAP` (300) slots apart, so a change reverted between two
+rounds is the one thing coverage cannot see; a version taken from the
+account-changes stream carries exact bytes but no balance, and the balance
+is then only as good as the transaction's own record), `MetadataRewind` (balances from the
 transaction's own metadata), `MetadataEstimate` (a balance the transaction's
 own record only bounds, for a replay away from the landing slot: counted as
 drift), `Unchanged` (verified not written since the

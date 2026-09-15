@@ -382,6 +382,8 @@ pub(crate) fn collect_versions(blocks: Vec<AccountsAt>, slot: u64) -> HashMap<St
                     Version {
                         slot: block.slot,
                         state,
+                        // The stream sends bytes and owner, never a balance.
+                        balance_known: false,
                     },
                 );
             }

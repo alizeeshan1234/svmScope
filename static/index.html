@@ -2463,7 +2463,7 @@ function renderCertificate(d) {
          <div id="driftList" class="drift-list hidden">${stale.map(esc).join('<br>')}</div></div>`
     : (upgraded.length || estimated.length || sameBlock.length || prefixedInexact.length
         || absentUnproven.length || fromEvents.length || uncheckedProg.length
-        ? '' : `<div class="drift-inline">Every account is as it was at that moment — this replay is exact.</div>`);
+        ? '' : `<div class="drift-inline">Every account matched a recorded observation spanning that moment, and nothing was left unproven. Observations are at most ${fmt(300)} slots apart, so a change that reverted between two of them would not be seen.</div>`);
   // "Matches" has to mean more than a success flag: two unrelated failures
   // share one. Compare the outcome and the compute total, and say which part
   // differs when they do.

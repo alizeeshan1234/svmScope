@@ -1542,8 +1542,17 @@ impl Scope {
             // hot accounts exact for free once they are being recorded.
             if let (Some(s), Some(v)) = (store, start.as_ref()) {
                 if s.covers(floor_slot).unwrap_or(false) {
+                    // The record's own balance unless it was only inferred
+                    // when written, in which case the transaction's record is
+                    // the better source and, failing that, it is not proven.
+                    let seeded_lamports = seeded.lamports_of(key);
+                    let balance_proven = v.balance_known || seeded_lamports.is_some();
                     let account = v.state.clone().map(|st| solana_account::Account {
-                        lamports: st.lamports,
+                        lamports: if v.balance_known {
+                            st.lamports
+                        } else {
+                            seeded_lamports.unwrap_or(st.lamports)
+                        },
                         data: st.data,
                         owner: Address::from_str(&st.owner).unwrap_or_default(),
                         executable: false,
@@ -1555,6 +1564,9 @@ impl Scope {
                             started.elapsed().as_secs_f64(),
                             v.slot
                         );
+                    }
+                    if account.is_some() && !balance_proven {
+                        balance_unproven.insert(key.clone());
                     }
                     ctx.set_loaded_data(addr, account);
                     provenance.insert(key.clone(), Provenance::Recorded { slot: v.slot });
@@ -1594,7 +1606,15 @@ impl Scope {
                         lamports: a.lamports,
                         owner: a.owner.to_string(),
                     });
-                    let _ = s.record(key, v.slot, stored.as_ref());
+                    // Bytes from the stream, balance from the record or from
+                    // today: say which, so a later replay reading this back
+                    // does not treat a guess as an observation.
+                    let _ = s.record_with_balance(
+                        key,
+                        v.slot,
+                        stored.as_ref(),
+                        seeded_lamports.is_some(),
+                    );
                 }
                 // Bytes proven at the slot; the balance only if the record
                 // supplied it and this is the slot that record describes.
