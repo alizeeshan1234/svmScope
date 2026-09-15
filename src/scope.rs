@@ -354,7 +354,7 @@ impl Scope {
                     .enumerate()
                     .map(|(i, (_, sig))| {
                         json!({ "jsonrpc": "2.0", "id": i as u64, "method": "getTransaction",
-                                "params": [sig, { "encoding": "json", "maxSupportedTransactionVersion": 0 }] })
+                                "params": [sig, { "encoding": "json", "maxSupportedTransactionVersion": 1 }] })
                     })
                     .collect();
                 let Some(answers) = self.rpc_batch(&calls) else {
@@ -428,7 +428,7 @@ impl Scope {
                 .client
                 .send(
                     RpcRequest::GetBlock,
-                    json!([s, { "transactionDetails": "signatures", "rewards": false, "maxSupportedTransactionVersion": 0 }]),
+                    json!([s, { "transactionDetails": "signatures", "rewards": false, "maxSupportedTransactionVersion": 1 }]),
                 )
                 .ok()?;
             if let Some(sig) = block["signatures"]
@@ -552,7 +552,7 @@ impl Scope {
                     {
                         "encoding": "json",
                         "commitment": "confirmed",
-                        "maxSupportedTransactionVersion": 0
+                        "maxSupportedTransactionVersion": 1
                     }
                 ]),
             )
@@ -1722,7 +1722,20 @@ impl Scope {
         // the block's opening state, not what this transaction saw. Label
         // it; token accounts keep their rewound balance, which is exact.
         if own_slot {
-            let preceded = self.same_block_writes_before(slot, target.signature);
+            let preceded = self.same_block_writes_before(slot, target.signature, trace);
+            let block_unread = preceded.is_none();
+            // Unreadable block: no earlier write can be ruled out, so every
+            // data account that may have changed is labelled with zero known
+            // writes rather than passed off as exact.
+            let preceded = preceded.unwrap_or_else(|| {
+                if trace {
+                    eprintln!("[reconstruct] block {slot} unreadable: same-block writes unknown");
+                }
+                ctx.pre_state_keys()
+                    .into_iter()
+                    .map(|k| (k, 0usize))
+                    .collect()
+            });
             let is_token = |key: &str| {
                 ctx.pre_account_owned(key).is_some_and(|a| {
                     let o = a.owner.to_string();
@@ -1744,14 +1757,11 @@ impl Scope {
             if !affected.is_empty() {
                 // The block's earlier transactions, replayed first on the
                 // opening state: the bytes this one actually saw.
-                let applied = self.replay_block_prefix(
-                    ctx,
-                    slot,
-                    target.signature,
-                    &affected,
-                    trace,
-                    started,
-                );
+                let applied = if block_unread {
+                    None
+                } else {
+                    self.replay_block_prefix(ctx, slot, target.signature, &affected, trace, started)
+                };
                 for key in affected {
                     let writes = preceded.get(&key).copied().unwrap_or(0);
                     if let Some(p) = provenance.get_mut(&key) {
@@ -1795,21 +1805,51 @@ impl Scope {
                 json!([slot, {
                     "encoding": "base64",
                     "transactionDetails": "full",
-                    "maxSupportedTransactionVersion": 0,
+                    "maxSupportedTransactionVersion": 1,
                     "rewards": false
                 }]),
             )
+            .map_err(|e| {
+                if trace {
+                    eprintln!(
+                        "[reconstruct {:>6.1}s] block prefix: getBlock {slot} failed: {e}",
+                        started.elapsed().as_secs_f64()
+                    );
+                }
+            })
             .ok()?;
         let entries = block["transactions"].as_array()?;
-        // Decode every successful transaction before ours.
+        // Decode every successful transaction before ours. Ours is found by
+        // signature string, so a predecessor the decoder cannot read is
+        // skipped when it failed on chain and fatal (traced) otherwise.
         let mut txs: Vec<BlockTx> = Vec::new();
-        for entry in entries {
+        for (n, entry) in entries.iter().enumerate() {
             let b64 = entry["transaction"][0].as_str()?;
             let bytes = {
                 use base64::Engine;
                 base64::engine::general_purpose::STANDARD.decode(b64).ok()?
             };
-            let tx: VersionedTransaction = bincode::deserialize(&bytes).ok()?;
+            let failed = !entry["meta"]["err"].is_null();
+            let tx: VersionedTransaction = match wincode::deserialize(&bytes) {
+                Ok(tx) => tx,
+                Err(e) => {
+                    let sig = entry["transaction"]["signatures"][0].as_str().unwrap_or("");
+                    if sig == signature {
+                        break;
+                    }
+                    if failed {
+                        continue;
+                    }
+                    if trace {
+                        eprintln!(
+                            "[reconstruct {:>6.1}s] block prefix: transaction {n} (version {}) does not decode: {e}",
+                            started.elapsed().as_secs_f64(),
+                            entry["version"]
+                        );
+                    }
+                    return None;
+                }
+            };
             let sig = tx
                 .signatures
                 .first()
@@ -1818,7 +1858,7 @@ impl Scope {
             if sig == signature {
                 break;
             }
-            if !entry["meta"]["err"].is_null() {
+            if failed {
                 continue;
             }
             let mut t = BlockTx::new(tx, entry.clone());
@@ -2150,24 +2190,42 @@ impl Scope {
 
     /// Accounts that earlier successful transactions in `signature`'s block
     /// wrote before it, with how many did: one `getBlock` at account
-    /// detail. Empty when the block cannot be read.
-    fn same_block_writes_before(&self, slot: u64, signature: &str) -> HashMap<String, usize> {
+    /// detail, asked twice. `None` when the block cannot be read, so the
+    /// caller can say so instead of treating the block as quiet.
+    fn same_block_writes_before(
+        &self,
+        slot: u64,
+        signature: &str,
+        trace: bool,
+    ) -> Option<HashMap<String, usize>> {
         let mut out = HashMap::new();
-        let block: serde_json::Value = match self.client.send(
-            RpcRequest::GetBlock,
-            json!([slot, {
-                "encoding": "json",
-                "transactionDetails": "accounts",
-                "maxSupportedTransactionVersion": 0,
-                "rewards": false
-            }]),
-        ) {
-            Ok(b) => b,
-            Err(_) => return out,
-        };
-        let Some(txs) = block["transactions"].as_array() else {
-            return out;
-        };
+        let mut block: Option<serde_json::Value> = None;
+        for attempt in 0..2 {
+            match self.client.send::<serde_json::Value>(
+                RpcRequest::GetBlock,
+                json!([slot, {
+                    "encoding": "json",
+                    "transactionDetails": "accounts",
+                    "maxSupportedTransactionVersion": 1,
+                    "rewards": false
+                }]),
+            ) {
+                Ok(b) => {
+                    block = Some(b);
+                    break;
+                }
+                Err(e) => {
+                    if trace {
+                        eprintln!(
+                            "[reconstruct] getBlock {slot} (same-block writes) attempt {}: {e}",
+                            attempt + 1
+                        );
+                    }
+                }
+            }
+        }
+        let block = block?;
+        let txs = block["transactions"].as_array()?;
         for t in txs {
             let sigs = t["transaction"]["signatures"].as_array();
             if sigs.and_then(|s| s.first()).and_then(|s| s.as_str()) == Some(signature) {
@@ -2187,7 +2245,7 @@ impl Scope {
                 }
             }
         }
-        out
+        Some(out)
     }
 
     /// Reconstruct the world for an **unsigned / not-yet-sent** transaction

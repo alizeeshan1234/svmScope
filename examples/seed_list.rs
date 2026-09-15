@@ -62,7 +62,7 @@ fn touched_accounts(scope: &Scope, signature: &str) -> Vec<String> {
     for attempt in 0..3 {
         match scope.client().send(
             RpcRequest::GetTransaction,
-            serde_json::json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
+            serde_json::json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 1 }]),
         ) {
             Ok(v) => {
                 tx = v;

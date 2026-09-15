@@ -458,7 +458,9 @@ Address lookup tables are rebuilt from the transaction's own record, so a
 table closed or extended since never blocks a replay. The fidelity
 certificate names the slot coverage begins at and labels every account: `Recorded` (a version observed before the slot with
 continuous coverage across it), `MetadataRewind` (balances from the
-transaction's own metadata), `Unchanged` (verified not written since the
+transaction's own metadata), `MetadataEstimate` (a balance the transaction's
+own record only bounds, for a replay away from the landing slot: counted as
+drift), `Unchanged` (verified not written since the
 slot), `Reconstructed` (re-executed write history, `exact` or not),
 `BlockPrefix` (written by earlier transactions in the same block, which were
 replayed first, in order, on the block's opening state, so the bytes are what
@@ -466,8 +468,9 @@ the transaction saw; `exact` is false, and it counts as drift, when one of
 those transactions' inputs had to come from today's data),
 `SameBlock` (the same situation when that replay was not possible: the chain
 of earlier transactions was longer than `SVMSCOPE_PREFIX_MAX_TXS` (160) or
-touched more than `SVMSCOPE_PREFIX_MAX_ACCOUNTS` (600) data accounts, or one
-none of them succeeded here: counted as drift; a single predecessor that
+touched more than `SVMSCOPE_PREFIX_MAX_ACCOUNTS` (600) data accounts, none
+of them succeeded here, or the block itself could not be read (`writes` is
+then 0): counted as drift; a single predecessor that
 does not succeed here is skipped and only the accounts it would have written
 are marked inexact; the accounts those transactions write are searched
 `SVMSCOPE_PREFIX_LOOKBACK` (1024) slots back in the stream, the ones they

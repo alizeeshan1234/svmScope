@@ -101,7 +101,7 @@ impl LedgerSource for RpcLedger {
                 RpcRequest::GetTransaction,
                 json!([
                     signature,
-                    { "encoding": "json", "commitment": "confirmed", "maxSupportedTransactionVersion": 0 }
+                    { "encoding": "json", "commitment": "confirmed", "maxSupportedTransactionVersion": 1 }
                 ]),
             )
             .map_err(Error::rpc)?;

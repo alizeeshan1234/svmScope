@@ -62,6 +62,8 @@ solana-client = "=4.2.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 solana-pubkey = "=4.2.1"
 solana-transaction = { version = "=4.1.6", features = ["wincode"] }
+# The transaction wire format for v1 messages is only known to wincode.
+wincode = "=0.5.5"
 solana-transaction-error = "=3.3.2"
 # Not used directly: caps resolution for consumers. solana-reward-info 6.3+
 # switched to wincode 0.6 while solana-transaction-status-client-types 4.2.1

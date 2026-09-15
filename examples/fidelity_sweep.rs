@@ -90,7 +90,7 @@ fn touched_accounts(scope: &Scope, signature: &str) -> Vec<String> {
     for attempt in 0..3 {
         match scope.client().send(
             RpcRequest::GetTransaction,
-            serde_json::json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 0 }]),
+            serde_json::json!([signature, { "encoding": "json", "maxSupportedTransactionVersion": 1 }]),
         ) {
             Ok(v) => {
                 tx = v;
@@ -398,7 +398,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for _ in 0..8 {
             let block: serde_json::Value = match scope.client().send(
                 RpcRequest::GetBlock,
-                serde_json::json!([target, { "transactionDetails": "signatures", "rewards": false, "maxSupportedTransactionVersion": 0 }]),
+                serde_json::json!([target, { "transactionDetails": "signatures", "rewards": false, "maxSupportedTransactionVersion": 1 }]),
             ) {
                 Ok(b) => b,
                 Err(_) => {

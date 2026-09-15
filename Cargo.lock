@@ -6499,6 +6499,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tonic-prost",
+ "wincode",
 ]
 
 [[package]]

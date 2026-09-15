@@ -2477,7 +2477,7 @@ function renderCertificate(d) {
     if (k === 'EventLog') return `from the program's event log (slot ${fmt(v.slot)})`;
     if (k === 'Program') return v.upgraded_since === true ? 'program code, upgraded after this slot' : v.upgraded_since === false ? 'program code, not upgraded since' : 'program code';
     if (k === 'Unchanged') return v.last_write != null ? `unchanged since slot ${fmt(v.last_write)}` : 'unchanged since';
-    if (k === 'SameBlock') return `written by ${v.writes} earlier transaction${v.writes === 1 ? '' : 's'} in the same block (state from before them)`;
+    if (k === 'SameBlock') return v.writes ? `written by ${v.writes} earlier transaction${v.writes === 1 ? '' : 's'} in the same block (state from before them)` : 'the block could not be read, so writes by earlier transactions in the same block could not be ruled out';
     if (k === 'BlockPrefix') return `written by ${v.writes} earlier transaction${v.writes === 1 ? '' : 's'} in the same block, replayed first${v.exact ? '' : " (some of their inputs on today's data)"}`;
     if (k === 'Reconstructed') return `rebuilt from ${v.writes} write${v.writes === 1 ? '' : 's'}${v.exact ? '' : ' (inexact)'}`;
     return names[k] || k;

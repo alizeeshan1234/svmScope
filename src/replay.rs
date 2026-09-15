@@ -1572,7 +1572,7 @@ fn fetch_transaction(client: &RpcClient, signature: &str) -> Result<VersionedTra
     let resp: serde_json::Value = client
         .send(
             RpcRequest::GetTransaction,
-            json!([signature, { "encoding": "base64", "maxSupportedTransactionVersion": 0 }]),
+            json!([signature, { "encoding": "base64", "maxSupportedTransactionVersion": 1 }]),
         )
         .map_err(Error::rpc)?;
     if resp.is_null() {
@@ -1582,7 +1582,7 @@ fn fetch_transaction(client: &RpcClient, signature: &str) -> Result<VersionedTra
         Error::MalformedRpcResponse(format!("no base64 transaction in response for {signature}"))
     })?;
     let bytes = b64_decode(tx_b64);
-    bincode::deserialize::<VersionedTransaction>(&bytes)
+    wincode::deserialize::<VersionedTransaction>(&bytes)
         .map_err(|e| Error::TxDecode(format!("{signature}: {e}")))
 }
 
@@ -2717,6 +2717,14 @@ impl ReplayContext {
     /// exist (or is a program).
     pub(crate) fn pre_account_owned(&self, address: &str) -> Option<Account> {
         self.pre_account(address).cloned()
+    }
+
+    /// Every data account loaded into the pre-state, as addresses.
+    pub(crate) fn pre_state_keys(&self) -> Vec<String> {
+        self.loaded
+            .iter()
+            .filter_map(|(a, l)| matches!(l, Loaded::Data(_)).then(|| a.to_string()))
+            .collect()
     }
 
     /// The transaction with only the top-level instructions at `keep`, in
