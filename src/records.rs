@@ -440,6 +440,7 @@ fn kept_slots(slots: &[u64], now: u64) -> Vec<bool> {
 /// Encode `versions` (slot-ordered) as a fresh chain: fulls where required,
 /// diffs elsewhere.
 #[cfg(test)]
+#[allow(dead_code)]
 fn encode_chain(versions: &[Version]) -> Vec<Record> {
     let mut out = Vec::with_capacity(versions.len());
     let mut prev: Option<&AccountState> = None;
@@ -698,6 +699,7 @@ impl LogStore {
     /// Rewrite one account's log with a new slot-ordered chain (the tests'
     /// reference; the store itself streams).
     #[cfg(test)]
+    #[allow(dead_code)]
     fn rewrite(&self, address: &str, versions: &[Version]) -> Result<()> {
         let records = encode_chain(versions);
         let mut bytes = Vec::new();

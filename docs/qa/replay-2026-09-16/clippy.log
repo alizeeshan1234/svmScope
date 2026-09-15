@@ -1,0 +1,32 @@
+    Checking svmscope v0.6.0 (/Users/mohammedzeeshan/Desktop/svmscope)
+error: usage of `bool::then` in `filter_map`
+    --> src/replay.rs:2754:14
+     |
+2754 |             .filter_map(|(a, l)| matches!(l, Loaded::Data(_)).then(|| a.to_string()))
+     |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use `filter` then `map` instead: `filter(|&(a, l)| matches!(l, Loaded::Data(_))).map(|(a, l)| a.to_string())`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#filter_map_bool_then
+     = note: `-D clippy::filter-map-bool-then` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::filter_map_bool_then)]`
+
+error: function `encode_chain` is never used
+   --> src/records.rs:443:4
+    |
+443 | fn encode_chain(versions: &[Version]) -> Vec<Record> {
+    |    ^^^^^^^^^^^^
+    |
+    = note: `-D dead-code` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: method `rewrite` is never used
+   --> src/records.rs:701:8
+    |
+555 | impl LogStore {
+    | ------------- method in this implementation
+...
+701 |     fn rewrite(&self, address: &str, versions: &[Version]) -> Result<()> {
+    |        ^^^^^^^
+
+error: could not compile `svmscope` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `svmscope` (lib test) due to 3 previous errors

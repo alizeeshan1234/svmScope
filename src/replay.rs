@@ -2751,7 +2751,8 @@ impl ReplayContext {
     pub(crate) fn pre_state_keys(&self) -> Vec<String> {
         self.loaded
             .iter()
-            .filter_map(|(a, l)| matches!(l, Loaded::Data(_)).then(|| a.to_string()))
+            .filter(|(_, l)| matches!(l, Loaded::Data(_)))
+            .map(|(a, _)| a.to_string())
             .collect()
     }
 

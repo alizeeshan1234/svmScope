@@ -1,0 +1,20 @@
+[
+  {
+    "name": "unproven_absence",
+    "claims_exact": true,
+    "claims_matches": true,
+    "text": "replayed as it happened 999 compute units Replayed as of the moment it landed — slot 10 · matches the real on-chain result 1 empty at that slot all 1 accounts missing holds nothing today, with nothing observed at that slot 1 account the transaction names hold nothing today , and nothing was observed at that slot, so the replay treats it as empty then too. Every account is as it was at that moment — this replay is exact."
+  },
+  {
+    "name": "partial_event_fields",
+    "claims_exact": true,
+    "claims_matches": true,
+    "text": "replayed as it happened 999 compute units Replayed as of the moment it landed — slot 10 · matches the real on-chain result 1 from the program's event log all 1 accounts curve from the program's event log (slot 9) 1 account's reserves were restored from the program's own event log at that moment (the fields the event carries are exact; the account's other bytes are today's): curve. Every account is as it was at that moment — this replay is exact."
+  },
+  {
+    "name": "unknown_program_version",
+    "claims_exact": true,
+    "claims_matches": true,
+    "text": "replayed as it happened 999 compute units Replayed as of the moment it landed — slot 10 · matches the real on-chain result 1 program code all 1 accounts program program code Every account is as it was at that moment — this replay is exact."
+  }
+]

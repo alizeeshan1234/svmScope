@@ -671,10 +671,13 @@ fn check_replay_window(scope: &Scope, slot: u64) -> Result<(), svmscope::Error> 
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(t);
-    let age_days = now.saturating_sub(t) / 86_400;
-    if age_days as u64 > days {
+    // Compare in seconds: flooring to whole days let a target up to one day
+    // past the cutoff through, so a 30-day window accepted nearly 31.
+    let age_secs = now.saturating_sub(t);
+    if age_secs > (days as i64).saturating_mul(86_400) {
+        let age_days = age_secs as f64 / 86_400.0;
         return Err(svmscope::Error::InvalidSpec(format!(
-            "slot {slot} is {age_days} days old; replays cover the last {days} days"
+            "slot {slot} is {age_days:.1} days old; replays cover the last {days} days"
         )));
     }
     Ok(())

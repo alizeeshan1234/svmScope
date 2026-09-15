@@ -1,0 +1,46 @@
+{
+  "tested_at_utc": "2026-09-15T21:29:14.557352+00:00",
+  "checkout": "e0de020",
+  "frontend_sha256": "4ad79a65d6f7d85a63775439910ea5fabf1bca61f18be1a0713625dba1dfec96",
+  "replays": [
+    {
+      "case": "Orca original slot",
+      "http_status": 200,
+      "seconds": 274.472063,
+      "drifted_accounts": 5
+    },
+    {
+      "case": "Orca cached repeat",
+      "http_status": 200,
+      "seconds": 0.367776,
+      "identical_json": true
+    },
+    {
+      "case": "Pump at September 4 target",
+      "http_status": 200,
+      "seconds": 117.467981,
+      "drifted_accounts": 16
+    },
+    {
+      "case": "September 4 Pump original slot",
+      "http_status": 200,
+      "seconds": 210.431484,
+      "drifted_accounts": 3,
+      "onchain_comparison": {
+        "overview": true,
+        "balance_change": true,
+        "token_change": true,
+        "logs": true,
+        "compute": true,
+        "cpi_tree": true
+      }
+    }
+  ],
+  "boundary_probe": {
+    "target_slot": 439615716,
+    "target_time_utc": "2026-08-16T09:30:00Z",
+    "http_status": 400,
+    "response": "not a valid address: invalid: not a transaction signature or an address",
+    "interpretation": "Age greater than 30 days passed window validation; rejected later for invalid signature."
+  }
+}

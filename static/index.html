@@ -1113,7 +1113,7 @@ input.derived { border-color: var(--green-border); color: var(--green); }
     <div id="featBanner" class="clockbanner hidden"></div>
     <div id="hero" class="hero">
       <div class="eyebrow"><span class="pulse"></span> Solana transaction replay</div>
-      <h1>Replay any Solana transaction, <span class="dim">exactly as it ran.</span></h1>
+      <h1>Replay any Solana transaction, <span class="dim">at the slot it ran.</span></h1>
       <p>svmscope rebuilds the state a transaction executed against, runs the real programs
          locally, and tells you where every byte came from. Then change one value and run it again.</p>
 
@@ -1151,7 +1151,7 @@ input.derived { border-color: var(--green-border); color: var(--green); }
         <div class="feature f-green">
           <div class="fi" aria-hidden="true"><svg class="ic"><use href="#i-replay"/></svg></div>
           <h3>Replay at any slot</h3>
-          <p>Every account and program binary as it was in the last 30 days, re-executed in an embedded SVM, with a certificate of where each byte came from.</p>
+          <p>Accounts and program binaries rebuilt as they were at any slot in the last 30 days, re-executed in an embedded SVM, with a certificate naming every account it could not prove for that slot.</p>
         </div>
         <div class="feature f-cyan">
           <div class="fi" aria-hidden="true"><svg class="ic"><use href="#i-sliders"/></svg></div>
@@ -2428,6 +2428,10 @@ function renderCertificate(d) {
   const prefixedInexact = (d.accounts || []).filter(a => a.source && a.source.BlockPrefix && a.source.BlockPrefix.exact === false).map(a => a.address);
   const prefixTxs = (d.accounts || []).reduce((m, a) => Math.max(m, a.source && a.source.BlockPrefix ? a.source.BlockPrefix.writes : 0), 0);
   const absentUnproven = (d.accounts || []).filter(a => a.source && a.source.Absent && a.source.Absent.proven === false).map(a => a.address);
+  // A program whose upgrade history was never checked, and an account whose
+  // economic fields alone were restored, are both partial evidence: neither
+  // can support the word exact.
+  const uncheckedProg = (d.accounts || []).filter(a => a.source && a.source.Program && a.source.Program.upgraded_since == null).map(a => a.address);
   const stale = (d.drifted || []).filter(a => !upgraded.includes(a) && !estimated.includes(a) && !sameBlock.includes(a) && !prefixedInexact.includes(a) && !absentUnproven.includes(a));
   const n = stale.length;
   const recording = d.recorded_from != null;
@@ -2457,7 +2461,9 @@ function renderCertificate(d) {
     ? `<div class="drift-inline"><b>${n}</b> account${n === 1 ? '' : 's'} still ${n === 1 ? 'uses' : 'use'} <b>today's data</b>, so those parts may differ from back then
          (<a href="#" id="driftToggle">show which</a>). ${fixNote}
          <div id="driftList" class="drift-list hidden">${stale.map(esc).join('<br>')}</div></div>`
-    : (upgraded.length || estimated.length || sameBlock.length || prefixedInexact.length ? '' : `<div class="drift-inline">Every account is as it was at that moment — this replay is exact.</div>`);
+    : (upgraded.length || estimated.length || sameBlock.length || prefixedInexact.length
+        || absentUnproven.length || fromEvents.length || uncheckedProg.length
+        ? '' : `<div class="drift-inline">Every account is as it was at that moment — this replay is exact.</div>`);
   const verify = atOwn && d.onchain_success != null
     ? (d.onchain_success === r.success ? ' · matches the real on-chain result' : ` · differs from the real on-chain result (it ${d.onchain_success ? 'succeeded' : 'failed'} on-chain)`)
     : '';

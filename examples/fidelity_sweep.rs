@@ -354,6 +354,8 @@ fn provenance_label(p: &Provenance, is_program: bool) -> &'static str {
         Provenance::Reconstructed { exact: false, .. } => "reconstructed~",
         Provenance::HistoricalArchive => "archive",
         Provenance::CurrentRpc => "current",
+        Provenance::Absent { proven: true } => "absent",
+        Provenance::Absent { proven: false } => "absent~",
         Provenance::Fixture => "fixture",
     }
 }

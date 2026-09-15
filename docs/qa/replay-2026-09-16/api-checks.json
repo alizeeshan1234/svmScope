@@ -1,0 +1,90 @@
+[
+  {
+    "name": "missing_slot",
+    "url": "https://svmscope-engine.onrender.com/replay_at/invalid",
+    "status": "400",
+    "seconds": 0.353,
+    "body": "slot is required",
+    "error": ""
+  },
+  {
+    "name": "negative_slot",
+    "url": "https://svmscope-engine.onrender.com/replay_at/invalid?slot=-1",
+    "status": "400",
+    "seconds": 0.823,
+    "body": "Failed to deserialize query string: slot: invalid digit found in string",
+    "error": ""
+  },
+  {
+    "name": "fraction_slot",
+    "url": "https://svmscope-engine.onrender.com/replay_at/invalid?slot=1.5",
+    "status": "400",
+    "seconds": 0.779,
+    "body": "Failed to deserialize query string: slot: invalid digit found in string",
+    "error": ""
+  },
+  {
+    "name": "invalid_time",
+    "url": "https://svmscope-engine.onrender.com/slot_at?time=garbage",
+    "status": "400",
+    "seconds": 0.303,
+    "body": "time must be unix seconds or an ISO 8601 date",
+    "error": ""
+  },
+  {
+    "name": "september_1",
+    "url": "https://svmscope-engine.onrender.com/slot_at?time=2026-09-01T06:30:00Z",
+    "status": "200",
+    "seconds": 1.153,
+    "body": {
+      "block_time": 1788244302,
+      "requested": 1788244200,
+      "slot": 443356092
+    },
+    "error": ""
+  },
+  {
+    "name": "august_17",
+    "url": "https://svmscope-engine.onrender.com/slot_at?time=2026-08-17T00:00:00Z",
+    "status": "200",
+    "seconds": 1.001,
+    "body": {
+      "block_time": 1786924800,
+      "requested": 1786924800,
+      "slot": 439741318
+    },
+    "error": ""
+  },
+  {
+    "name": "august_12",
+    "url": "https://svmscope-engine.onrender.com/slot_at?time=2026-08-12T00:00:00Z",
+    "status": "200",
+    "seconds": 1.774,
+    "body": {
+      "block_time": 1786492801,
+      "requested": 1786492800,
+      "slot": 438704934
+    },
+    "error": ""
+  },
+  {
+    "name": "invalid_calendar",
+    "url": "https://svmscope-engine.onrender.com/slot_at?time=2026-02-30T00:00:00Z",
+    "status": "200",
+    "seconds": 1.052,
+    "body": {
+      "block_time": 1772409602,
+      "requested": 1772409600,
+      "slot": 403606144
+    },
+    "error": ""
+  },
+  {
+    "name": "older_than_window",
+    "url": "https://svmscope-engine.onrender.com/analyze_at/5rgzzBr2vVNxftzJHtF4EJhZGtg2nPunLrxAcHqrXg2ejRAXXc2kS4W3vXSmC1HeSp21bs2ZT4XT49y21DLGSTCq?slot=438704932",
+    "status": "400",
+    "seconds": 0.629,
+    "body": "slot 438704932 is 34 days old; replays cover the last 30 days",
+    "error": ""
+  }
+]
