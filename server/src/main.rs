@@ -302,9 +302,17 @@ static AT_GATE: std::sync::LazyLock<tokio::sync::Semaphore> = std::sync::LazyLoc
 });
 
 fn at_cache_get(key: &str) -> Option<std::sync::Arc<serde_json::Value>> {
-    let cache = AT_CACHE.lock().ok()?;
-    let (at, _, v) = cache.get(key)?;
-    (at.elapsed() < AT_CACHE_TTL).then(|| std::sync::Arc::clone(v))
+    let mut cache = AT_CACHE.lock().ok()?;
+    let (at, _, v) = cache.get_mut(key)?;
+    if at.elapsed() >= AT_CACHE_TTL {
+        return None;
+    }
+    let hit = std::sync::Arc::clone(v);
+    // Reading refreshes the entry: eviction and expiry then fall on answers
+    // nobody is asking for, not on the one link a crowd is following. The
+    // world at a past slot does not change, so an old answer stays right.
+    *at = std::time::Instant::now();
+    Some(hit)
 }
 
 fn at_cache_put(key: String, value: serde_json::Value) -> std::sync::Arc<serde_json::Value> {
