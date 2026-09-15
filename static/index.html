@@ -1648,7 +1648,7 @@ async function diagnoseIfFailed() {
     if (!d.failed) { card.innerHTML = ''; return; }
     const bold = s => esc(s || '').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
     const fix = d.fix ? `<div class="dx-fix"><span class="dx-fix-tag">How to fix</span> ${esc(d.fix)}</div>` : '';
-    const note = `<div class="dx-note">This is the <b>real on-chain reason</b>, read from the recorded outcome. A local replay (below) can show a <i>different</i> error — it runs against <i>today's</i> state, so time- or price-sensitive checks (e.g. an oracle freshness check → <span class="mono">InvalidTimestamp</span>) may trip first. That's state drift, not the original cause.</div>`;
+    const note = `<div class="dx-note">This is the <b>real on-chain reason</b>, read from the recorded outcome. The replay below is rebuilt as of the slot you pick, so at the transaction's own slot it should agree; where an account's bytes could not be proven for that slot, the certificate names it. Replaying against <i>today's</i> state instead can trip a time- or price-sensitive check first (e.g. an oracle freshness check → <span class="mono">InvalidTimestamp</span>) — that's state drift, not the original cause.</div>`;
     card.innerHTML = `<div class="dx-card">
       <div class="dx-head"><span class="dx-badge"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>failed on-chain</span><span class="dx-title">${esc(d.headline)}</span></div>
       <div class="dx-why">${bold(d.explanation)}</div>
@@ -2504,7 +2504,7 @@ function renderCertificate(d) {
   const rows = (d.accounts || []).map(a => `<div class="acct-row ${kindOf(a)}" data-kind="${esc(typeof a.source === 'string' ? a.source : Object.keys(a.source || {})[0])}"><span class="mono">${esc(a.address)}</span> <span class="k">${esc(labelOf(a))}</span></div>`).join('');
   const listed = (d.accounts || []).length;
   const total = analysis?.overview?.account_count;
-  const omitted = total && total > listed ? `<span class="cu-note">${fmt(total)} accounts in the transaction; the ${total - listed} not listed are signers (balances from its own record) and native programs.</span>` : '';
+  const omitted = total && total > listed ? `<span class="cu-note">${fmt(total)} accounts in the transaction; the ${total - listed} not listed are native programs the runtime supplies itself.</span>` : '';
   const chipKind = (k) => k === 'CurrentRpc' || k === 'MetadataEstimate' || k === 'SameBlock' ? 'drift' : k === 'EventLog' || k === 'Absent' ? 'soft' : 'exact';
   const chips = Object.entries(d.sources || {})
     .sort((a, b) => b[1] - a[1])
