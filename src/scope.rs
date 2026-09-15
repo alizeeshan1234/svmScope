@@ -661,12 +661,55 @@ impl Scope {
         let historical = replay.ctx.pre_state_accounts();
         if !historical.is_empty() {
             let rebuilt = crate::decode::describe_accounts_owned(&self.client, &historical);
-            let mut by_addr: std::collections::HashMap<String, _> =
-                rebuilt.into_iter().map(|a| (a.address.clone(), a)).collect();
+            let mut by_addr: std::collections::HashMap<String, _> = rebuilt
+                .into_iter()
+                .map(|a| (a.address.clone(), a))
+                .collect();
             for acc in analysis.accounts.iter_mut() {
                 if let Some(hist) = by_addr.remove(&acc.address) {
                     *acc = hist;
                 }
+            }
+            // An account that existed at the slot but is gone today never
+            // appears in a description of today's chain, so it would be
+            // missing from the page entirely. Add what is left over, in the
+            // transaction's own key order.
+            if !by_addr.is_empty() {
+                for key in utils::resolve_account_keys(&replayed_tx) {
+                    if let Some(hist) = by_addr.remove(&key) {
+                        analysis.accounts.push(hist);
+                    }
+                }
+                let mut rest: Vec<_> = by_addr.into_values().collect();
+                rest.sort_by(|a, b| a.address.cmp(&b.address));
+                analysis.accounts.extend(rest);
+            }
+            // An account the transaction names that neither exists today nor
+            // was rebuilt has no bytes to show, but leaving it out hides it
+            // altogether. List it with the balance its own record gives.
+            let listed: std::collections::HashSet<String> = analysis
+                .accounts
+                .iter()
+                .map(|a| a.address.clone())
+                .collect();
+            let keys = utils::resolve_account_keys(&replayed_tx);
+            let pre_balances = replayed_tx["meta"]["preBalances"].as_array();
+            for (i, key) in keys.iter().enumerate() {
+                if listed.contains(key) {
+                    continue;
+                }
+                let lamports = pre_balances
+                    .and_then(|b| b.get(i))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                analysis.accounts.push(crate::decode::AccountInfo {
+                    address: key.clone(),
+                    owner: solana_pubkey::Pubkey::default().to_string(),
+                    lamports,
+                    executable: false,
+                    data_len: 0,
+                    decoded: None,
+                });
             }
         }
         analysis.replay = Some(result);
@@ -1030,7 +1073,10 @@ impl Scope {
         num_signers: usize,
         target: DriftTarget<'_>,
         seeded: &PreState,
-    ) -> (HashMap<String, Provenance>, std::collections::HashSet<String>) {
+    ) -> (
+        HashMap<String, Provenance>,
+        std::collections::HashSet<String>,
+    ) {
         use crate::reconstruct::{is_infra, reconstruct_account_from, Cut, RpcLedger};
         let DriftTarget {
             slot,
@@ -1081,7 +1127,8 @@ impl Scope {
         let mut provenance = HashMap::new();
         // Accounts whose bytes are proven at the slot but whose lamport balance
         // had to be taken from today, because the stream carries no balance.
-        let mut balance_unproven: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut balance_unproven: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         // Without a replay budget and without recordings there is nothing to
         // do. With recordings, covered accounts are exact by lookup at no
         // RPC cost, and every asked-about account joins the watched set, so
@@ -3103,17 +3150,17 @@ impl Replay {
                     // Bytes proven, balance taken from today: not exact.
                     self.balance_unproven.contains(&a.address)
                         || matches!(
-                        a.source,
-                        Provenance::CurrentRpc
-                            | Provenance::MetadataEstimate
-                            | Provenance::SameBlock { .. }
-                            | Provenance::BlockPrefix { exact: false, .. }
-                            | Provenance::Reconstructed { exact: false, .. }
-                            | Provenance::Program {
-                                upgraded_since: Some(true)
-                            }
-                            | Provenance::Absent { proven: false }
-                    )
+                            a.source,
+                            Provenance::CurrentRpc
+                                | Provenance::MetadataEstimate
+                                | Provenance::SameBlock { .. }
+                                | Provenance::BlockPrefix { exact: false, .. }
+                                | Provenance::Reconstructed { exact: false, .. }
+                                | Provenance::Program {
+                                    upgraded_since: Some(true)
+                                }
+                                | Provenance::Absent { proven: false }
+                        )
                 })
                 .map(|a| a.address.clone())
                 .collect()

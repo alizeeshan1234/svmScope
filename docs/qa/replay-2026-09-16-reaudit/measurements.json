@@ -1,0 +1,43 @@
+{
+  "checkout": "5bdccbecd649f0c735886815e2e3a697f1b3383d",
+  "frontend_sha256": "54179ec08a407baf304af1e99a25cbc82aeff31d030e0e81153f17d3225fd33b",
+  "finished_at_utc": "2026-09-15T22:10:38.122535+00:00",
+  "post_rollout_replays": [
+    {
+      "case": "orca_original",
+      "http": 200,
+      "seconds": 144.079784,
+      "drifted": 5
+    },
+    {
+      "case": "september4_original",
+      "http": 200,
+      "seconds": 159.502281,
+      "drifted": 3
+    },
+    {
+      "case": "pump_different_target",
+      "http": 200,
+      "seconds": 73.083298,
+      "drifted": 18
+    },
+    {
+      "case": "orca_cached",
+      "http": 200,
+      "seconds": 0.541294,
+      "identical": true
+    }
+  ],
+  "during_rollout": [
+    {
+      "case": "orca_original",
+      "http": 502,
+      "seconds": 48.838166
+    },
+    {
+      "case": "pump_different_target",
+      "http": 502,
+      "seconds": 49.516485
+    }
+  ]
+}

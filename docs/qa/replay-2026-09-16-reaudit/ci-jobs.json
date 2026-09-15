@@ -1,0 +1,277 @@
+{
+  "total_count": 2,
+  "jobs": [
+    {
+      "id": 104579895645,
+      "run_id": 35028106892,
+      "workflow_name": "CI",
+      "head_branch": "master",
+      "run_url": "https://api.github.com/repos/alizeeshan1234/svmScope/actions/runs/35028106892",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOUA1Vns8AAAAYWXKRXQ",
+      "head_sha": "5bdccbecd649f0c735886815e2e3a697f1b3383d",
+      "url": "https://api.github.com/repos/alizeeshan1234/svmScope/actions/jobs/104579895645",
+      "html_url": "https://github.com/alizeeshan1234/svmScope/actions/runs/35028106892/job/104579895645",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-09-15T21:53:31Z",
+      "started_at": "2026-09-15T21:53:34Z",
+      "completed_at": "2026-09-15T21:54:25Z",
+      "name": "test",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-15T21:53:35Z",
+          "completed_at": "2026-09-15T21:53:36Z"
+        },
+        {
+          "name": "Run actions/checkout@v4",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-09-15T21:53:36Z",
+          "completed_at": "2026-09-15T21:53:37Z"
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@stable",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-15T21:53:37Z",
+          "completed_at": "2026-09-15T21:53:38Z"
+        },
+        {
+          "name": "Run Swatinem/rust-cache@v2",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-15T21:53:38Z",
+          "completed_at": "2026-09-15T21:54:22Z"
+        },
+        {
+          "name": "Format",
+          "status": "completed",
+          "conclusion": "failure",
+          "number": 5,
+          "started_at": "2026-09-15T21:54:22Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        },
+        {
+          "name": "Build (workspace — library + server)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 6,
+          "started_at": "2026-09-15T21:54:23Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        },
+        {
+          "name": "Test",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 7,
+          "started_at": "2026-09-15T21:54:23Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        },
+        {
+          "name": "Clippy",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 8,
+          "started_at": "2026-09-15T21:54:23Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        },
+        {
+          "name": "Build (library alone, as consumers see it)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 9,
+          "started_at": "2026-09-15T21:54:23Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        },
+        {
+          "name": "Build (no default features — profiler off)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 10,
+          "started_at": "2026-09-15T21:54:23Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        },
+        {
+          "name": "Test (single-run debugger, fork + vendored runtime)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 11,
+          "started_at": "2026-09-15T21:54:23Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        },
+        {
+          "name": "Build server (single-run, as deployed)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 12,
+          "started_at": "2026-09-15T21:54:23Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        },
+        {
+          "name": "Build as a registry consumer (no patch section)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 13,
+          "started_at": "2026-09-15T21:54:23Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        },
+        {
+          "name": "Package (crates.io dry run)",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 14,
+          "started_at": "2026-09-15T21:54:23Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        },
+        {
+          "name": "Docker image builds",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 15,
+          "started_at": "2026-09-15T21:54:23Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        },
+        {
+          "name": "SDK build",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 16,
+          "started_at": "2026-09-15T21:54:23Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        },
+        {
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 31,
+          "started_at": "2026-09-15T21:54:23Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        },
+        {
+          "name": "Post Run actions/checkout@v4",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 32,
+          "started_at": "2026-09-15T21:54:23Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 33,
+          "started_at": "2026-09-15T21:54:23Z",
+          "completed_at": "2026-09-15T21:54:23Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/alizeeshan1234/svmScope/check-runs/104579895645",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "runner_id": 1000001057,
+      "runner_name": "GitHub Actions 1000001057",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 104579895934,
+      "run_id": 35028106892,
+      "workflow_name": "CI",
+      "head_branch": "master",
+      "run_url": "https://api.github.com/repos/alizeeshan1234/svmScope/actions/runs/35028106892",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOUA1Vns8AAAAYWXKSfg",
+      "head_sha": "5bdccbecd649f0c735886815e2e3a697f1b3383d",
+      "url": "https://api.github.com/repos/alizeeshan1234/svmScope/actions/jobs/104579895934",
+      "html_url": "https://github.com/alizeeshan1234/svmScope/actions/runs/35028106892/job/104579895934",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-09-15T21:53:31Z",
+      "started_at": "2026-09-15T21:53:35Z",
+      "completed_at": "2026-09-15T21:54:29Z",
+      "name": "MSRV (rust-version)",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-09-15T21:53:35Z",
+          "completed_at": "2026-09-15T21:53:37Z"
+        },
+        {
+          "name": "Run actions/checkout@v4",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-09-15T21:53:37Z",
+          "completed_at": "2026-09-15T21:53:38Z"
+        },
+        {
+          "name": "Run dtolnay/rust-toolchain@master",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-09-15T21:53:38Z",
+          "completed_at": "2026-09-15T21:53:45Z"
+        },
+        {
+          "name": "Run Swatinem/rust-cache@v2",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-09-15T21:53:45Z",
+          "completed_at": "2026-09-15T21:54:05Z"
+        },
+        {
+          "name": "Build on the declared minimum",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-09-15T21:54:05Z",
+          "completed_at": "2026-09-15T21:54:28Z"
+        },
+        {
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-09-15T21:54:28Z",
+          "completed_at": "2026-09-15T21:54:28Z"
+        },
+        {
+          "name": "Post Run actions/checkout@v4",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-09-15T21:54:28Z",
+          "completed_at": "2026-09-15T21:54:28Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-09-15T21:54:28Z",
+          "completed_at": "2026-09-15T21:54:28Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/alizeeshan1234/svmScope/check-runs/104579895934",
+      "labels": [
+        "ubuntu-latest"
+      ],
+      "runner_id": 1000001058,
+      "runner_name": "GitHub Actions 1000001058",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    }
+  ]
+}

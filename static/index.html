@@ -2464,8 +2464,17 @@ function renderCertificate(d) {
     : (upgraded.length || estimated.length || sameBlock.length || prefixedInexact.length
         || absentUnproven.length || fromEvents.length || uncheckedProg.length
         ? '' : `<div class="drift-inline">Every account is as it was at that moment — this replay is exact.</div>`);
+  // "Matches" has to mean more than a success flag: two unrelated failures
+  // share one. Compare the outcome and the compute total, and say which part
+  // differs when they do.
+  const cuSame = d.onchain_cu == null || r.compute_units == null || d.onchain_cu === r.compute_units;
+  const outcomeSame = d.onchain_success === r.success;
   const verify = atOwn && d.onchain_success != null
-    ? (d.onchain_success === r.success ? ' · matches the real on-chain result' : ` · differs from the real on-chain result (it ${d.onchain_success ? 'succeeded' : 'failed'} on-chain)`)
+    ? (outcomeSame && cuSame
+        ? ' · matches the real on-chain result, compute included'
+        : outcomeSame
+          ? ` · same outcome as on chain, but ${fmt(r.compute_units)} compute against ${fmt(d.onchain_cu)} on chain`
+          : ` · differs from the real on-chain result (it ${d.onchain_success ? 'succeeded' : 'failed'} on chain)`)
     : '';
   // Where each account's bytes came from, in plain words.
   const names = {
@@ -3156,6 +3165,7 @@ function certificateCard(a) {
   return {
     result: a.replay, clock: a.clock, drifted: c.drifted || [], verifiable: c.verifiable,
     onchain_success: onchainAnalysis?.overview?.success,
+    onchain_cu: onchainAnalysis?.overview?.compute_units,
     sources, accounts: c.accounts || [], recorded_from: c.recorded_from, slot: a.slot, landed_slot: a.landed_slot,
   };
 }

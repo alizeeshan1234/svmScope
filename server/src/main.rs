@@ -841,6 +841,11 @@ fn parse_time(text: &str) -> Option<i64> {
         .unwrap_or(Some(0))?;
     let mm: i64 = hms.next().map(|x| x.parse().ok()).unwrap_or(Some(0))?;
     let ss: i64 = hms.next().map(|x| x.parse().ok()).unwrap_or(Some(0))?;
+    // A clock reading outside its range is a typo, not a later time: 25:00
+    // must be an error rather than one in the morning.
+    if !(0..24).contains(&hh) || !(0..60).contains(&mm) || !(0..=60).contains(&ss) {
+        return None;
+    }
     // Days from civil (Howard Hinnant).
     let (y2, m2) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
     let era = y2.div_euclid(400);

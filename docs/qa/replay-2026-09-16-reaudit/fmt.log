@@ -1,0 +1,64 @@
+Diff in /Users/mohammedzeeshan/Desktop/svmscope/src/scope.rs:661:
+         let historical = replay.ctx.pre_state_accounts();
+         if !historical.is_empty() {
+             let rebuilt = crate::decode::describe_accounts_owned(&self.client, &historical);
+[31m-            let mut by_addr: std::collections::HashMap<String, _> =
+(B[m[31m-                rebuilt.into_iter().map(|a| (a.address.clone(), a)).collect();
+(B[m[32m+            let mut by_addr: std::collections::HashMap<String, _> = rebuilt
+(B[m[32m+                .into_iter()
+(B[m[32m+                .map(|a| (a.address.clone(), a))
+(B[m[32m+                .collect();
+(B[m             for acc in analysis.accounts.iter_mut() {
+                 if let Some(hist) = by_addr.remove(&acc.address) {
+                     *acc = hist;
+Diff in /Users/mohammedzeeshan/Desktop/svmscope/src/scope.rs:1030:
+         num_signers: usize,
+         target: DriftTarget<'_>,
+         seeded: &PreState,
+[31m-    ) -> (HashMap<String, Provenance>, std::collections::HashSet<String>) {
+(B[m[32m+    ) -> (
+(B[m[32m+        HashMap<String, Provenance>,
+(B[m[32m+        std::collections::HashSet<String>,
+(B[m[32m+    ) {
+(B[m         use crate::reconstruct::{is_infra, reconstruct_account_from, Cut, RpcLedger};
+         let DriftTarget {
+             slot,
+Diff in /Users/mohammedzeeshan/Desktop/svmscope/src/scope.rs:1081:
+         let mut provenance = HashMap::new();
+         // Accounts whose bytes are proven at the slot but whose lamport balance
+         // had to be taken from today, because the stream carries no balance.
+[31m-        let mut balance_unproven: std::collections::HashSet<String> = std::collections::HashSet::new();
+(B[m[32m+        let mut balance_unproven: std::collections::HashSet<String> =
+(B[m[32m+            std::collections::HashSet::new();
+(B[m         // Without a replay budget and without recordings there is nothing to
+         // do. With recordings, covered accounts are exact by lookup at no
+         // RPC cost, and every asked-about account joins the watched set, so
+Diff in /Users/mohammedzeeshan/Desktop/svmscope/src/scope.rs:3103:
+                     // Bytes proven, balance taken from today: not exact.
+                     self.balance_unproven.contains(&a.address)
+                         || matches!(
+[31m-                        a.source,
+(B[m[31m-                        Provenance::CurrentRpc
+(B[m[31m-                            | Provenance::MetadataEstimate
+(B[m[31m-                            | Provenance::SameBlock { .. }
+(B[m[31m-                            | Provenance::BlockPrefix { exact: false, .. }
+(B[m[31m-                            | Provenance::Reconstructed { exact: false, .. }
+(B[m[31m-                            | Provenance::Program {
+(B[m[31m-                                upgraded_since: Some(true)
+(B[m[31m-                            }
+(B[m[31m-                            | Provenance::Absent { proven: false }
+(B[m[31m-                    )
+(B[m[32m+                            a.source,
+(B[m[32m+                            Provenance::CurrentRpc
+(B[m[32m+                                | Provenance::MetadataEstimate
+(B[m[32m+                                | Provenance::SameBlock { .. }
+(B[m[32m+                                | Provenance::BlockPrefix { exact: false, .. }
+(B[m[32m+                                | Provenance::Reconstructed { exact: false, .. }
+(B[m[32m+                                | Provenance::Program {
+(B[m[32m+                                    upgraded_since: Some(true)
+(B[m[32m+                                }
+(B[m[32m+                                | Provenance::Absent { proven: false }
+(B[m[32m+                        )
+(B[m                 })
+                 .map(|a| a.address.clone())
+                 .collect()

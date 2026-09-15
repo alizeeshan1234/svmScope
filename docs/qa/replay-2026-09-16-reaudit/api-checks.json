@@ -1,0 +1,151 @@
+[
+  {
+    "name": "september_1",
+    "url": "https://svmscope-engine.onrender.com/slot_at?time=2026-09-01T06:30:00Z",
+    "status": "200",
+    "seconds": 1.435,
+    "body": {
+      "block_time": 1788244201,
+      "off_by_secs": -1,
+      "requested": 1788244200,
+      "slot": 443355776
+    },
+    "error": ""
+  },
+  {
+    "name": "invalid_calendar",
+    "url": "https://svmscope-engine.onrender.com/slot_at?time=2026-02-30T00:00:00Z",
+    "status": "400",
+    "seconds": 0.798,
+    "body": "time must be unix seconds or an ISO 8601 date",
+    "error": ""
+  },
+  {
+    "name": "invalid_hour",
+    "url": "https://svmscope-engine.onrender.com/slot_at?time=2026-09-01T25:00:00Z",
+    "status": "200",
+    "seconds": 1.899,
+    "body": {
+      "block_time": 1788310801,
+      "off_by_secs": -1,
+      "requested": 1788310800,
+      "slot": 443565575
+    },
+    "error": ""
+  },
+  {
+    "name": "invalid_minute",
+    "url": "https://svmscope-engine.onrender.com/slot_at?time=2026-09-01T12:60:00Z",
+    "status": "200",
+    "seconds": 1.397,
+    "body": {
+      "block_time": 1788267601,
+      "off_by_secs": -1,
+      "requested": 1788267600,
+      "slot": 443429477
+    },
+    "error": ""
+  },
+  {
+    "name": "invalid_offset",
+    "url": "https://svmscope-engine.onrender.com/slot_at?time=2026-09-01T06:30:00%2B25:00",
+    "status": "200",
+    "seconds": 1.599,
+    "body": {
+      "block_time": 1788154201,
+      "off_by_secs": -1,
+      "requested": 1788154200,
+      "slot": 443072252
+    },
+    "error": ""
+  },
+  {
+    "name": "trailing_date",
+    "url": "https://svmscope-engine.onrender.com/slot_at?time=2026-09-01-extra",
+    "status": "200",
+    "seconds": 1.808,
+    "body": {
+      "block_time": 1788220801,
+      "off_by_secs": -1,
+      "requested": 1788220800,
+      "slot": 443282102
+    },
+    "error": ""
+  },
+  {
+    "name": "august_17",
+    "url": "https://svmscope-engine.onrender.com/slot_at?time=2026-08-17T00:00:00Z",
+    "status": "200",
+    "seconds": 1.115,
+    "body": {
+      "block_time": 1786924800,
+      "off_by_secs": 0,
+      "requested": 1786924800,
+      "slot": 439741317
+    },
+    "error": ""
+  },
+  {
+    "name": "boundary_30_5_days",
+    "url": "https://svmscope-engine.onrender.com/replay_at/invalid?slot=439615716",
+    "status": "400",
+    "seconds": 0.677,
+    "body": "slot 439615716 is 30.5 days old; replays cover the last 30 days",
+    "error": ""
+  },
+  {
+    "name": "future_slot",
+    "url": "https://svmscope-engine.onrender.com/analyze_at/invalid?slot=999999999",
+    "status": "400",
+    "seconds": 0.552,
+    "body": "slot 999999999 is in the future (current slot 447359188)",
+    "error": ""
+  },
+  {
+    "name": "now_health",
+    "url": "https://svmscope-engine.onrender.com/api",
+    "status": "200",
+    "seconds": 0.322,
+    "body": {
+      "archive": "Any route that replays accepts `archive` (query or body): an archival RPC that honours a historical slot, e.g. Alchemy's Account Archive, for exact state at the transaction's slot. Same opt-in and vetting as `rpc`.",
+      "custom_archive": false,
+      "custom_rpc": false,
+      "description": "Solana transaction simulation layer \u2014 decode, replay, mutate, assert.",
+      "endpoints": {
+        "GET  /account/{address}": "An account decoded through its program's layout or IDL.",
+        "GET  /analyze/{signature}": "Decode a transaction: CPI tree, balance & token changes, compute, and IDL-decoded accounts.",
+        "GET  /analyze_at/{signature}?slot=N": "The whole transaction page rebuilt from a replay as of any slot (own slot when omitted): call tree, balances, token balances, compute, logs, plus the certificate.",
+        "GET  /counterfactual/{signature}?account&lo&hi": "Binary-search the lamport balance at which the outcome flips.",
+        "GET  /diagnose/{signature}": "A failure explained: error name, docs, the step and accounts involved.",
+        "GET  /freeze/{signature}": "Capture a self-contained fixture for deterministic, offline replay.",
+        "GET  /instructions/{program}": "The instructions a program's on-chain IDL declares.",
+        "GET  /profile/{signature}": "The as-it-happened compute profile, no symbols, cacheable.",
+        "GET  /replay/{signature}": "Re-execute the transaction locally against reconstructed pre-state.",
+        "GET  /replay_at/{signature}?slot=N": "Replay against the world as of any slot (exact for every account recorded across it, labelled otherwise), with the same certificate.",
+        "GET  /replay_at_slot/{signature}": "Replay against state reconstructed at the transaction's slot, with a per-account fidelity certificate.",
+        "GET  /scan/{signature}": "Which accounts, when drained, change the outcome.",
+        "GET  /signatures/{address}": "Recent signatures for an address.",
+        "GET  /stats": "Usage counters (token-gated).",
+        "GET  /trace/{signature}": "The same trace with no mutations, cacheable.",
+        "POST /decode_account": "{ owner, data_b64 } \u2014 decode raw account bytes.",
+        "POST /idl_instructions": "{ idl } \u2014 the same, for an IDL supplied in the request.",
+        "POST /preflight": "{ transaction, mutations[] } \u2014 simulate an UNSIGNED transaction against current state before sending.",
+        "POST /preflight_report": "{ transaction, mutations[] } \u2014 preflight as an HTML report.",
+        "POST /profile": "{ signature, mutations[]?, time_travel?, features?, symbols[{program, elf_b64}]? } \u2014 compute profiler: every BPF instruction attributed to functions, syscalls and call stacks per program frame; symbols name a program's functions from its .debug file.",
+        "POST /replay_report": "{ signature, scenarios[] } \u2014 a suite run as an HTML report.",
+        "POST /simulate": "{ signature, mutations[], time_travel?, features? } \u2014 replay with what-if account mutations, an optional clock warp, and optional runtime feature-gate toggles.",
+        "POST /simulate_suite": "{ signature, scenarios[], time_travel?, features? } \u2014 run a suite of scenarios with outcome + state assertions, under optional feature-gate toggles.",
+        "POST /trace": "{ signature | transaction, mutations[], time_travel?, features? } \u2014 step debugger: every instruction and CPI with decoded args, per-step account diffs, and the failing step."
+      },
+      "event_log_programs": [
+        "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+      ],
+      "name": "svmscope",
+      "recorded_from": 446444753,
+      "replay_window_days": 30,
+      "slot_at": "/slot_at?time=<unix seconds | ISO 8601> \u2192 the nearest slot",
+      "version": "0.6.0"
+    },
+    "error": ""
+  }
+]

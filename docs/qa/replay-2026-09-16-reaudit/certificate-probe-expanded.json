@@ -1,0 +1,32 @@
+[
+  {
+    "name": "different_errors_same_failure",
+    "claims_exact": true,
+    "claims_matches": true,
+    "text": "replay failed 1 compute units Replayed as of the moment it landed — slot 10 · matches the real on-chain result InstructionError(0, Custom(6001)) Every account is as it was at that moment — this replay is exact."
+  },
+  {
+    "name": "unproven_balance_recorded",
+    "claims_exact": false,
+    "claims_matches": true,
+    "text": "replayed as it happened 999 compute units Replayed as of the moment it landed — slot 10 · matches the real on-chain result 1 recorded as it was all 1 accounts pool recorded as it was (slot 9) 1 account still uses today's data , so those parts may differ from back then ( show which ). This engine isn't recording state, so accounts that changed since can't be rewound — the SOL &amp; token balances and the clock are already correct. pool"
+  },
+  {
+    "name": "unproven_absence",
+    "claims_exact": false,
+    "claims_matches": true,
+    "text": "replayed as it happened 999 compute units Replayed as of the moment it landed — slot 10 · matches the real on-chain result 1 empty at that slot all 1 accounts missing holds nothing today, with nothing observed at that slot 1 account the transaction names hold nothing today , and nothing was observed at that slot, so the replay treats it as empty then too."
+  },
+  {
+    "name": "partial_event_fields",
+    "claims_exact": false,
+    "claims_matches": true,
+    "text": "replayed as it happened 999 compute units Replayed as of the moment it landed — slot 10 · matches the real on-chain result 1 from the program's event log all 1 accounts curve from the program's event log (slot 9) 1 account's reserves were restored from the program's own event log at that moment (the fields the event carries are exact; the account's other bytes are today's): curve."
+  },
+  {
+    "name": "unknown_program_version",
+    "claims_exact": false,
+    "claims_matches": true,
+    "text": "replayed as it happened 999 compute units Replayed as of the moment it landed — slot 10 · matches the real on-chain result 1 program code all 1 accounts program program code"
+  }
+]
