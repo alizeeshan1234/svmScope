@@ -2747,6 +2747,18 @@ impl ReplayContext {
         self.pre_account(address).cloned()
     }
 
+    /// Every loaded data account with the state the replay starts from —
+    /// what a historical page must show instead of today's chain values.
+    pub(crate) fn pre_state_accounts(&self) -> Vec<(String, Account)> {
+        self.loaded
+            .iter()
+            .filter_map(|(a, l)| match l {
+                Loaded::Data(acc) => Some((a.to_string(), acc.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every data account loaded into the pre-state, as addresses.
     pub(crate) fn pre_state_keys(&self) -> Vec<String> {
         self.loaded

@@ -655,6 +655,20 @@ impl Scope {
             replay.time_travel.at_unix_timestamp,
         );
         let mut analysis = self.analysis_of(signature, &replayed_tx);
+        // `analysis_of` describes accounts from today's chain. This page is a
+        // replay as of `slot`, and its editor and generated scenarios must show
+        // the state the replay actually started from, not today's.
+        let historical = replay.ctx.pre_state_accounts();
+        if !historical.is_empty() {
+            let rebuilt = crate::decode::describe_accounts_owned(&self.client, &historical);
+            let mut by_addr: std::collections::HashMap<String, _> =
+                rebuilt.into_iter().map(|a| (a.address.clone(), a)).collect();
+            for acc in analysis.accounts.iter_mut() {
+                if let Some(hist) = by_addr.remove(&acc.address) {
+                    *acc = hist;
+                }
+            }
+        }
         analysis.replay = Some(result);
         Ok(AnalysisAt {
             slot,
@@ -747,6 +761,7 @@ impl Scope {
         crate::replay::synthesize_lookup_tables(&mut ctx, &tx);
         self.preload_idls(&mut ctx);
         Ok(Replay {
+            balance_unproven: std::collections::HashSet::new(),
             recorded: Some(OnchainRecord::from_tx_json(&tx)),
             ctx,
             time_travel: TimeTravel::default(),
@@ -844,6 +859,7 @@ impl Scope {
             )?;
             self.preload_idls(&mut ctx);
             let mut replay = Replay {
+                balance_unproven: std::collections::HashSet::new(),
                 recorded: Some(OnchainRecord::from_tx_json(&tx)),
                 ctx,
                 time_travel: TimeTravel::default(),
@@ -882,7 +898,7 @@ impl Scope {
         // Lookup tables from the record: exact for this transaction at any
         // slot, whatever happened to the tables since.
         let tables = crate::replay::synthesize_lookup_tables(&mut ctx, &tx);
-        let mut provenance = self.reconstruct_drift(
+        let (mut provenance, balance_unproven) = self.reconstruct_drift(
             &mut ctx,
             &account_keys,
             num_signers,
@@ -904,6 +920,7 @@ impl Scope {
             time_travel: TimeTravel::default(),
             fidelity: Fidelity::Reconstructed { slot },
             provenance,
+            balance_unproven,
             recorded_from: self
                 .records
                 .as_ref()
@@ -1013,7 +1030,7 @@ impl Scope {
         num_signers: usize,
         target: DriftTarget<'_>,
         seeded: &PreState,
-    ) -> HashMap<String, Provenance> {
+    ) -> (HashMap<String, Provenance>, std::collections::HashSet<String>) {
         use crate::reconstruct::{is_infra, reconstruct_account_from, Cut, RpcLedger};
         let DriftTarget {
             slot,
@@ -1062,12 +1079,15 @@ impl Scope {
             Cut::Slot
         };
         let mut provenance = HashMap::new();
+        // Accounts whose bytes are proven at the slot but whose lamport balance
+        // had to be taken from today, because the stream carries no balance.
+        let mut balance_unproven: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Without a replay budget and without recordings there is nothing to
         // do. With recordings, covered accounts are exact by lookup at no
         // RPC cost, and every asked-about account joins the watched set, so
         // the loop runs even at budget zero.
         if self.reconstruct_budget == 0 && self.records.is_none() {
-            return provenance;
+            return (provenance, balance_unproven);
         }
         let ledger = RpcLedger::new(self.rpc_url());
         // The forward loop, not the recursive cone: replay the account's own
@@ -1497,11 +1517,18 @@ impl Scope {
             // The account-changes stream had it: exact at the target, and
             // from now on our own store has it too.
             if let Some(v) = streamed.remove(key) {
+                // The stream carries bytes and owner, never a balance. The
+                // transaction's own record does carry one, and at the slot it
+                // landed that balance is exact — so prefer it, and only fall
+                // back to today's lamports when the record has none.
+                let seeded_lamports = seeded.lamports_of(key);
                 let account = v.state.as_ref().map(|st| solana_account::Account {
-                    lamports: crate::history::lamports_for(
-                        current.as_ref().map(|c| c.lamports),
-                        st.data.len(),
-                    ),
+                    lamports: seeded_lamports.unwrap_or_else(|| {
+                        crate::history::lamports_for(
+                            current.as_ref().map(|c| c.lamports),
+                            st.data.len(),
+                        )
+                    }),
                     data: st.data.clone(),
                     owner: Address::from_str(&st.owner).unwrap_or_default(),
                     executable: false,
@@ -1521,6 +1548,11 @@ impl Scope {
                         owner: a.owner.to_string(),
                     });
                     let _ = s.record(key, v.slot, stored.as_ref());
+                }
+                // Bytes proven at the slot; the balance only if the record
+                // supplied it and this is the slot that record describes.
+                if account.is_some() && !(own_slot && seeded_lamports.is_some()) {
+                    balance_unproven.insert(key.clone());
                 }
                 ctx.set_loaded_data(addr, account);
                 provenance.insert(key.clone(), Provenance::Recorded { slot: v.slot });
@@ -1776,7 +1808,7 @@ impl Scope {
                 }
             }
         }
-        provenance
+        (provenance, balance_unproven)
     }
 
     /// Replay the earlier transactions of `signature`'s block that wrote
@@ -2268,6 +2300,7 @@ impl Scope {
         let mut ctx = crate::replay::preflight_context(&self.client, tx)?;
         self.preload_idls(&mut ctx);
         Ok(Replay {
+            balance_unproven: std::collections::HashSet::new(),
             recorded: None,
             ctx,
             time_travel: TimeTravel::default(),
@@ -2945,6 +2978,11 @@ pub struct Replay {
     /// Per-account provenance overrides set by historical reconstruction;
     /// accounts absent here derive their provenance from `fidelity`.
     provenance: HashMap<String, Provenance>,
+    /// Accounts whose bytes are proven at the slot but whose lamport balance
+    /// is today's: the account-changes stream carries no balance, so unless
+    /// the transaction's own record supplied one for the slot it describes,
+    /// the balance is not established and the certificate counts it as drift.
+    balance_unproven: std::collections::HashSet<String>,
     /// Where the record store's coverage began when this replay was built.
     recorded_from: Option<u64>,
 }
@@ -3062,7 +3100,9 @@ impl Replay {
             accounts
                 .iter()
                 .filter(|a| {
-                    matches!(
+                    // Bytes proven, balance taken from today: not exact.
+                    self.balance_unproven.contains(&a.address)
+                        || matches!(
                         a.source,
                         Provenance::CurrentRpc
                             | Provenance::MetadataEstimate
@@ -3098,6 +3138,7 @@ impl Replay {
     /// fixture restores the recorded on-chain outcome and captured IDLs too.
     pub fn from_fixture(fx: &Fixture) -> Result<Replay> {
         Ok(Replay {
+            balance_unproven: std::collections::HashSet::new(),
             ctx: ReplayContext::from_fixture(fx)?,
             recorded: fx.recorded.clone(),
             time_travel: TimeTravel::default(),

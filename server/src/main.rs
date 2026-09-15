@@ -749,21 +749,43 @@ async fn slot_at_handler(
         let mut slot = tip
             .saturating_sub(32)
             .saturating_sub(((tip_time - target).max(0) as f64 / 0.4) as u64);
-        let mut best = None;
-        for _ in 0..6 {
+        // Keep the closest block seen, not merely the last one tried, and
+        // walk until it is inside the tolerance. Returning whatever the sixth
+        // estimate happened to hit is how a lookup lands minutes away.
+        const TOLERANCE_SECS: i64 = 2;
+        let mut best: Option<(u64, i64)> = None;
+        for _ in 0..12 {
             let Some((s, t)) = block_time_of(slot.max(1)) else {
                 break;
             };
-            best = Some((s, t));
+            if best.is_none_or(|(_, bt)| (target - t).abs() < (target - bt).abs()) {
+                best = Some((s, t));
+            }
             let delta = target - t;
-            if delta.abs() <= 2 {
+            if delta.abs() <= TOLERANCE_SECS {
                 break;
             }
-            slot = (s as i64 + (delta as f64 / 0.4) as i64).max(1) as u64;
+            let step = (delta as f64 / 0.4) as i64;
+            let step = if step == 0 {
+                if delta > 0 {
+                    1
+                } else {
+                    -1
+                }
+            } else {
+                step
+            };
+            slot = (s as i64 + step).max(1) as u64;
         }
         let (s, t) =
             best.ok_or_else(|| svmscope::Error::Fixture("no block near that time".into()))?;
-        Ok(json!({ "slot": s, "block_time": t, "requested": target }))
+        let off = (target - t).abs();
+        if off > 60 {
+            return Err(svmscope::Error::Fixture(format!(
+                "no block within a minute of that time; the nearest found is slot {s}, {off} seconds away"
+            )));
+        }
+        Ok(json!({ "slot": s, "block_time": t, "requested": target, "off_by_secs": target - t }))
     })
     .await
     .map_err(|e| {
@@ -788,6 +810,22 @@ fn parse_time(text: &str) -> Option<i64> {
     let y: i64 = parts.next()?.parse().ok()?;
     let m: i64 = parts.next()?.parse().ok()?;
     let d: i64 = parts.next()?.parse().ok()?;
+    // Reject a date that does not exist rather than letting the day-count
+    // arithmetic roll it forward: February 30 is an error, not March 2.
+    if !(1..=12).contains(&m) || d < 1 {
+        return None;
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days_in_month = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if d > days_in_month {
+        return None;
+    }
     let rest = rest.trim_start_matches('T');
     let (clock, offset) = match rest.find(['Z', '+', '-']) {
         Some(i) => (&rest[..i], &rest[i..]),
@@ -1941,6 +1979,11 @@ async fn replay_at_slot_handler(
             // param, e.g. Alchemy's Account Archive) upgrades this replay from
             // Reconstructed to Exact. Unset = free reconstruction, as before.
             let scope = scope_for(url, archive);
+            // This route replays at the transaction's own slot, which can be
+            // older than the window the other replay routes enforce.
+            if let Some(landed) = scope.landed_slot(&signature)? {
+                check_replay_window(&scope, landed)?;
+            }
             replay_at_response(&scope, &signature, None)
         })
         .await

@@ -490,6 +490,46 @@ pub(crate) fn infer_layout(data: &[u8]) -> Option<DecodedAccount> {
 /// Fetch each account's on-chain state and decode any recognized layouts.
 ///
 /// Parallel to `account_keys`; accounts that don't exist are skipped.
+/// The same description as [`describe_accounts`], but from account state the
+/// caller already holds — the bytes a historical replay actually ran against,
+/// rather than whatever the chain holds today. The client is still needed to
+/// fetch a program's IDL when a layout is not built in.
+pub(crate) fn describe_accounts_owned(
+    client: &RpcClient,
+    accounts: &[(String, solana_account::Account)],
+) -> Vec<AccountInfo> {
+    let mut idl_cache: std::collections::HashMap<String, Option<serde_json::Value>> =
+        std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for (address, acc) in accounts {
+        let owner = acc.owner.to_string();
+        let decoded = if acc.executable {
+            None
+        } else {
+            decode(&owner, &acc.data)
+                .or_else(|| {
+                    let idl = idl_cache.entry(owner.clone()).or_insert_with(|| {
+                        std::str::FromStr::from_str(&owner)
+                            .ok()
+                            .and_then(|a| crate::idl::fetch_idl_json(client, a))
+                    });
+                    idl.as_ref()
+                        .and_then(|idl| crate::idl::decode_with_idl(idl, &acc.data))
+                })
+                .or_else(|| infer_layout(&acc.data))
+        };
+        out.push(AccountInfo {
+            address: address.clone(),
+            owner,
+            lamports: acc.lamports,
+            executable: acc.executable,
+            data_len: acc.data.len(),
+            decoded,
+        });
+    }
+    out
+}
+
 pub(crate) fn describe_accounts(client: &RpcClient, account_keys: &[String]) -> Vec<AccountInfo> {
     let resp: serde_json::Value = match client.send(
         RpcRequest::GetMultipleAccounts,
