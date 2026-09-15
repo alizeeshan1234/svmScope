@@ -1,0 +1,40 @@
+
+closed account, at its own slot  (100s)
+   PASS  replay succeeds as on chain
+   PASS  compute matches on chain
+   PASS  every certificate account is on the page
+
+closed account, after it was closed  (25s)
+   PASS  replay fails, as it would then
+   PASS  names the uninitialised account
+
+same-slot writes  (25s)
+   PASS  earlier writers in the block are labelled
+   PASS  those accounts count as drift
+
+target away from the landing slot  (33s)
+   PASS  fails 11 days later
+   PASS  the reason is the order book
+   PASS  estimated balances are declared
+
+at the slot it landed  (38s)
+   PASS  succeeds as on chain
+   PASS  compute matches on chain
+
+program upgraded since the slot  (35s)
+   PASS  program binaries are labelled
+   PASS  an upgraded program would be flagged
+
+window boundary is enforced  (1s)
+   PASS  refused as outside 30 days
+
+malformed clock refused  (0s)
+   PASS  rejected
+
+impossible date refused  (0s)
+   PASS  rejected
+
+date lookup lands on time  (1s)
+   PASS  within 2 seconds
+
+18 passed, 0 failed
