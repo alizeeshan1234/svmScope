@@ -51,10 +51,21 @@ fn b64_decode(s: &str) -> Vec<u8> {
 /// downloads (Jupiter alone is over a megabyte) and they change only on upgrade,
 /// so one 45-byte header fetch per program replaces the full download whenever
 /// the upgrade slot is unchanged.
-type ElfCache = HashMap<(String, u64), std::sync::Arc<Vec<u8>>>;
+type ElfCache = HashMap<(String, u64), (std::time::Instant, std::sync::Arc<Vec<u8>>)>;
 static ELF_CACHE: std::sync::LazyLock<std::sync::Mutex<ElfCache>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
-const ELF_CACHE_MAX_ENTRIES: usize = 256;
+
+/// The cache is bounded by the bytes it holds, not by how many programs it
+/// holds: binaries run from a few kilobytes to well over a megabyte, so a
+/// count alone lets a server with a small memory limit fill up and be killed.
+/// `SVMSCOPE_ELF_CACHE_MB` overrides the budget.
+fn elf_cache_budget() -> usize {
+    std::env::var("SVMSCOPE_ELF_CACHE_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(48)
+        .saturating_mul(1024 * 1024)
+}
 
 /// The ELF inside an upgradeable program's programdata account, served from
 /// [`ELF_CACHE`] when the account's upgrade slot has not changed.
@@ -72,8 +83,9 @@ fn fetch_programdata_elf_cached(client: &RpcClient, pd_addr: &str) -> Option<Vec
         .and_then(|b| b.try_into().ok())
         .map(u64::from_le_bytes)?;
     let key = (pd_addr.to_string(), slot);
-    if let Ok(cache) = ELF_CACHE.lock() {
-        if let Some(elf) = cache.get(&key) {
+    if let Ok(mut cache) = ELF_CACHE.lock() {
+        if let Some((at, elf)) = cache.get_mut(&key) {
+            *at = std::time::Instant::now();
             return Some(elf.as_ref().clone());
         }
     }
@@ -81,10 +93,26 @@ fn fetch_programdata_elf_cached(client: &RpcClient, pd_addr: &str) -> Option<Vec
         .filter(|d| d.len() > 45)
         .map(|d| d[45..].to_vec())?;
     if let Ok(mut cache) = ELF_CACHE.lock() {
-        if cache.len() >= ELF_CACHE_MAX_ENTRIES {
-            cache.clear();
+        let budget = elf_cache_budget();
+        cache.insert(
+            key,
+            (std::time::Instant::now(), std::sync::Arc::new(elf.clone())),
+        );
+        // Evict least recently used binaries until the cache is inside its
+        // byte budget, always keeping the one just inserted.
+        let mut held: usize = cache.values().map(|(_, e)| e.len()).sum();
+        while held > budget && cache.len() > 1 {
+            let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some((_, e)) = cache.remove(&oldest) {
+                held = held.saturating_sub(e.len());
+            }
         }
-        cache.insert(key, std::sync::Arc::new(elf.clone()));
     }
     Some(elf)
 }

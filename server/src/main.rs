@@ -266,36 +266,74 @@ static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 /// at a past slot does not change, so the second person to open the same
 /// link, or the same person coming back, gets the answer at once instead of
 /// waiting minutes for the stream again. Bounded and time-limited.
-type AtCache =
-    std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<serde_json::Value>)>;
+type AtCache = std::collections::HashMap<
+    String,
+    (std::time::Instant, usize, std::sync::Arc<serde_json::Value>),
+>;
 static AT_CACHE: std::sync::LazyLock<std::sync::Mutex<AtCache>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 const AT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
 const AT_CACHE_MAX: usize = 200;
 
+/// Answers are held by bytes as well as by count: a whole-page `analyze_at`
+/// for a busy transaction is far larger than a bare replay, so 200 of them
+/// can outweigh everything else the process holds.
+/// `SVMSCOPE_AT_CACHE_MB` overrides the budget.
+fn at_cache_budget() -> usize {
+    std::env::var("SVMSCOPE_AT_CACHE_MB")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(24)
+        .saturating_mul(1024 * 1024)
+}
+
+/// The concurrency gate for the two as-of routes. Each in-flight replay
+/// holds a whole reconstructed world in memory, so a burst of them is how a
+/// small instance runs out of memory and answers 502 to everyone, including
+/// the requests that were nearly done. Beyond this many at once, a request
+/// waits for a slot instead. `SVMSCOPE_AT_CONCURRENCY` overrides it.
+static AT_GATE: std::sync::LazyLock<tokio::sync::Semaphore> = std::sync::LazyLock::new(|| {
+    let permits = std::env::var("SVMSCOPE_AT_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(2);
+    tokio::sync::Semaphore::new(permits)
+});
+
 fn at_cache_get(key: &str) -> Option<std::sync::Arc<serde_json::Value>> {
     let cache = AT_CACHE.lock().ok()?;
-    let (at, v) = cache.get(key)?;
+    let (at, _, v) = cache.get(key)?;
     (at.elapsed() < AT_CACHE_TTL).then(|| std::sync::Arc::clone(v))
 }
 
 fn at_cache_put(key: String, value: serde_json::Value) -> std::sync::Arc<serde_json::Value> {
+    let size = serde_json::to_vec(&value).map(|v| v.len()).unwrap_or(0);
     let value = std::sync::Arc::new(value);
     if let Ok(mut cache) = AT_CACHE.lock() {
-        cache.retain(|_, (at, _)| at.elapsed() < AT_CACHE_TTL);
-        if cache.len() >= AT_CACHE_MAX {
-            if let Some(oldest) = cache
-                .iter()
-                .min_by_key(|(_, (at, _))| *at)
-                .map(|(k, _)| k.clone())
-            {
-                cache.remove(&oldest);
-            }
-        }
+        cache.retain(|_, (at, _, _)| at.elapsed() < AT_CACHE_TTL);
         cache.insert(
             key,
-            (std::time::Instant::now(), std::sync::Arc::clone(&value)),
+            (
+                std::time::Instant::now(),
+                size,
+                std::sync::Arc::clone(&value),
+            ),
         );
+        let budget = at_cache_budget();
+        let mut held: usize = cache.values().map(|(_, n, _)| *n).sum();
+        while (cache.len() > AT_CACHE_MAX || held > budget) && cache.len() > 1 {
+            let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (at, _, _))| *at)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some((_, n, _)) = cache.remove(&oldest) {
+                held = held.saturating_sub(n);
+            }
+        }
     }
     value
 }
@@ -1770,6 +1808,16 @@ async fn analyze_at_handler(
     if let Some(hit) = at_cache_get(&key) {
         return Ok(Json(hit));
     }
+    let _permit = AT_GATE.acquire().await.map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the engine is shutting down".to_string(),
+        )
+    })?;
+    // Someone else may have finished this very replay while we waited.
+    if let Some(hit) = at_cache_get(&key) {
+        return Ok(Json(hit));
+    }
     let out = tokio::task::spawn_blocking(move || {
         let scope = scope_for(url, archive);
         if let (Some(slot), Ok(tip)) = (slot, scope.client().get_slot()) {
@@ -1825,6 +1873,15 @@ async fn replay_at_handler(
         "replay_at|{url}|{}|{signature}|{slot}",
         archive.as_deref().unwrap_or("")
     );
+    if let Some(hit) = at_cache_get(&key) {
+        return Ok(Json(hit));
+    }
+    let _permit = AT_GATE.acquire().await.map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the engine is shutting down".to_string(),
+        )
+    })?;
     if let Some(hit) = at_cache_get(&key) {
         return Ok(Json(hit));
     }
