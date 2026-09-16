@@ -599,6 +599,14 @@ input[type=datetime-local]::-webkit-calendar-picker-indicator:hover { opacity: 1
 
 /* ---------- what-if: account editor ---------- */
 .whatif-lead { color: var(--text-2); font-size: 13.5px; line-height: 1.55; margin: 0 0 var(--s-4); max-width: 680px; }
+.idl-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); }
+#idlState { color: var(--text-2); font-size: 12.5px; flex: 1 1 320px; }
+.idl-panel { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.idl-panel textarea { width: 100%; background: var(--bg-2); color: var(--text-1); border: 1px solid var(--border);
+  border-radius: 8px; padding: 10px; font-size: 12px; resize: vertical; }
+.idl-actions { display: flex; align-items: center; gap: 10px; }
+.idl-err { color: var(--red); font-size: 12px; }
 .editor-toolbar { display: flex; gap: var(--s-3); align-items: center; margin-bottom: var(--s-3); }
 .editor-toolbar .filter, .finput, .ta, input.f-in, .raw-inputs input, .srow select.exp, .srow input.contains, .dbg-landing input, .dbg-edit input, .ov-form select, .ov-form input {
   background: var(--bg-inset); border: 1px solid var(--border); color: var(--text-1);
@@ -1295,6 +1303,20 @@ input.derived { border-color: var(--green-border); color: var(--green); }
             </div>
             <p class="whatif-lead" style="margin-bottom:12px">Edit any field below, then <b>Stage</b> your changes and
                <b>Add as test scenario</b> to drop them into the suite above — or just <b>Simulate</b> once to preview.</p>
+            <div class="idl-bar">
+              <span id="idlState">Accounts showing raw offsets? Most programs never publish an IDL on chain — paste yours and every field decodes by name.</span>
+              <button class="btn ghost sm" id="idlToggle">Add an IDL</button>
+              <button class="btn ghost sm hidden" id="idlClear">Forget IDLs</button>
+            </div>
+            <div id="idlPanel" class="idl-panel hidden">
+              <input id="idlProgram" class="filter mono" placeholder="program id the IDL belongs to" spellcheck="false" />
+              <textarea id="idlJson" class="mono" rows="6" spellcheck="false"
+                placeholder="paste the IDL JSON — the contents of target/idl/&lt;program&gt;.json"></textarea>
+              <div class="idl-actions">
+                <button class="btn sm" id="idlSave">Save and re-analyze</button>
+                <span id="idlErr" class="idl-err"></span>
+              </div>
+            </div>
             <div class="editor-toolbar">
               <input id="acctFilter" class="filter" placeholder="filter accounts by name, address or type…" spellcheck="false" />
               <span id="acctSummary" class="summary"></span>
@@ -1471,7 +1493,28 @@ function windowNotice(slot) {
 const API = (new URLSearchParams(location.search).get('api')
              || window.SVMSCOPE_API
              || '').replace(/\/$/, '');
-const api = (path, init) => fetch(API + path, init);
+// IDLs the reader pasted for their own programs. Most Solana programs never
+// publish one on chain, and without it their accounts show as raw offsets.
+// Kept in this browser so it survives a reload, and sent with every analysis
+// and replay so instructions and account fields decode by name.
+let userIdls = {};
+try { userIdls = JSON.parse(localStorage.getItem('svmscope.idls') || '{}'); } catch (e) { userIdls = {}; }
+const saveIdls = () => { try { localStorage.setItem('svmscope.idls', JSON.stringify(userIdls)); } catch (e) {} };
+const idlCount = () => Object.keys(userIdls).length;
+
+// Routes that decode a transaction take the IDLs as a POST body; everything
+// else is a plain GET.
+const carriesIdls = (path) => /^\/(analyze|analyze_at|replay_at)\//.test(path);
+const api = (path, init) => {
+  if (!init && idlCount() && carriesIdls(path)) {
+    return fetch(API + path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ idls: userIdls }),
+    });
+  }
+  return fetch(API + path, init);
+};
 
 // Prewarm the engine on page load. The free host sleeps after ~15 min idle; kicking
 // off a cheap /api ping the instant someone lands means the container is already
@@ -5050,6 +5093,41 @@ $('cluster').addEventListener('change', () => {
 // Re-run the current view when the custom endpoint changes (Enter or blur).
 $('customRpc').addEventListener('keydown', e => { if (e.key === 'Enter' && currentSig) runInput(); });
 $('acctFilter').addEventListener('input', e => filterAccounts(e.target.value));
+
+// Paste-your-own-IDL: saved in this browser, sent with every analysis and
+// replay, so a program that never published an IDL still decodes by name.
+function renderIdlState() {
+  const n = idlCount();
+  const state = $('idlState'); const clear = $('idlClear');
+  if (!state) return;
+  state.textContent = n
+    ? `${n} IDL${n === 1 ? '' : 's'} saved in this browser and applied to every replay.`
+    : 'Accounts showing raw offsets? Most programs never publish an IDL on chain — paste yours and every field decodes by name.';
+  if (clear) clear.classList.toggle('hidden', n === 0);
+}
+renderIdlState();
+$('idlToggle')?.addEventListener('click', () => {
+  const panel = $('idlPanel');
+  if (panel) panel.classList.toggle('hidden');
+});
+$('idlClear')?.addEventListener('click', () => {
+  userIdls = {}; saveIdls(); renderIdlState();
+  if (currentSig) analyze();
+});
+$('idlSave')?.addEventListener('click', () => {
+  const err = $('idlErr'); if (err) err.textContent = '';
+  const program = ($('idlProgram')?.value || '').trim();
+  const raw = ($('idlJson')?.value || '').trim();
+  if (!program) { if (err) err.textContent = 'which program is this IDL for?'; return; }
+  if (!raw) { if (err) err.textContent = 'paste the IDL JSON first'; return; }
+  let parsed;
+  try { parsed = JSON.parse(raw); }
+  catch (e) { if (err) err.textContent = 'that is not valid JSON: ' + e.message; return; }
+  userIdls[program] = parsed;
+  saveIdls(); renderIdlState();
+  $('idlPanel')?.classList.add('hidden');
+  if (currentSig) analyze();
+});
 $('expandAll').addEventListener('click', toggleExpandAll);
 $('stageBtn').addEventListener('click', stageAll);
 $('simBtn').addEventListener('click', simulate);

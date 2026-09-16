@@ -497,9 +497,12 @@ pub(crate) fn infer_layout(data: &[u8]) -> Option<DecodedAccount> {
 pub(crate) fn describe_accounts_owned(
     client: &RpcClient,
     accounts: &[(String, solana_account::Account)],
+    user_idls: &std::collections::HashMap<String, Option<serde_json::Value>>,
 ) -> Vec<AccountInfo> {
+    // A caller-supplied IDL wins over anything published on chain: it is what
+    // the person reading the page actually has for their own program.
     let mut idl_cache: std::collections::HashMap<String, Option<serde_json::Value>> =
-        std::collections::HashMap::new();
+        user_idls.clone();
     let mut out = Vec::new();
     for (address, acc) in accounts {
         let owner = acc.owner.to_string();
@@ -531,6 +534,16 @@ pub(crate) fn describe_accounts_owned(
 }
 
 pub(crate) fn describe_accounts(client: &RpcClient, account_keys: &[String]) -> Vec<AccountInfo> {
+    describe_accounts_with(client, account_keys, &std::collections::HashMap::new())
+}
+
+/// [`describe_accounts`], consulting IDLs the caller already holds before
+/// asking the chain for one.
+pub(crate) fn describe_accounts_with(
+    client: &RpcClient,
+    account_keys: &[String],
+    user_idls: &std::collections::HashMap<String, Option<serde_json::Value>>,
+) -> Vec<AccountInfo> {
     let resp: serde_json::Value = match client.send(
         RpcRequest::GetMultipleAccounts,
         json!([account_keys, { "encoding": "base64" }]),
@@ -547,7 +560,7 @@ pub(crate) fn describe_accounts(client: &RpcClient, account_keys: &[String]) -> 
     // Cache each program's IDL so we fetch it at most once per analysis (an IDL
     // fetch is an RPC call). `None` = we already checked and it has no on-chain IDL.
     let mut idl_cache: std::collections::HashMap<String, Option<serde_json::Value>> =
-        std::collections::HashMap::new();
+        user_idls.clone();
 
     let mut out = Vec::new();
     for (i, acc) in values.iter().enumerate() {

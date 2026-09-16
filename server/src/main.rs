@@ -864,23 +864,83 @@ fn parse_time(text: &str) -> Option<i64> {
     Some(secs)
 }
 
+/// IDLs the caller supplies for their own programs, keyed by program id.
+/// Most Solana programs never publish an IDL on chain; without this a replay
+/// shows their accounts as raw bytes. Sent as a JSON body so a full
+/// `target/idl/<program>.json` does not have to fit in a query string.
+#[derive(Deserialize, Default)]
+struct IdlBody {
+    #[serde(default)]
+    idls: std::collections::HashMap<String, serde_json::Value>,
+}
+
+impl IdlBody {
+    /// A short, stable fingerprint of the supplied IDLs, so a cached answer
+    /// built without them is never served to a request that sent them.
+    fn fingerprint(&self) -> String {
+        if self.idls.is_empty() {
+            return String::new();
+        }
+        use std::hash::{Hash, Hasher};
+        let mut names: Vec<&String> = self.idls.keys().collect();
+        names.sort();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for n in names {
+            n.hash(&mut hasher);
+            if let Ok(v) = serde_json::to_vec(&self.idls[n]) {
+                v.hash(&mut hasher);
+            }
+        }
+        format!("{:016x}", hasher.finish())
+    }
+
+    /// Register every supplied IDL on a scope before it analyses anything.
+    fn apply(&self, scope: &Scope) {
+        for (program, idl) in &self.idls {
+            scope.add_idl(program.clone(), idl.clone());
+        }
+    }
+}
+
 /// GET /analyze/:signature — decode + replay a transaction, return JSON.
 async fn analyze_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Analysis>, (StatusCode, String)> {
+    analyze_inner(signature, q, IdlBody::default()).await
+}
+
+/// `POST /analyze/{signature}` — the same analysis, with IDLs for programs
+/// that never published one on chain.
+async fn analyze_post_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<ClusterQuery>,
+    Json(body): Json<IdlBody>,
+) -> Result<Json<Analysis>, (StatusCode, String)> {
+    analyze_inner(signature, q, body).await
+}
+
+async fn analyze_inner(
+    signature: String,
+    q: ClusterQuery,
+    body: IdlBody,
+) -> Result<Json<Analysis>, (StatusCode, String)> {
     let (url, archive) =
         endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
     // `analyze` does blocking I/O (RPC) and heavy CPU work (replay), so run it on
     // the blocking thread pool instead of stalling the async runtime.
-    let result = tokio::task::spawn_blocking(move || scope_for(url, archive).analyze(&signature))
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("task error: {e}"),
-            )
-        })?;
+    let result = tokio::task::spawn_blocking(move || {
+        let scope = scope_for(url, archive);
+        body.apply(&scope);
+        scope.analyze(&signature)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
 
     match result {
         Ok(analysis) => Ok(Json(analysis)),
@@ -1848,16 +1908,37 @@ async fn analyze_at_handler(
     Path(signature): Path<String>,
     Query(q): Query<AtSlotQuery>,
 ) -> Result<Json<std::sync::Arc<serde_json::Value>>, (StatusCode, String)> {
+    analyze_at_inner(signature, q, IdlBody::default()).await
+}
+
+/// `POST /analyze_at/{signature}` — the same page, with IDLs for programs
+/// that never published one on chain.
+async fn analyze_at_post_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<AtSlotQuery>,
+    Json(body): Json<IdlBody>,
+) -> Result<Json<std::sync::Arc<serde_json::Value>>, (StatusCode, String)> {
+    analyze_at_inner(signature, q, body).await
+}
+
+async fn analyze_at_inner(
+    signature: String,
+    q: AtSlotQuery,
+    body: IdlBody,
+) -> Result<Json<std::sync::Arc<serde_json::Value>>, (StatusCode, String)> {
     if q.slot == Some(0) {
         return Err((StatusCode::BAD_REQUEST, "slot must be positive".to_string()));
     }
     let (url, archive) =
         endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
     let slot = q.slot;
+    // The fingerprint keeps an answer built with caller IDLs apart from one
+    // built without them: same transaction, different decoding.
     let key = format!(
-        "analyze_at|{url}|{}|{signature}|{}",
+        "analyze_at|{url}|{}|{signature}|{}|{}",
         archive.as_deref().unwrap_or(""),
-        slot.map_or("own".to_string(), |s| s.to_string())
+        slot.map_or("own".to_string(), |s| s.to_string()),
+        body.fingerprint()
     );
     if let Some(hit) = at_cache_get(&key) {
         return Ok(Json(hit));
@@ -1874,6 +1955,7 @@ async fn analyze_at_handler(
     }
     let out = tokio::task::spawn_blocking(move || {
         let scope = scope_for(url, archive);
+        body.apply(&scope);
         if let (Some(slot), Ok(tip)) = (slot, scope.client().get_slot()) {
             if slot > tip {
                 return Err(svmscope::Error::Fixture(format!(
@@ -1915,6 +1997,23 @@ async fn replay_at_handler(
     Path(signature): Path<String>,
     Query(q): Query<AtSlotQuery>,
 ) -> Result<Json<std::sync::Arc<serde_json::Value>>, (StatusCode, String)> {
+    replay_at_inner(signature, q, IdlBody::default()).await
+}
+
+/// `POST /replay_at/{signature}` — the same replay, with caller IDLs.
+async fn replay_at_post_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<AtSlotQuery>,
+    Json(body): Json<IdlBody>,
+) -> Result<Json<std::sync::Arc<serde_json::Value>>, (StatusCode, String)> {
+    replay_at_inner(signature, q, body).await
+}
+
+async fn replay_at_inner(
+    signature: String,
+    q: AtSlotQuery,
+    body: IdlBody,
+) -> Result<Json<std::sync::Arc<serde_json::Value>>, (StatusCode, String)> {
     let Some(slot) = q.slot else {
         return Err((StatusCode::BAD_REQUEST, "slot is required".to_string()));
     };
@@ -1924,8 +2023,9 @@ async fn replay_at_handler(
     let (url, archive) =
         endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
     let key = format!(
-        "replay_at|{url}|{}|{signature}|{slot}",
-        archive.as_deref().unwrap_or("")
+        "replay_at|{url}|{}|{signature}|{slot}|{}",
+        archive.as_deref().unwrap_or(""),
+        body.fingerprint()
     );
     if let Some(hit) = at_cache_get(&key) {
         return Ok(Json(hit));
@@ -1941,6 +2041,7 @@ async fn replay_at_handler(
     }
     let out = tokio::task::spawn_blocking(move || {
         let scope = scope_for(url, archive);
+        body.apply(&scope);
         if let Ok(tip) = scope.client().get_slot() {
             if slot > tip {
                 return Err(svmscope::Error::Fixture(format!(
@@ -2449,7 +2550,10 @@ async fn main() {
     let app = Router::new()
         .route("/", get(index))
         .route("/api", get(api_index))
-        .route("/analyze/{signature}", get(analyze_handler))
+        .route(
+            "/analyze/{signature}",
+            get(analyze_handler).post(analyze_post_handler),
+        )
         .route("/simulate", post(simulate_handler))
         .route("/simulate_suite", post(suite_handler))
         .route("/preflight", post(preflight_handler))
@@ -2476,8 +2580,14 @@ async fn main() {
         .route("/replay/{signature}", get(replay_handler))
         .route("/slot_at", get(slot_at_handler))
         .route("/replay_at_slot/{signature}", get(replay_at_slot_handler))
-        .route("/replay_at/{signature}", get(replay_at_handler))
-        .route("/analyze_at/{signature}", get(analyze_at_handler))
+        .route(
+            "/replay_at/{signature}",
+            get(replay_at_handler).post(replay_at_post_handler),
+        )
+        .route(
+            "/analyze_at/{signature}",
+            get(analyze_at_handler).post(analyze_at_post_handler),
+        )
         .route("/counterfactual/{signature}", get(counterfactual_handler))
         .route("/scan/{signature}", get(scan_handler))
         .route("/diagnose/{signature}", get(diagnose_handler))

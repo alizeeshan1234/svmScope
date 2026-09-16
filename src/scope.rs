@@ -660,7 +660,9 @@ impl Scope {
         // the state the replay actually started from, not today's.
         let historical = replay.ctx.pre_state_accounts();
         if !historical.is_empty() {
-            let rebuilt = crate::decode::describe_accounts_owned(&self.client, &historical);
+            let user_idls = self.idl_cache.lock().map(|c| c.clone()).unwrap_or_default();
+            let rebuilt =
+                crate::decode::describe_accounts_owned(&self.client, &historical, &user_idls);
             let mut by_addr: std::collections::HashMap<String, _> = rebuilt
                 .into_iter()
                 .map(|a| (a.address.clone(), a))
@@ -766,7 +768,11 @@ impl Scope {
             compute: crate::compute::cu_per_program(tx),
             logs,
             replay: None,
-            accounts: decode::describe_accounts(&self.client, &account_keys),
+            accounts: decode::describe_accounts_with(
+                &self.client,
+                &account_keys,
+                &self.idl_cache.lock().map(|c| c.clone()).unwrap_or_default(),
+            ),
             signature,
         }
     }
