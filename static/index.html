@@ -599,13 +599,14 @@ input[type=datetime-local]::-webkit-calendar-picker-indicator:hover { opacity: 1
 
 /* ---------- what-if: account editor ---------- */
 .whatif-lead { color: var(--text-2); font-size: 13.5px; line-height: 1.55; margin: 0 0 var(--s-4); max-width: 680px; }
-.idl-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px;
-  padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-2); }
-#idlState { color: var(--text-2); font-size: 12.5px; flex: 1 1 320px; }
-.idl-panel { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
-.idl-panel textarea { width: 100%; background: var(--bg-2); color: var(--text-1); border: 1px solid var(--border);
-  border-radius: 8px; padding: 10px; font-size: 12px; resize: vertical; }
-.idl-actions { display: flex; align-items: center; gap: 10px; }
+.idl-box { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-2);
+  margin-bottom: var(--s-3); overflow: hidden; }
+.idl-bar { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; padding: var(--s-3) var(--s-4); }
+#idlState { color: var(--text-2); font-size: 12.5px; flex: 1 1 320px; line-height: 1.5; }
+.idl-panel { display: flex; flex-direction: column; gap: var(--s-2);
+  padding: 0 var(--s-4) var(--s-4); border-top: 1px solid var(--border); padding-top: var(--s-3); }
+.idl-panel .ta { min-height: 150px; }
+.idl-actions { display: flex; align-items: center; gap: var(--s-3); }
 .idl-err { color: var(--red); font-size: 12px; }
 .editor-toolbar { display: flex; gap: var(--s-3); align-items: center; margin-bottom: var(--s-3); }
 .editor-toolbar .filter, .finput, .ta, input.f-in, .raw-inputs input, .srow select.exp, .srow input.contains, .dbg-landing input, .dbg-edit input, .ov-form select, .ov-form input {
@@ -1303,18 +1304,20 @@ input.derived { border-color: var(--green-border); color: var(--green); }
             </div>
             <p class="whatif-lead" style="margin-bottom:12px">Edit any field below, then <b>Stage</b> your changes and
                <b>Add as test scenario</b> to drop them into the suite above — or just <b>Simulate</b> once to preview.</p>
-            <div class="idl-bar">
-              <span id="idlState">Accounts showing raw offsets? Most programs never publish an IDL on chain — paste yours and every field decodes by name.</span>
-              <button class="btn ghost sm" id="idlToggle">Add an IDL</button>
-              <button class="btn ghost sm hidden" id="idlClear">Forget IDLs</button>
-            </div>
-            <div id="idlPanel" class="idl-panel hidden">
-              <input id="idlProgram" class="filter mono" placeholder="program id the IDL belongs to" spellcheck="false" />
-              <textarea id="acctIdlJson" class="mono" rows="6" spellcheck="false"
-                placeholder="paste the IDL JSON — the contents of target/idl/&lt;program&gt;.json"></textarea>
-              <div class="idl-actions">
-                <button class="btn sm" id="idlSave">Save and re-analyze</button>
-                <span id="idlErr" class="idl-err"></span>
+            <div class="idl-box">
+              <div class="idl-bar">
+                <span id="idlState">Accounts showing raw offsets? Most programs never publish an IDL on chain — paste yours and every field decodes by name.</span>
+                <button class="btn ghost sm" id="idlToggle">Add an IDL</button>
+                <button class="btn ghost sm hidden" id="idlClear">Forget IDLs</button>
+              </div>
+              <div id="idlPanel" class="idl-panel hidden">
+                <input id="idlProgram" class="finput mono" placeholder="program id the IDL belongs to" spellcheck="false" />
+                <textarea id="acctIdlJson" class="ta" spellcheck="false"
+                  placeholder="paste the IDL JSON — the contents of target/idl/&lt;program&gt;.json"></textarea>
+                <div class="idl-actions">
+                  <button class="btn sm" id="idlSave">Save and re-analyze</button>
+                  <span id="idlErr" class="idl-err"></span>
+                </div>
               </div>
             </div>
             <div class="editor-toolbar">
