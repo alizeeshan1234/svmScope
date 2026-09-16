@@ -599,6 +599,11 @@ input[type=datetime-local]::-webkit-calendar-picker-indicator:hover { opacity: 1
 
 /* ---------- what-if: account editor ---------- */
 .whatif-lead { color: var(--text-2); font-size: 13.5px; line-height: 1.55; margin: 0 0 var(--s-4); max-width: 680px; }
+.idl-prompt { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap;
+  margin: 0 0 var(--s-4); padding: var(--s-3) var(--s-4); border: 1px solid var(--amber-border);
+  border-radius: var(--r-md); background: var(--bg-2); color: var(--text-2); font-size: 12.5px; }
+.idl-prompt b { color: var(--text-1); }
+.idl-prompt .grow { flex: 1 1 320px; line-height: 1.5; }
 .idl-box { border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-2);
   margin-bottom: var(--s-3); overflow: hidden; }
 .idl-bar { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; padding: var(--s-3) var(--s-4); }
@@ -1258,6 +1263,7 @@ input.derived { border-color: var(--green-border); color: var(--green); }
         <button class="btn" type="submit">Analyze</button>
       </form>
       <div id="diagnoseCard"></div>
+      <div id="idlPrompt" class="idl-prompt hidden"></div>
       <div id="overview"></div>
 
       <div class="grid">
@@ -2416,6 +2422,7 @@ async function reconstructAtSlot(slot) {
     analysis = data;
     mutations = [];
     renderAnalysis();
+    renderIdlPrompt();
     // Land on the certificate, not the top of the page: that is what changed.
     ($('certPanel') || $('out')).scrollIntoView({ behavior: 'instant', block: 'start' });
   } catch (e) {
@@ -2431,6 +2438,7 @@ function showOnchain() {
   if (!onchainAnalysis) { analyze(); return; }
   analysis = onchainAnalysis; onchainAnalysis = null; mutations = [];
   renderAnalysis();
+  renderIdlPrompt();
 }
 
 // A list of addresses folded past the first few: "…and N more" opens it.
@@ -3139,6 +3147,7 @@ async function analyze() {
       $('sig').value = analysis.signature;
     }
     renderAnalysis();
+    renderIdlPrompt();
     st.classList.add('hidden'); $('out').classList.remove('hidden');
     pushTxUrl(currentSig);
   } catch (e) { st.className = 'status err'; st.textContent = 'error: ' + errText(e); }
@@ -5099,6 +5108,42 @@ $('acctFilter').addEventListener('input', e => filterAccounts(e.target.value));
 
 // Paste-your-own-IDL: saved in this browser, sent with every analysis and
 // replay, so a program that never published an IDL still decodes by name.
+// A field name the decoder inferred rather than read from an IDL: it carries
+// the type and the offset because nothing told it what the field is called.
+const inferredName = (n) => /^(discriminator\?|u\d+@|i\d+@|bool@|pubkey@|bytes@|f\d+@)/.test(n || '');
+
+// Programs on this page whose accounts decoded without real names. These are
+// exactly the programs a pasted IDL would fix, so say so where it shows.
+function programsMissingIdl() {
+  const native = /^(1111|Toke|ATok|Comp|Sysvar|So1111|BPFLoader|NativeLoader|Vote|Stake|Config|AddressLookupTab1e|Ed25519|KeccakSecp)/;
+  const out = new Set();
+  for (const a of (analysis?.accounts || [])) {
+    if (a.executable || !a.owner || native.test(a.owner) || userIdls[a.owner]) continue;
+    const fields = (a.decoded && a.decoded.fields) || [];
+    if (!fields.length || fields.some(f => inferredName(f.name))) out.add(a.owner);
+  }
+  return [...out];
+}
+
+function renderIdlPrompt() {
+  const el = $('idlPrompt');
+  if (!el) return;
+  const missing = programsMissingIdl();
+  if (!missing.length) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  const one = missing.length === 1;
+  el.innerHTML = `<span class="grow"><b>${missing.length} program${one ? '' : 's'} here ${one ? 'has' : 'have'} no IDL on chain</b>,
+      so ${one ? 'its' : 'their'} accounts show offsets instead of field names. Paste the IDL and everything decodes.</span>
+    <button class="btn ghost sm" id="idlPromptOpen">Add an IDL</button>`;
+  el.classList.remove('hidden');
+  $('idlPromptOpen')?.addEventListener('click', () => {
+    document.querySelectorAll('details').forEach(d => { if (d.querySelector('#idlPanel')) d.open = true; });
+    $('idlPanel')?.classList.remove('hidden');
+    if (missing.length === 1 && $('idlProgram')) $('idlProgram').value = missing[0];
+    $('idlPanel')?.scrollIntoView({ block: 'center' });
+    $('idlProgram')?.focus();
+  });
+}
+
 function renderIdlState() {
   const n = idlCount();
   const state = $('idlState'); const clear = $('idlClear');
