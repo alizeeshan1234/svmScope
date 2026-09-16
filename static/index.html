@@ -1310,7 +1310,7 @@ input.derived { border-color: var(--green-border); color: var(--green); }
             </div>
             <div id="idlPanel" class="idl-panel hidden">
               <input id="idlProgram" class="filter mono" placeholder="program id the IDL belongs to" spellcheck="false" />
-              <textarea id="idlJson" class="mono" rows="6" spellcheck="false"
+              <textarea id="acctIdlJson" class="mono" rows="6" spellcheck="false"
                 placeholder="paste the IDL JSON — the contents of target/idl/&lt;program&gt;.json"></textarea>
               <div class="idl-actions">
                 <button class="btn sm" id="idlSave">Save and re-analyze</button>
@@ -5117,7 +5117,7 @@ $('idlClear')?.addEventListener('click', () => {
 $('idlSave')?.addEventListener('click', () => {
   const err = $('idlErr'); if (err) err.textContent = '';
   const program = ($('idlProgram')?.value || '').trim();
-  const raw = ($('idlJson')?.value || '').trim();
+  const raw = ($('acctIdlJson')?.value || '').trim();
   if (!program) { if (err) err.textContent = 'which program is this IDL for?'; return; }
   if (!raw) { if (err) err.textContent = 'paste the IDL JSON first'; return; }
   let parsed;
