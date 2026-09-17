@@ -807,12 +807,114 @@ pub(crate) fn encode_fixed(label: &str, size: usize, value: &Value) -> Option<Ve
     })
 }
 
-/// Decode an account's raw bytes using its program's Anchor IDL.
+/// A layout the caller wrote by hand, for a program that is not Anchor.
 ///
-/// Returns `None` if the leading 8-byte discriminator doesn't match any account
-/// type in the IDL. Fields are walked from offset 8 (Anchor prepends the
+/// Anchor's conventions answer two questions for free: which account type
+/// these bytes are (an eight-byte discriminator at offset 0) and where its
+/// fields begin (offset 8). A program built on anything else — Shank, Codama,
+/// a bespoke framework, or no framework — answers them differently, so this
+/// format lets the caller state both outright:
+///
+/// ```json
+/// { "accounts": [{
+///     "name": "GameState",
+///     "match": { "offset": 0, "bytes": [13, 135, 148, 163, 14, 180, 2, 53] },
+///     "fieldsStart": 8,
+///     "fields": [{ "name": "authority", "type": "pubkey" }]
+/// }]}
+/// ```
+///
+/// `match` may instead be `{ "len": 165 }` to select on the account's size, or
+/// be omitted entirely when the program has a single account type. Everything
+/// after the match is the same Borsh walk every other path uses, so the field
+/// types are the ones an Anchor IDL writes.
+///
+/// Returns `None` when the value is not this shape, which is how the caller
+/// falls through to the Anchor reading.
+fn decode_with_layout(idl: &Value, data: &[u8]) -> Option<DecodedAccount> {
+    let accounts = idl.get("accounts")?.as_array()?;
+    // Every entry must carry inline `fields`, which is what distinguishes this
+    // from an Anchor IDL (whose accounts name a type defined elsewhere).
+    if accounts.is_empty() || !accounts.iter().all(|a| a.get("fields").is_some()) {
+        return None;
+    }
+
+    let matches = |a: &Value| -> bool {
+        let Some(m) = a.get("match") else {
+            // No rule: a single-account program, or a catch-all.
+            return true;
+        };
+        if let Some(len) = m.get("len").and_then(|v| v.as_u64()) {
+            return data.len() as u64 == len;
+        }
+        let Some(bytes) = m.get("bytes").and_then(|v| v.as_array()) else {
+            return true;
+        };
+        let at = m.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let want: Vec<u8> = bytes
+            .iter()
+            .filter_map(|b| b.as_u64().map(|n| n as u8))
+            .collect();
+        data.get(at..at + want.len()) == Some(want.as_slice())
+    };
+
+    let account = accounts.iter().find(|a| matches(a))?;
+    let fields_def: Vec<FieldDef> = account
+        .get("fields")?
+        .as_array()?
+        .iter()
+        .map(|f| FieldDef {
+            name: f
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            ty: f.get("type").map(IdlType::parse),
+        })
+        .collect();
+    if fields_def.is_empty() {
+        return None;
+    }
+
+    // Where the fields start. Stated outright, defaulting to the beginning:
+    // a program with no discriminator has nothing to skip.
+    let mut offset = account
+        .get("fieldsStart")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+    if offset >= data.len() {
+        return None;
+    }
+
+    let model = IdlModel::parse(idl);
+    let mut fields: Vec<Field> = Vec::new();
+    walk_fields(&fields_def, &model, data, &mut offset, "", &mut fields, 0);
+    if fields.is_empty() {
+        return None;
+    }
+    Some(DecodedAccount {
+        type_name: account
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("account")
+            .to_string(),
+        fields,
+    })
+}
+
 /// discriminator) and stop at the first variable-length field.
+/// Decode an account's raw bytes using its program's IDL.
+///
+/// A hand-written layout is tried first (see [`decode_with_layout`]); failing
+/// that, the value is read as an Anchor IDL, where the leading 8-byte
+/// discriminator selects the account type and fields are walked from offset 8.
+/// Returns `None` when neither reading matches.
 pub(crate) fn decode_with_idl(idl: &Value, data: &[u8]) -> Option<DecodedAccount> {
+    // A layout the caller described themselves takes precedence: they only
+    // write one when the framework conventions below do not apply to their
+    // program.
+    if let Some(decoded) = decode_with_layout(idl, data) {
+        return Some(decoded);
+    }
     if data.len() < 8 {
         return None;
     }
@@ -846,6 +948,73 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    // A program that is not Anchor: no eight-byte discriminator, a one-byte
+    // tag at offset 0, fields starting at 1. Nothing about this can be read
+    // by the Anchor path, which is the point.
+    #[test]
+    fn a_hand_written_layout_decodes_a_non_anchor_account() {
+        let idl = json!({
+            "accounts": [{
+                "name": "Ledger",
+                "match": { "offset": 0, "bytes": [7] },
+                "fieldsStart": 1,
+                "fields": [
+                    { "name": "owner", "type": "pubkey" },
+                    { "name": "total", "type": "u64" }
+                ]
+            }]
+        });
+        let mut data = vec![7u8];
+        data.extend_from_slice(&[9u8; 32]);
+        data.extend_from_slice(&1234u64.to_le_bytes());
+
+        let decoded = decode_with_idl(&idl, &data).expect("layout should decode");
+        assert_eq!(decoded.type_name, "Ledger");
+        let names: Vec<_> = decoded.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["owner", "total"]);
+        assert_eq!(
+            decoded
+                .fields
+                .iter()
+                .find(|f| f.name == "total")
+                .unwrap()
+                .value,
+            "1234"
+        );
+    }
+
+    // The tag has to actually match, or the account is not that type.
+    #[test]
+    fn a_layout_whose_match_fails_decodes_nothing() {
+        let idl = json!({
+            "accounts": [{
+                "name": "Ledger",
+                "match": { "offset": 0, "bytes": [7] },
+                "fieldsStart": 1,
+                "fields": [{ "name": "total", "type": "u64" }]
+            }]
+        });
+        let mut data = vec![8u8];
+        data.extend_from_slice(&1234u64.to_le_bytes());
+        assert!(decode_with_idl(&idl, &data).is_none());
+    }
+
+    // Selecting on size, for a program that writes no tag at all.
+    #[test]
+    fn a_layout_can_match_on_account_size() {
+        let idl = json!({
+            "accounts": [{
+                "name": "Counter",
+                "match": { "len": 8 },
+                "fields": [{ "name": "count", "type": "u64" }]
+            }]
+        });
+        let data = 42u64.to_le_bytes().to_vec();
+        let decoded = decode_with_idl(&idl, &data).expect("size match should decode");
+        assert_eq!(decoded.fields[0].name, "count");
+        assert_eq!(decoded.fields[0].value, "42");
+    }
 
     // Builds an account IDL whose sole account type is `Node`, matched by the
     // discriminator 1..=8, with the given field/type shape.

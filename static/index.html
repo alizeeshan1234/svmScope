@@ -1319,7 +1319,7 @@ input.derived { border-color: var(--green-border); color: var(--green); }
               <div id="idlPanel" class="idl-panel hidden">
                 <input id="idlProgram" class="finput mono" placeholder="program id the IDL belongs to" spellcheck="false" />
                 <textarea id="acctIdlJson" class="ta" spellcheck="false"
-                  placeholder="paste the IDL JSON — the contents of target/idl/&lt;program&gt;.json"></textarea>
+                  placeholder="paste the IDL JSON — target/idl/&lt;program&gt;.json for Anchor, or your own layout: {&quot;accounts&quot;:[{&quot;name&quot;:&quot;Ledger&quot;,&quot;match&quot;:{&quot;offset&quot;:0,&quot;bytes&quot;:[7]},&quot;fieldsStart&quot;:1,&quot;fields&quot;:[{&quot;name&quot;:&quot;owner&quot;,&quot;type&quot;:&quot;pubkey&quot;}]}]}"></textarea>
                 <div class="idl-actions">
                   <button class="btn sm" id="idlSave">Save and re-analyze</button>
                   <span id="idlErr" class="idl-err"></span>
@@ -5150,7 +5150,7 @@ function renderIdlState() {
   if (!state) return;
   state.textContent = n
     ? `${n} IDL${n === 1 ? '' : 's'} saved in this browser and applied to every replay.`
-    : 'Accounts showing raw offsets? Most programs never publish an IDL on chain — paste yours and every field decodes by name.';
+    : 'Accounts showing raw offsets? Most programs never publish an IDL on chain — paste an Anchor IDL, or describe the layout yourself if the program is not Anchor.';
   if (clear) clear.classList.toggle('hidden', n === 0);
 }
 renderIdlState();
