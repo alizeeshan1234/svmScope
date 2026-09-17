@@ -61,6 +61,26 @@ pub struct Version {
 pub trait StateStore: Send + Sync {
     /// The newest recorded version of `address` at or before `slot`.
     fn latest_at_or_before(&self, address: &str, slot: u64) -> Result<Option<Version>>;
+    /// The slot of the next recorded version of `address` strictly after
+    /// `slot`, if any.
+    ///
+    /// A version is stamped with the round that *observed* it, not the slot
+    /// the account changed at, so the change that produced the next version
+    /// happened somewhere between the two. Knowing where that next version
+    /// sits is half of deciding whether the earlier one still held at a
+    /// target in between.
+    fn next_version_slot_after(&self, address: &str, slot: u64) -> Result<Option<u64>> {
+        let _ = (address, slot);
+        Ok(None)
+    }
+    /// Whether a polling round happened at a slot in `[from, to]`.
+    ///
+    /// The other half: a round in that window which recorded no new version
+    /// for an account saw the account still holding its last one.
+    fn round_in(&self, from: u64, to: u64) -> Result<bool> {
+        let _ = (from, to);
+        Ok(false)
+    }
     /// Record `state` as the version of `address` at `slot`.
     fn record(&self, address: &str, slot: u64, state: Option<&AccountState>) -> Result<()>;
     /// [`record`](Self::record), saying whether the balance was observed. A
@@ -581,6 +601,15 @@ pub struct LogStore {
     watched: Mutex<BTreeSet<String>>,
     /// Contiguous polled ranges `(first, last)`, ascending.
     coverage: Mutex<Vec<(u64, u64)>>,
+    /// The slot of every polling round inside the dense window, ascending.
+    ///
+    /// `coverage` merges rounds into spans, which answers "were we running
+    /// across this slot" but not "did a round actually happen at it". Only
+    /// the second question can prove a recorded version still held at a
+    /// target, so the rounds themselves are kept. One `u64` per round, and
+    /// only for the dense window, which is the only tier that claims
+    /// exactness: about 43,000 entries a day.
+    rounds: Mutex<Vec<u64>>,
 }
 
 fn lock_err<T>(_: T) -> Error {
@@ -625,12 +654,21 @@ impl LogStore {
                 index.insert(address.to_string(), index_of(&bytes));
             }
         }
+        let rounds: Vec<u64> = match std::fs::read_to_string(root.join("rounds.txt")) {
+            Ok(text) => {
+                let mut v: Vec<u64> = text.lines().filter_map(|l| l.trim().parse().ok()).collect();
+                v.sort_unstable();
+                v
+            }
+            Err(_) => Vec::new(),
+        };
         Ok(LogStore {
             root,
             index: Mutex::new(index),
             latest: Mutex::new(HashMap::new()),
             watched: Mutex::new(watched),
             coverage: Mutex::new(coverage),
+            rounds: Mutex::new(rounds),
         })
     }
 
@@ -967,6 +1005,25 @@ impl LogStore {
 }
 
 impl StateStore for LogStore {
+    fn next_version_slot_after(&self, address: &str, slot: u64) -> Result<Option<u64>> {
+        Ok(self
+            .entries(address)?
+            .iter()
+            .find(|e| e.slot > slot)
+            .map(|e| e.slot))
+    }
+
+    fn round_in(&self, from: u64, to: u64) -> Result<bool> {
+        if to < from {
+            return Ok(false);
+        }
+        let rounds = self.rounds.lock().map_err(lock_err)?;
+        Ok(match rounds.binary_search(&from) {
+            Ok(_) => true,
+            Err(i) => rounds.get(i).is_some_and(|&r| r <= to),
+        })
+    }
+
     fn latest_at_or_before(&self, address: &str, slot: u64) -> Result<Option<Version>> {
         self.version_at(address, slot)
     }
@@ -1094,6 +1151,22 @@ impl StateStore for LogStore {
     }
 
     fn note_round(&self, slot: u64) -> Result<()> {
+        {
+            // The round itself, so a later read can ask whether one happened
+            // at a given slot rather than only whether we were running near
+            // it. Trimmed to the dense window, which is the only tier that
+            // claims exactness.
+            let mut rounds = self.rounds.lock().map_err(lock_err)?;
+            if rounds.last().is_none_or(|&last| slot > last) {
+                rounds.push(slot);
+                let floor = slot.saturating_sub(DENSE_SLOTS);
+                if rounds.first().is_some_and(|&first| first < floor) {
+                    rounds.retain(|&r| r >= floor);
+                }
+                let text: String = rounds.iter().map(|r| format!("{r}\n")).collect();
+                std::fs::write(self.root.join("rounds.txt"), text).map_err(io_err)?;
+            }
+        }
         let mut cov = self.coverage.lock().map_err(lock_err)?;
         match cov.last_mut() {
             Some((_, last)) if *last >= slot => return Ok(()),
@@ -1178,6 +1251,61 @@ pub fn poll_once(
 
 #[cfg(test)]
 mod tests {
+
+    // A version is stamped with the round that saw it, not the slot the
+    // account changed at. Rounds at 100 and 105 with a change recorded at 105
+    // mean the change fell somewhere in 101..=105: a replay at 104 cannot use
+    // the version from 100 and call it exact.
+    #[test]
+    fn a_change_between_rounds_is_not_covered_by_the_earlier_version() {
+        let store = LogStore::open(temp_root("proof-gap")).unwrap();
+        let addr = "Acc";
+        store.note_round(100).unwrap();
+        store.record(addr, 100, Some(&state(1))).unwrap();
+        store.note_round(105).unwrap();
+        store.record(addr, 105, Some(&state(2))).unwrap();
+
+        // The lookup still returns the older version ...
+        assert_eq!(
+            store.latest_at_or_before(addr, 104).unwrap().unwrap().slot,
+            100
+        );
+        // ... and coverage still spans the target, which is exactly why
+        // coverage alone was not enough.
+        assert!(store.covers(104).unwrap());
+        // No round happened at 104, so nothing confirms the account still
+        // held the version from 100 there.
+        assert_eq!(store.next_version_slot_after(addr, 100).unwrap(), Some(105));
+        assert!(!store.round_in(104, 104).unwrap());
+    }
+
+    // The same shape, with a round in the window: now it is proven.
+    #[test]
+    fn a_round_between_the_version_and_the_change_proves_it_held() {
+        let store = LogStore::open(temp_root("proof-round")).unwrap();
+        let addr = "Acc";
+        store.note_round(100).unwrap();
+        store.record(addr, 100, Some(&state(1))).unwrap();
+        store.note_round(104).unwrap(); // saw it unchanged
+        store.note_round(108).unwrap();
+        store.record(addr, 108, Some(&state(2))).unwrap();
+
+        assert_eq!(store.next_version_slot_after(addr, 100).unwrap(), Some(108));
+        // A round at 104 sits at the target and before the change was seen.
+        assert!(store.round_in(104, 107).unwrap());
+    }
+
+    // Nothing newer recorded: the version holds for as long as coverage runs.
+    #[test]
+    fn a_version_with_nothing_newer_needs_no_confirming_round() {
+        let store = LogStore::open(temp_root("proof-quiet")).unwrap();
+        let addr = "Quiet";
+        store.note_round(100).unwrap();
+        store.record(addr, 100, Some(&state(7))).unwrap();
+        store.note_round(140).unwrap();
+        assert_eq!(store.next_version_slot_after(addr, 100).unwrap(), None);
+        assert!(store.covers(120).unwrap());
+    }
 
     #[test]
     fn retention_keeps_the_newest_version_before_the_window() {

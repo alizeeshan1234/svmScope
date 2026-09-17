@@ -1547,7 +1547,27 @@ impl Scope {
             // before it is exact, no history walk needed. This is what makes
             // hot accounts exact for free once they are being recorded.
             if let (Some(s), Some(v)) = (store, start.as_ref()) {
-                if s.covers(floor_slot).unwrap_or(false) {
+                // Coverage says the recorder was running across the target.
+                // It does not say the account still held this version there:
+                // a version is stamped with the round that observed it, so a
+                // change landing between two rounds is invisible until the
+                // later one, and a target in that gap would read the older
+                // bytes. The version is only proven at the target when a
+                // round at or after it saw the account unchanged — that is,
+                // when the next recorded version comes after such a round.
+                let next = s.next_version_slot_after(key, v.slot).ok().flatten();
+                let still_held = match next {
+                    // Nothing newer was ever recorded: it held from its own
+                    // slot onward, and coverage across the target is enough.
+                    None => true,
+                    // Something newer exists: a round must sit at or after
+                    // the target and before that change was seen.
+                    Some(u) => {
+                        u > floor_slot
+                            && s.round_in(floor_slot, u.saturating_sub(1)).unwrap_or(false)
+                    }
+                };
+                if still_held && s.covers(floor_slot).unwrap_or(false) {
                     // The record's own balance unless it was only inferred
                     // when written, in which case the transaction's record is
                     // the better source and, failing that, it is not proven.
