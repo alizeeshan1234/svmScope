@@ -28,6 +28,92 @@ const PROGRAM_METADATA_PROGRAM: &str = "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7n
 
 /// Fetch a program's on-chain IDL. There are two publishing mechanisms and
 /// Explorer reads both, so we do too: the legacy Anchor IDL account
+/// Where historical IDL versions are looked up. The Solana Foundation's
+/// service indexes every on-chain IDL write, Anchor and Program Metadata
+/// both, and reports the slot range each version was live for.
+/// `SVMSCOPE_IDL_HISTORY_URL` points it elsewhere; empty disables the lookup.
+const IDL_HISTORY_URL: &str = "https://idl.solana.com/api/history";
+
+/// The IDL a program had **at `slot`**, rather than the one it has now.
+///
+/// A replay at a past slot decodes bytes written back then, so decoding them
+/// with today's IDL is the same category of mistake as loading today's
+/// accounts: a program that has been upgraded since may have renamed a field,
+/// reordered a struct or added an instruction. Each version the service
+/// returns carries the slot range it was live for, so the right one is the
+/// one whose range covers the replay.
+///
+/// Best effort: any failure returns `None` and the caller falls back to the
+/// current IDL, which is what it used before this existed.
+pub(crate) fn fetch_idl_at_slot(program_id: &str, slot: u64) -> Option<Value> {
+    let base =
+        std::env::var("SVMSCOPE_IDL_HISTORY_URL").unwrap_or_else(|_| IDL_HISTORY_URL.to_string());
+    if base.trim().is_empty() {
+        return None;
+    }
+    let body: Value = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .ok()?
+        .get(format!("{base}?programId={program_id}"))
+        .send()
+        .ok()?
+        .json()
+        .ok()?;
+
+    pick_idl_for_slot(&body, slot)
+}
+
+/// The version in a history response whose live range covers `slot`.
+///
+/// Each entry carries the slot it became active at and the slot it stopped,
+/// with `activeTo` the string `"current"` for the one still live. The latest
+/// version that began at or before the target and had not yet been replaced
+/// is the one the program was running then.
+fn pick_idl_for_slot(body: &Value, slot: u64) -> Option<Value> {
+    let mut best: Option<(u64, &Value)> = None;
+    for kind in ["anchor", "pmp"] {
+        let Some(entries) = body.get(kind).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for entry in entries {
+            let Some(from) = entry
+                .get("activeFrom")
+                .and_then(|v| v.get("slot"))
+                .and_then(read_slot)
+            else {
+                continue;
+            };
+            if from > slot {
+                continue;
+            }
+            let covers = match entry.get("activeTo") {
+                Some(v) if v.as_str() == Some("current") => true,
+                Some(v) => v
+                    .get("slot")
+                    .and_then(read_slot)
+                    .is_some_and(|to| to > slot),
+                None => true,
+            };
+            if covers && best.is_none_or(|(f, _)| from >= f) {
+                best = Some((from, entry));
+            }
+        }
+    }
+    let content = best?.1.get("content")?;
+    // `content` is the IDL as a JSON string, not as an object.
+    match content.as_str() {
+        Some(text) => serde_json::from_str(text).ok(),
+        None => Some(content.clone()),
+    }
+}
+
+/// Slots come back as strings in this API; accept either.
+fn read_slot(v: &Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
 /// (`anchor:idl` seed), then the newer Program Metadata program.
 pub(crate) fn fetch_idl_json(client: &RpcClient, program_id: Address) -> Option<Value> {
     let id = program_id.to_string();
@@ -948,6 +1034,48 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn history() -> Value {
+        json!({
+            "anchor": [
+                { "activeFrom": { "slot": "100" }, "activeTo": { "slot": "200" },
+                  "content": "{\"instructions\":[{\"name\":\"old_buy\"}]}" },
+                { "activeFrom": { "slot": "200" }, "activeTo": "current",
+                  "content": "{\"instructions\":[{\"name\":\"buy\"},{\"name\":\"buy_exact_quote_in\"}]}" }
+            ],
+            "pmp": []
+        })
+    }
+
+    fn first_ix(v: &Value) -> String {
+        v["instructions"][0]["name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    // A replay inside the first version's range gets that version, not today's.
+    #[test]
+    fn the_idl_live_at_the_slot_wins_over_the_current_one() {
+        let at_old = pick_idl_for_slot(&history(), 150).expect("a version covers 150");
+        assert_eq!(first_ix(&at_old), "old_buy");
+
+        let at_now = pick_idl_for_slot(&history(), 999).expect("the current version covers 999");
+        assert_eq!(first_ix(&at_now), "buy");
+    }
+
+    // The boundary belongs to the version that starts there.
+    #[test]
+    fn the_replacement_owns_the_slot_it_starts_at() {
+        let at_edge = pick_idl_for_slot(&history(), 200).expect("200 is covered");
+        assert_eq!(first_ix(&at_edge), "buy");
+    }
+
+    // Before the program ever published one, there is nothing to return.
+    #[test]
+    fn a_slot_before_the_first_version_has_no_idl() {
+        assert!(pick_idl_for_slot(&history(), 50).is_none());
+    }
 
     // A program that is not Anchor: no eight-byte discriminator, a one-byte
     // tag at offset 0, fields starting at 1. Nothing about this can be read

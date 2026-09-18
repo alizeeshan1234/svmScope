@@ -69,6 +69,10 @@ pub struct Scope {
 
     /// getTransaction (json encoding) responses by signature.
     tx_cache: Mutex<HashMap<String, serde_json::Value>>,
+    /// The slot whose IDLs a replay should decode with. A program upgraded
+    /// since the target may have changed its IDL, so decoding old bytes with
+    /// today's names is the same mistake as loading today's accounts.
+    idl_slot: Mutex<Option<u64>>,
     /// On-chain IDL by program id; `None` = checked, program publishes none.
     idl_cache: Mutex<HashMap<String, Option<serde_json::Value>>>,
 }
@@ -105,7 +109,16 @@ impl Scope {
             records: None,
             history: None,
             tx_cache: Mutex::new(HashMap::new()),
+            idl_slot: Mutex::new(None),
             idl_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Decode with the IDLs published as of `slot` rather than today's. Set by
+    /// the replay-at-slot paths; `None` restores current-IDL decoding.
+    pub(crate) fn set_idl_slot(&self, slot: Option<u64>) {
+        if let Ok(mut s) = self.idl_slot.lock() {
+            *s = slot;
         }
     }
 
@@ -590,6 +603,16 @@ impl Scope {
         if let Some(v) = cache.get(program) {
             return v.clone();
         }
+        // Decoding as of a past slot: ask for the IDL that was live then, and
+        // keep the answer out of the process-wide cache, which is keyed by
+        // program alone and shared across replays at other slots.
+        let at_slot = self.idl_slot.lock().ok().and_then(|s| *s);
+        if let Some(slot) = at_slot {
+            if let Some(v) = idl::fetch_idl_at_slot(program, slot) {
+                cache.insert(program.to_string(), Some(v.clone()));
+                return Some(v);
+            }
+        }
         if let Ok(g) = GLOBAL.lock() {
             if let Some((at, v)) = g.get(program) {
                 if at.elapsed() < TTL {
@@ -602,6 +625,9 @@ impl Scope {
             .ok()
             .and_then(|a| idl::fetch_idl_json(&self.client, a));
         cache.insert(program.to_string(), fetched.clone());
+        if at_slot.is_some() {
+            return fetched;
+        }
         if let Ok(mut g) = GLOBAL.lock() {
             if g.len() >= 512 {
                 g.clear();
@@ -633,6 +659,9 @@ impl Scope {
             .as_u64()
             .ok_or_else(|| Error::TransactionNotFound(signature.clone()))?;
         let slot = slot.unwrap_or(landed_slot);
+        // Everything from here decodes bytes as they were at `slot`, so the
+        // IDLs should be the ones that were published then.
+        self.set_idl_slot(Some(slot));
         let replay = if slot == landed_slot {
             self.replay_at_slot(&signature)?
         } else {
@@ -868,6 +897,7 @@ impl Scope {
     /// Alchemy's Account Archive). A non-archival endpoint is detected and
     /// refused rather than silently returning current state.
     pub fn replay_at(&self, input: &str, slot: u64) -> Result<Replay> {
+        self.set_idl_slot(Some(slot));
         let signature = self.resolve_signature(input)?;
         let tx = self.transaction_json(&signature)?;
         let account_keys = utils::resolve_account_keys(&tx);

@@ -483,6 +483,11 @@ only read `SVMSCOPE_PREFIX_READ_LOOKBACK` (256), with today's bytes beyond
 that),
 `Absent` (the transaction names it but it held nothing at the slot, with
 `proven` false, counted as drift, when that rests on it being empty today),
+Instruction and account names come from the IDL the program had **at that
+slot**, not the one it has today: a replay reaches for the version whose live
+range covers the target (the Solana Foundation's IDL history service, overridable
+with `SVMSCOPE_IDL_HISTORY_URL`, empty to disable), falling back to the current
+IDL when there is no history. Provenance labels are
 `Program` (the current ELF, with whether it was upgraded after the slot; a
 program upgraded since runs the bytecode deployed before the slot when the
 stream has it, and is then labelled `Recorded` at its deploy slot),
