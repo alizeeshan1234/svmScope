@@ -770,6 +770,17 @@ impl Scope {
             })
             .unwrap_or_default();
         cpi_tree::attach_compute(&mut cpi_tree, &logs);
+        // Resolve every program's IDL through `idl_for` first, which knows
+        // whether this analysis is as of a past slot and asks for the version
+        // that was live then. The decoders below fall back to fetching the
+        // current IDL themselves for anything still missing, so without this
+        // a replay at a slot would be named with today's IDL.
+        {
+            let programs: Vec<String> = cpi_tree.iter().map(|e| e.program.clone()).collect();
+            for program in programs {
+                let _ = self.idl_for(&program);
+            }
+        }
         // Decode each instruction — name, arguments, and named accounts — from
         // native layouts (always) or the program's on-chain Anchor IDL (cached).
         {
