@@ -1295,9 +1295,10 @@ mod tests {
         assert!(store.round_in(104, 107).unwrap());
     }
 
-    // Nothing newer recorded: the version holds for as long as coverage runs.
+    // Nothing newer recorded, and a round after the target that wrote no new
+    // version: that round is what proves the account still held it there.
     #[test]
-    fn a_version_with_nothing_newer_needs_no_confirming_round() {
+    fn a_quiet_version_is_proven_by_a_later_round() {
         let store = LogStore::open(temp_root("proof-quiet")).unwrap();
         let addr = "Quiet";
         store.note_round(100).unwrap();
@@ -1305,6 +1306,20 @@ mod tests {
         store.note_round(140).unwrap();
         assert_eq!(store.next_version_slot_after(addr, 100).unwrap(), None);
         assert!(store.covers(120).unwrap());
+        assert!(store.round_in(120, u64::MAX).unwrap());
+    }
+
+    // The same account with no round after the target. Nothing newer was
+    // recorded because the recorder stopped, not because the account stayed
+    // still, so there is nothing here that proves the old bytes.
+    #[test]
+    fn a_quiet_version_with_no_later_round_proves_nothing() {
+        let store = LogStore::open(temp_root("proof-quiet-gap")).unwrap();
+        let addr = "Quiet";
+        store.note_round(100).unwrap();
+        store.record(addr, 100, Some(&state(7))).unwrap();
+        assert_eq!(store.next_version_slot_after(addr, 100).unwrap(), None);
+        assert!(!store.round_in(120, u64::MAX).unwrap());
     }
 
     #[test]

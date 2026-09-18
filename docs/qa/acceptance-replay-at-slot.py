@@ -5,9 +5,17 @@ Closed accounts, program upgrades, same-slot writes, and targets away from
 the slot the transaction landed at. Each case states what must be true, and
 the run reports what actually happened. Nothing here is a latency check.
 """
-import json, sys, time, urllib.request
+import json, os, sys, time, urllib.request
 
+# Which engine to run against. `--base URL` (or SVMSCOPE_BASE) points the run
+# at a local build; without one it checks the deployed engine.
 E = "https://svmscope-engine.onrender.com"
+if "--base" in sys.argv:
+    E = sys.argv[sys.argv.index("--base") + 1]
+elif os.environ.get("SVMSCOPE_BASE"):
+    E = os.environ["SVMSCOPE_BASE"]
+E = E.rstrip("/")
+print(f"engine: {E}")
 
 def get(path, timeout=900):
     t0 = time.time()

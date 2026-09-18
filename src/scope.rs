@@ -1598,9 +1598,13 @@ impl Scope {
                 // when the next recorded version comes after such a round.
                 let next = s.next_version_slot_after(key, v.slot).ok().flatten();
                 let still_held = match next {
-                    // Nothing newer was ever recorded: it held from its own
-                    // slot onward, and coverage across the target is enough.
-                    None => true,
+                    // Nothing newer was ever recorded. That is not on its own
+                    // proof the version still held: with no round at or after
+                    // the target, nothing newer exists because nobody was
+                    // looking. The recorder stops whenever the process does,
+                    // and a free instance stops often. A round after the
+                    // target that wrote no new version is the proof.
+                    None => s.round_in(floor_slot, u64::MAX).unwrap_or(false),
                     // Something newer exists: a round must sit at or after
                     // the target and before that change was seen.
                     Some(u) => {
