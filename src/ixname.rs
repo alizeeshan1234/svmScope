@@ -274,6 +274,29 @@ fn titleize(name: &str) -> String {
 
 /// Positional account role names for a native program's instruction, so the
 /// call trace reads "Source / Destination / Authority", not bare addresses.
+/// Programs decoded from hard-coded layouts rather than an IDL: the runtime's
+/// own, plus the few pre-Anchor DEXes whose layouts ship with svmscope. None of
+/// them has ever published an IDL, so an IDL lookup for one is wasted work.
+pub(crate) fn is_native_program(program: &str) -> bool {
+    matches!(
+        program,
+        TOKEN
+            | TOKEN_2022
+            | SYSTEM
+            | COMPUTE_BUDGET
+            | ATA
+            | MEMO
+            | MEMO_V1
+            | STAKE
+            | VOTE
+            | ALT
+            | LOADER_UPGRADEABLE
+            | RAYDIUM_AMM
+            | SERUM_V3
+            | OPENBOOK_V1
+    )
+}
+
 fn native_account_names(program: &str, data: &[u8]) -> Vec<&'static str> {
     let v = |s: &[&'static str]| s.to_vec();
     match program {
@@ -416,23 +439,7 @@ fn enrich_with(
         .map(|&i| account_keys.get(i).cloned().unwrap_or_default())
         .collect();
 
-    let is_native = matches!(
-        program,
-        TOKEN
-            | TOKEN_2022
-            | SYSTEM
-            | COMPUTE_BUDGET
-            | ATA
-            | MEMO
-            | MEMO_V1
-            | STAKE
-            | VOTE
-            | ALT
-            | LOADER_UPGRADEABLE
-            | RAYDIUM_AMM
-            | SERUM_V3
-            | OPENBOOK_V1
-    );
+    let is_native = is_native_program(program);
 
     // Anchor's `emit_cpi!` invokes the program itself with the event bytes,
     // prefixed by a fixed 8-byte "event CPI" discriminator. Name it so the tree

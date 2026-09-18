@@ -46,22 +46,58 @@ const IDL_HISTORY_URL: &str = "https://idl.solana.com/api/history";
 /// Best effort: any failure returns `None` and the caller falls back to the
 /// current IDL, which is what it used before this existed.
 pub(crate) fn fetch_idl_at_slot(program_id: &str, slot: u64) -> Option<Value> {
+    // The runtime's own programs are decoded from hard-coded layouts and have
+    // never published an Anchor IDL, so a lookup for them is pure latency.
+    if crate::ixname::is_native_program(program_id) {
+        return None;
+    }
+    pick_idl_for_slot(&idl_history(program_id)?, slot)
+}
+
+/// A program's full version history, fetched once per process and reused.
+///
+/// The body is a few hundred kilobytes at most and the same for every slot, so
+/// caching it turns one HTTP call per program per replay into one per program.
+/// That matters: the service is occasionally slow, and a replay resolves every
+/// program in the transaction before it can name a single instruction.
+fn idl_history(program_id: &str) -> Option<Value> {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+    use std::time::{Duration, Instant};
+
+    type Cache = HashMap<String, (Instant, Option<Value>)>;
+    static HISTORY: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    const TTL: Duration = Duration::from_secs(600);
+
+    if let Ok(c) = HISTORY.lock() {
+        if let Some((at, v)) = c.get(program_id) {
+            if at.elapsed() < TTL {
+                return v.clone();
+            }
+        }
+    }
+
     let base =
         std::env::var("SVMSCOPE_IDL_HISTORY_URL").unwrap_or_else(|_| IDL_HISTORY_URL.to_string());
     if base.trim().is_empty() {
         return None;
     }
-    let body: Value = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+    let fetched: Option<Value> = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
         .build()
-        .ok()?
-        .get(format!("{base}?programId={program_id}"))
-        .send()
-        .ok()?
-        .json()
-        .ok()?;
+        .ok()
+        .and_then(|c| c.get(format!("{base}?programId={program_id}")).send().ok())
+        .and_then(|r| r.json().ok());
 
-    pick_idl_for_slot(&body, slot)
+    if let Ok(mut c) = HISTORY.lock() {
+        if c.len() >= 512 {
+            c.clear();
+        }
+        // A failed lookup is cached too: the service being down should slow a
+        // replay once, not once per program per replay.
+        c.insert(program_id.to_string(), (Instant::now(), fetched.clone()));
+    }
+    fetched
 }
 
 /// The version in a history response whose live range covers `slot`.
@@ -100,12 +136,25 @@ fn pick_idl_for_slot(body: &Value, slot: u64) -> Option<Value> {
             }
         }
     }
-    let content = best?.1.get("content")?;
-    // `content` is the IDL as a JSON string, not as an object.
-    match content.as_str() {
-        Some(text) => serde_json::from_str(text).ok(),
-        None => Some(content.clone()),
-    }
+    idl_content(best?.1)
+}
+
+/// The IDL inside a history entry, if it is one this decoder can read.
+///
+/// `content` is the IDL as a JSON string, not as an object. The service also
+/// serves Codama program-metadata nodes, whose instructions sit under
+/// `program.instructions` rather than at the top level; those parse to an empty
+/// model here, and returning one would silently un-name every instruction the
+/// on-chain Anchor IDL would have named. Anything that yields nothing to decode
+/// with is treated as no answer, so the caller falls back to the current IDL.
+fn idl_content(entry: &Value) -> Option<Value> {
+    let content = entry.get("content")?;
+    let idl = match content.as_str() {
+        Some(text) => serde_json::from_str(text).ok()?,
+        None => content.clone(),
+    };
+    let model = IdlModel::parse(&idl);
+    (!model.instructions.is_empty() || !model.accounts.is_empty()).then_some(idl)
 }
 
 /// Slots come back as strings in this API; accept either.
@@ -1075,6 +1124,45 @@ mod tests {
     #[test]
     fn a_slot_before_the_first_version_has_no_idl() {
         assert!(pick_idl_for_slot(&history(), 50).is_none());
+    }
+
+    // The service answers for every program, including ones that never
+    // published an Anchor IDL, with a Codama node whose instructions sit under
+    // `program`. Reading one as an IDL yields nothing to decode with, and
+    // returning it would replace a perfectly good on-chain IDL with silence.
+    #[test]
+    fn a_codama_node_is_not_mistaken_for_an_idl() {
+        let body = json!({
+            "anchor": [],
+            "pmp": [
+                { "activeFrom": { "slot": "100" }, "activeTo": "current",
+                  "content": "{\"kind\":\"rootNode\",\"standard\":\"codama\",\"program\":{\"kind\":\"programNode\",\"instructions\":[{\"name\":\"create\"}]}}" }
+            ]
+        });
+        assert!(pick_idl_for_slot(&body, 150).is_none());
+    }
+
+    // A Program Metadata entry that does carry a readable IDL is still used:
+    // the rule is "can this be decoded with", not "which array it came from".
+    #[test]
+    fn a_readable_program_metadata_entry_is_used() {
+        let body = json!({
+            "anchor": [],
+            "pmp": [
+                { "activeFrom": { "slot": "100" }, "activeTo": "current",
+                  "content": "{\"instructions\":[{\"name\":\"swap\"}]}" }
+            ]
+        });
+        let picked = pick_idl_for_slot(&body, 150).expect("a readable IDL covers 150");
+        assert_eq!(first_ix(&picked), "swap");
+    }
+
+    // The runtime's own programs are decoded from hard-coded layouts, so the
+    // history service is never asked about them.
+    #[test]
+    fn native_programs_skip_the_history_lookup() {
+        assert!(fetch_idl_at_slot("11111111111111111111111111111111", 150).is_none());
+        assert!(fetch_idl_at_slot("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", 150).is_none());
     }
 
     // A program that is not Anchor: no eight-byte discriminator, a one-byte
