@@ -14,13 +14,22 @@ path = "src/main.rs"
 
 [dependencies]
 svmscope = { path = ".." }
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 tokio = { version = "1.53.1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 mimalloc = "0.1.52"
+# The browser-relayed RPC transport: an `RpcSender` whose requests are answered
+# by the reader's own browser, so a local validator needs no engine of its own.
+solana-rpc-client = "=4.2.1"
+solana-rpc-client-api = "=4.2.1"
+async-trait = "0.1"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# Relay session ids must be unguessable: the id is what lets a request steer
+# somebody's browser at their own machine.
+getrandom = "0.3"
 
 [features]
 # Single-run debugger (state after every instruction and CPI from one

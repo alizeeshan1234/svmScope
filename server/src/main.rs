@@ -3,10 +3,12 @@
 //! Run with `cargo run --bin server`, then open http://127.0.0.1:3000.
 
 mod guard;
+mod relay;
 mod stats;
 
 use axum::{
     body::Body,
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::{ConnectInfo, Path, Query, Request},
     http::{header, StatusCode},
     middleware::{self, Next},
@@ -65,6 +67,9 @@ fn cluster_env_rpc(cluster: Option<&str>) -> Option<String> {
 struct ClusterQuery {
     cluster: Option<String>,
     rpc: Option<String>,
+    /// A page offering to make this request's RPC calls from the reader's own
+    /// browser, so a validator on their machine is reachable. See [`relay`].
+    relay: Option<String>,
     /// Optional archival RPC for exact historical state; vetted like `rpc`.
     archive: Option<String>,
     /// For the what-if endpoints: build on the replay as of this slot.
@@ -489,7 +494,23 @@ fn spawn_recorder() {
         .expect("spawn recorder thread");
 }
 
-fn scope_for(url: String, archive: Option<String>) -> Scope {
+fn scope_for(rpc: Rpc, archive: Option<String>) -> Scope {
+    // A relayed scope talks to whatever chain the reader's page is pointed at,
+    // usually a validator that started minutes ago. The mainnet record store,
+    // the account-changes stream and an archival endpoint all describe a
+    // different chain, so none of them is attached: feeding mainnet account
+    // versions into a localnet replay would be worse than having no history.
+    let url = match rpc {
+        Rpc::Relay(id) => {
+            return match relay::client_for(&id) {
+                Some(client) => Scope::from_client(client),
+                // The page vanished between the check and here; a scope on the
+                // default endpoint is wrong, so fail every call instead.
+                None => Scope::new(String::new()),
+            };
+        }
+        Rpc::Url(url) => url,
+    };
     // Free historical reconstruction replays old transactions per drifting
     // account; opt in with a replay budget once the RPC behind the instance can
     // take the extra calls. `0` (default) keeps the current-state tier.
@@ -534,19 +555,41 @@ fn archive_for(caller: Option<&str>) -> Option<String> {
 
 /// Both per-request endpoints at once: the RPC (see [`rpc_for`]) and the
 /// archive (see [`archive_for`]).
+/// Where a request's RPC calls go: an endpoint this process fetches from, or a
+/// connected page that fetches on its behalf. The second is how a validator on
+/// the reader's own machine is reachable at all — see [`relay`].
+#[derive(Clone, Debug, PartialEq)]
+enum Rpc {
+    Url(String),
+    Relay(String),
+}
+
+impl std::fmt::Display for Rpc {
+    /// Used in answer-cache keys, so each target must read differently. Two
+    /// pages relaying are two different chains as far as this process knows,
+    /// and neither is the public endpoint.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Rpc::Url(u) => write!(f, "{u}"),
+            Rpc::Relay(id) => write!(f, "relay:{id}"),
+        }
+    }
+}
+
 fn endpoints_for(
     cluster: Option<&str>,
     rpc: Option<&str>,
     archive: Option<&str>,
-) -> Result<(String, Option<String>), (StatusCode, String)> {
-    Ok((rpc_for(cluster, rpc)?, archive_for(archive)))
+    relay: Option<&str>,
+) -> Result<(Rpc, Option<String>), (StatusCode, String)> {
+    Ok((rpc_for(cluster, rpc, relay)?, archive_for(archive)))
 }
 
 /// What to tell a caller who asked for an endpoint this engine will not serve.
-const NO_LOCAL_RPC: &str = "this engine serves the public clusters only. \
-Localnet lives on your machine, and a hosted engine cannot reach it. Run \
-svmscope locally with SVMSCOPE_ALLOW_CUSTOM_RPC=1 to point it at your own \
-validator, then open the UI against that engine.";
+const NO_LOCAL_RPC: &str = "this engine cannot reach a validator on your \
+machine by itself. Open the page's RPC relay and it will make those calls for \
+you from your own browser, which is where your validator is. Failing that, run \
+svmscope locally with SVMSCOPE_ALLOW_CUSTOM_RPC=1.";
 
 /// The RPC endpoint for one request, or why it cannot be served.
 ///
@@ -554,7 +597,24 @@ validator, then open the UI against that engine.";
 /// request with mainnet data looks exactly like success, which is how someone
 /// ends up debugging their own program against somebody else's chain. A cluster
 /// this engine will not serve is an error the caller can read.
-fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> Result<String, (StatusCode, String)> {
+fn rpc_for(
+    cluster: Option<&str>,
+    rpc: Option<&str>,
+    relay: Option<&str>,
+) -> Result<Rpc, (StatusCode, String)> {
+    // A page that has offered to make the calls wins over everything else: it
+    // is the only way to reach a validator on the reader's machine, and it is
+    // also the safest, since this process then connects to nothing at all.
+    if let Some(id) = relay.map(str::trim).filter(|s| !s.is_empty()) {
+        if !relay::is_open(id) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "that RPC relay is not connected — reload the page to open a new one".to_string(),
+            ));
+        }
+        return Ok(Rpc::Relay(id.to_string()));
+    }
+
     // A caller-supplied RPC is only trusted under the operator's opt-in, and
     // then only if it passes the SSRF check. Neither rule is relaxed here.
     let allow = custom_rpc_allowed();
@@ -562,7 +622,7 @@ fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> Result<String, (StatusCo
         if !allow {
             return Err((StatusCode::BAD_REQUEST, NO_LOCAL_RPC.to_string()));
         }
-        return vet_custom_rpc(u).ok_or_else(|| {
+        return vet_custom_rpc(u).map(Rpc::Url).ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,
                 "that RPC endpoint was refused: it must be http(s) and must not \
@@ -573,7 +633,7 @@ fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> Result<String, (StatusCo
     }
 
     let Some(name) = cluster.map(str::trim).filter(|c| !c.is_empty()) else {
-        return Ok(rpc_url());
+        return Ok(Rpc::Url(rpc_url()));
     };
     // A URL-shaped cluster is never honored, by anyone, so `cluster` cannot be
     // an SSRF vector: it selects among names, and the endpoint each name maps to
@@ -589,9 +649,10 @@ fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> Result<String, (StatusCo
         ));
     }
     if let Some(u) = cluster_env_rpc(Some(name)) {
-        return Ok(u);
+        return Ok(Rpc::Url(u));
     }
     svmscope::resolve_rpc_url(Some(name), None, &rpc_url())
+        .map(Rpc::Url)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
@@ -614,6 +675,8 @@ struct SimRequest {
     cluster: Option<String>,
     #[serde(default)]
     rpc: Option<String>,
+    #[serde(default)]
+    relay: Option<String>,
     /// Optional archival RPC (one that honours a historical `slot` on
     /// `getAccountInfo`, e.g. Alchemy's Account Archive) for exact state at
     /// the transaction's slot. Vetted like `rpc`; the caller's key stays in
@@ -640,6 +703,8 @@ struct TraceRequest {
     cluster: Option<String>,
     #[serde(default)]
     rpc: Option<String>,
+    #[serde(default)]
+    relay: Option<String>,
     /// Optional archival RPC (one that honours a historical `slot` on
     /// `getAccountInfo`, e.g. Alchemy's Account Archive) for exact state at
     /// the transaction's slot. Vetted like `rpc`; the caller's key stays in
@@ -745,6 +810,7 @@ struct SlotAtQuery {
     time: String,
     cluster: Option<String>,
     rpc: Option<String>,
+    relay: Option<String>,
 }
 
 /// GET /slot_at?time=… — the slot nearest a moment in time: estimated from
@@ -760,7 +826,12 @@ async fn slot_at_handler(
             "time must be unix seconds or an ISO 8601 date".to_string(),
         )
     })?;
-    let (url, archive) = endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), None)?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        None,
+        q.relay.as_deref(),
+    )?;
     let out = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, svmscope::Error> {
         let scope = scope_for(url, archive);
         let client = scope.client();
@@ -957,8 +1028,12 @@ async fn analyze_inner(
     q: ClusterQuery,
     body: IdlBody,
 ) -> Result<Json<Analysis>, (StatusCode, String)> {
-    let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        q.archive.as_deref(),
+        q.relay.as_deref(),
+    )?;
     // `analyze` does blocking I/O (RPC) and heavy CPU work (replay), so run it on
     // the blocking thread pool instead of stalling the async runtime.
     let result = tokio::task::spawn_blocking(move || {
@@ -1015,6 +1090,7 @@ async fn simulate_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
+        req.relay.as_deref(),
     )?;
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
         let scope = scope_for(url, archive);
@@ -1062,6 +1138,7 @@ async fn suite_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
+        None,
     )?;
     let scenarios = req
         .scenarios
@@ -1111,6 +1188,8 @@ struct PreflightRequest {
     cluster: Option<String>,
     #[serde(default)]
     rpc: Option<String>,
+    #[serde(default)]
+    relay: Option<String>,
     /// Optional archival RPC (one that honours a historical `slot` on
     /// `getAccountInfo`, e.g. Alchemy's Account Archive) for exact state at
     /// the transaction's slot. Vetted like `rpc`; the caller's key stays in
@@ -1136,6 +1215,7 @@ async fn preflight_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
+        req.relay.as_deref(),
     )?;
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
         let replay = scope_for(url, archive).preflight(&req.transaction)?;
@@ -1160,8 +1240,12 @@ async fn account_handler(
     Path(address): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::AccountOverview>, (StatusCode, String)> {
-    let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        q.archive.as_deref(),
+        q.relay.as_deref(),
+    )?;
     let result = tokio::task::spawn_blocking(move || scope_for(url, archive).account(&address))
         .await
         .map_err(|e| {
@@ -1182,8 +1266,12 @@ async fn signatures_handler(
     Path(address): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::SigInfo>>, (StatusCode, String)> {
-    let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        q.archive.as_deref(),
+        q.relay.as_deref(),
+    )?;
     let result =
         tokio::task::spawn_blocking(move || scope_for(url, archive).signatures(&address, 25))
             .await
@@ -1219,6 +1307,7 @@ async fn preflight_report_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
+        req.relay.as_deref(),
     )?;
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(
@@ -1271,6 +1360,7 @@ async fn replay_report_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
+        req.relay.as_deref(),
     )?;
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(
@@ -1312,6 +1402,8 @@ struct ProfileRequest {
     cluster: Option<String>,
     #[serde(default)]
     rpc: Option<String>,
+    #[serde(default)]
+    relay: Option<String>,
     /// Optional archival RPC (one that honours a historical `slot` on
     /// `getAccountInfo`, e.g. Alchemy's Account Archive) for exact state at
     /// the transaction's slot. Vetted like `rpc`; the caller's key stays in
@@ -1443,6 +1535,7 @@ async fn profile_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
+        req.relay.as_deref(),
     )?;
     let tt = req.time_travel.clone();
     let tier = req.tier.clone();
@@ -1474,8 +1567,12 @@ async fn profile_get_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<ProfileResponse>, (StatusCode, String)> {
-    let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        q.archive.as_deref(),
+        q.relay.as_deref(),
+    )?;
     tokio::task::spawn_blocking(move || {
         run_profile(
             scope_for(url, archive),
@@ -1522,6 +1619,7 @@ async fn trace_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
+        req.relay.as_deref(),
     )?;
     let tt = req.time_travel.clone();
     let pinned = req.tier.clone();
@@ -1703,8 +1801,12 @@ async fn trace_get_handler(
         )
             .into_response()
     };
-    let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        q.archive.as_deref(),
+        q.relay.as_deref(),
+    )?;
     // Keyed by every endpoint that shaped the world: two callers with
     // different archives must never share a cached trace.
     let key = format!("{}|{}|{}", signature, url, archive.as_deref().unwrap_or(""));
@@ -1765,6 +1867,8 @@ struct IdlRequest {
     cluster: Option<String>,
     #[serde(default)]
     rpc: Option<String>,
+    #[serde(default)]
+    relay: Option<String>,
     /// Optional archival RPC (one that honours a historical `slot` on
     /// `getAccountInfo`, e.g. Alchemy's Account Archive) for exact state at
     /// the transaction's slot. Vetted like `rpc`; the caller's key stays in
@@ -1786,6 +1890,7 @@ async fn decode_account_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
+        req.relay.as_deref(),
     )?;
     let idl = (!req.idl.is_null()).then_some(req.idl);
 
@@ -1816,8 +1921,12 @@ async fn instructions_handler(
     Path(program): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::idl::IdlInstruction>>, (StatusCode, String)> {
-    let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        q.archive.as_deref(),
+        q.relay.as_deref(),
+    )?;
     let result =
         tokio::task::spawn_blocking(move || scope_for(url, archive).program_instructions(&program))
             .await
@@ -1836,8 +1945,12 @@ async fn replay_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<ReplayResult>, (StatusCode, String)> {
-    let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        q.archive.as_deref(),
+        q.relay.as_deref(),
+    )?;
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
         Ok(scope_for(url, archive).replay(&signature)?.run()?.result)
     })
@@ -1891,6 +2004,7 @@ struct AtSlotQuery {
     cluster: Option<String>,
     rpc: Option<String>,
     archive: Option<String>,
+    relay: Option<String>,
 }
 
 /// Rebuild the world as of `slot` (the transaction's own slot when `None`),
@@ -1961,8 +2075,12 @@ async fn analyze_at_inner(
     if q.slot == Some(0) {
         return Err((StatusCode::BAD_REQUEST, "slot must be positive".to_string()));
     }
-    let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        q.archive.as_deref(),
+        q.relay.as_deref(),
+    )?;
     let slot = q.slot;
     // The fingerprint keeps an answer built with caller IDLs apart from one
     // built without them: same transaction, different decoding.
@@ -2052,8 +2170,12 @@ async fn replay_at_inner(
     if slot == 0 {
         return Err((StatusCode::BAD_REQUEST, "slot must be positive".to_string()));
     }
-    let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        q.archive.as_deref(),
+        q.relay.as_deref(),
+    )?;
     let key = format!(
         "replay_at|{url}|{}|{signature}|{slot}|{}",
         archive.as_deref().unwrap_or(""),
@@ -2109,8 +2231,12 @@ async fn replay_at_slot_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<ReplayAtSlotResponse>, (StatusCode, String)> {
-    let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        q.archive.as_deref(),
+        q.relay.as_deref(),
+    )?;
     let out =
         tokio::task::spawn_blocking(move || -> Result<ReplayAtSlotResponse, svmscope::Error> {
             // SVMSCOPE_ARCHIVE_URL (an archival endpoint honoring the `slot`
@@ -2152,6 +2278,7 @@ struct CounterfactualQuery {
     rpc: Option<String>,
     /// Optional archival RPC for exact historical state; vetted like `rpc`.
     archive: Option<String>,
+    relay: Option<String>,
 }
 
 /// The counterfactual threshold result — the balance at which the outcome flips.
@@ -2177,8 +2304,12 @@ async fn counterfactual_handler(
     Path(signature): Path<String>,
     Query(q): Query<CounterfactualQuery>,
 ) -> Result<Json<CounterfactualResponse>, (StatusCode, String)> {
-    let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        q.archive.as_deref(),
+        q.relay.as_deref(),
+    )?;
     let lo = q.lo.unwrap_or(0);
     let hi = q.hi.unwrap_or(100_000_000);
     if lo > hi {
@@ -2247,8 +2378,12 @@ async fn scan_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::BreakingPoint>>, (StatusCode, String)> {
-    let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        q.archive.as_deref(),
+        q.relay.as_deref(),
+    )?;
     let at_slot = q.slot;
     let out = tokio::task::spawn_blocking(
         move || -> Result<Vec<svmscope::BreakingPoint>, svmscope::Error> {
@@ -2288,8 +2423,12 @@ async fn diagnose_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::Diagnosis>, (StatusCode, String)> {
-    let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        q.archive.as_deref(),
+        q.relay.as_deref(),
+    )?;
     let out = tokio::task::spawn_blocking(move || scope_for(url, archive).diagnose(&signature))
         .await
         .map_err(|e| {
@@ -2309,8 +2448,12 @@ async fn freeze_handler(
     Path(signature): Path<String>,
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::Fixture>, (StatusCode, String)> {
-    let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
+    let (url, archive) = endpoints_for(
+        q.cluster.as_deref(),
+        q.rpc.as_deref(),
+        q.archive.as_deref(),
+        q.relay.as_deref(),
+    )?;
     let result = tokio::task::spawn_blocking(move || scope_for(url, archive).capture(&signature))
         .await
         .map_err(|e| {
@@ -2326,6 +2469,99 @@ async fn freeze_handler(
     }
 }
 
+/// GET /rpc_relay (WebSocket) — the page volunteers to make this engine's RPC
+/// calls for it.
+///
+/// Answers with the session id to pass as `relay=` on later requests, then
+/// carries JSON-RPC envelopes down and their answers back up. See [`relay`] for
+/// why this exists: a validator on the reader's machine is unreachable from a
+/// server, and quietly substituting a public cluster is worse than saying so.
+async fn rpc_relay_handler(ws: WebSocketUpgrade, Query(q): Query<RelayQuery>) -> Response {
+    let label = q.label.unwrap_or_else(|| "browser relay".to_string());
+    ws.on_upgrade(move |socket| run_relay(socket, label))
+}
+
+#[derive(Deserialize)]
+struct RelayQuery {
+    /// What the page says it is pointed at, shown in errors. Never dialled.
+    label: Option<String>,
+}
+
+/// An unguessable session id. The id is the whole authorisation: anyone holding
+/// it can have this engine ask that browser to fetch from its own machine, so it
+/// must not be derivable from a timestamp or a counter.
+fn relay_session_id() -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::fill(&mut bytes).is_err() {
+        // Refuse to fall back to something predictable.
+        return String::new();
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+async fn run_relay(socket: WebSocket, label: String) {
+    use futures_util::{SinkExt, StreamExt};
+
+    let id = relay_session_id();
+    if id.is_empty() {
+        return;
+    }
+    let Some((_session, mut calls)) = relay::open(id.clone(), label) else {
+        let mut socket = socket;
+        let _ = socket
+            .send(Message::Text(
+                json!({ "type": "busy", "error": "too many relays open right now" })
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        return;
+    };
+
+    let (mut tx, mut rx) = socket.split();
+    if tx
+        .send(Message::Text(
+            json!({ "type": "ready", "session": id }).to_string().into(),
+        ))
+        .await
+        .is_err()
+    {
+        relay::close(&id);
+        return;
+    }
+
+    // Down: each call the engine wants made. Up: the page's answers.
+    let down_id = id.clone();
+    let down = tokio::spawn(async move {
+        while let Some(call) = calls.recv().await {
+            let frame = json!({ "type": "call", "request": relay::envelope_of(&call) });
+            if tx
+                .send(Message::Text(frame.to_string().into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+        let _ = tx.close().await;
+        relay::close(&down_id);
+    });
+
+    while let Some(Ok(msg)) = rx.next().await {
+        match msg {
+            Message::Text(text) => {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    relay::deliver(&id, &v);
+                }
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    relay::close(&id);
+    down.abort();
+}
+
 /// GET /api — machine-readable index of the public API, so anything that wants to
 /// call svmscope (a dApp, wallet, bot, CI job) can discover the surface in one hit.
 async fn api_index() -> Json<serde_json::Value> {
@@ -2335,6 +2571,9 @@ async fn api_index() -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         // Lets the UI hide the custom-RPC field on instances that don't allow it.
         "custom_rpc": custom_rpc_allowed(),
+        // This engine can borrow a reader's browser to reach endpoints only that
+        // reader can see, which is what makes Localnet work on a hosted site.
+        "rpc_relay": true,
         "custom_archive": custom_rpc_allowed(),
         // The recorded window's first slot, so the UI can say up front whether
         // a slot can be exact, and the programs whose state comes back from
@@ -2582,6 +2821,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(index))
         .route("/api", get(api_index))
+        .route("/rpc_relay", get(rpc_relay_handler))
         .route(
             "/analyze/{signature}",
             get(analyze_handler).post(analyze_post_handler),
@@ -2713,9 +2953,9 @@ mod tests {
         // syntactically fine public one — must never be used verbatim. This is the
         // real SSRF backstop on the shared public instance, independent of DNS.
         assert!(!custom_rpc_allowed());
-        let out = rpc_for(None, Some("http://8.8.8.8:9999/evil"));
+        let out = rpc_for(None, Some("http://8.8.8.8:9999/evil"), None);
         assert!(out.is_err(), "a caller RPC must be refused, not honoured");
-        assert_ne!(out.ok().as_deref(), Some("http://8.8.8.8:9999/evil"));
+        assert_ne!(out.ok(), Some(Rpc::Url("http://8.8.8.8:9999/evil".into())));
     }
 
     // The bug this replaced: asking for localnet on an engine that cannot serve
@@ -2725,15 +2965,18 @@ mod tests {
     fn localnet_is_refused_not_quietly_swapped_for_mainnet() {
         assert!(!custom_rpc_allowed());
         for name in ["localnet", "local", "localhost", "l"] {
-            let out = rpc_for(Some(name), None);
+            let out = rpc_for(Some(name), None, None);
             assert!(out.is_err(), "{name} must be refused");
-            assert_ne!(out.ok(), Some(rpc_url()));
+            assert_ne!(out.ok(), Some(Rpc::Url(rpc_url())));
         }
         // An unknown name is an error too, rather than the default endpoint.
-        assert!(rpc_for(Some("mainnnet"), None).is_err());
+        assert!(rpc_for(Some("mainnnet"), None, None).is_err());
         // The public clusters still resolve.
-        assert!(rpc_for(Some("devnet"), None).is_ok());
-        assert!(rpc_for(None, None).is_ok());
+        assert!(rpc_for(Some("devnet"), None, None).is_ok());
+        assert!(rpc_for(None, None, None).is_ok());
+        // An id naming no connected page is refused rather than silently
+        // falling back to a public cluster.
+        assert!(rpc_for(Some("localnet"), None, Some("not-a-session")).is_err());
     }
 
     #[test]
@@ -2754,14 +2997,14 @@ mod tests {
     #[test]
     fn scope_carries_the_archive_it_was_given() {
         let with = scope_for(
-            "https://8.8.8.8/".into(),
+            Rpc::Url("https://8.8.8.8/".into()),
             Some("https://8.8.8.8/archive".into()),
         );
         assert_eq!(
             with.archive_url().as_deref(),
             Some("https://8.8.8.8/archive")
         );
-        let without = scope_for("https://8.8.8.8/".into(), None);
+        let without = scope_for(Rpc::Url("https://8.8.8.8/".into()), None);
         assert!(without.archive_url().is_none() || std::env::var("SVMSCOPE_ARCHIVE_URL").is_ok());
     }
 
@@ -2773,18 +3016,25 @@ mod tests {
         assert!(!custom_rpc_allowed());
         // Both are refused outright now. The endpoint never appears in the
         // answer, because there is no answer.
-        let meta = rpc_for(Some("http://169.254.169.254/latest/meta-data"), None);
+        let meta = rpc_for(Some("http://169.254.169.254/latest/meta-data"), None, None);
         assert!(meta.is_err(), "a URL-shaped cluster must be refused");
-        assert!(!meta.unwrap_or_default().contains("169.254"));
-        let local = rpc_for(Some("localnet"), None);
+        assert!(!meta
+            .map(|r| r.to_string())
+            .unwrap_or_default()
+            .contains("169.254"));
+        let local = rpc_for(Some("localnet"), None, None);
         assert!(
             local.is_err(),
             "localnet must be refused on a public instance"
         );
-        assert!(!local.unwrap_or_default().contains("127.0.0.1"));
+        assert!(!local
+            .map(|r| r.to_string())
+            .unwrap_or_default()
+            .contains("127.0.0.1"));
         // A legitimate public cluster still resolves normally.
-        assert!(rpc_for(Some("devnet"), None)
+        assert!(rpc_for(Some("devnet"), None, None)
             .expect("devnet resolves")
+            .to_string()
             .starts_with("http"));
     }
 

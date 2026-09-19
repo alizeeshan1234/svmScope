@@ -1514,7 +1514,14 @@ const idlCount = () => Object.keys(userIdls).length;
 // Routes that decode a transaction take the IDLs as a POST body; everything
 // else is a plain GET.
 const carriesIdls = (path) => /^\/(analyze|analyze_at|replay_at)\//.test(path);
-const api = (path, init) => {
+const api = async (path, init) => {
+  // If this selection needs the engine to borrow our network, get the socket up
+  // first and name the session on the request. Paths are built before we know
+  // the id, so it is appended here rather than threaded through every caller.
+  const session = await ensureRelay();
+  if (session && !/[?&]relay=/.test(path)) {
+    path += (path.includes('?') ? '&' : '?') + 'relay=' + encodeURIComponent(session);
+  }
   if (!init && idlCount() && carriesIdls(path)) {
     return fetch(API + path, {
       method: 'POST',
@@ -1535,13 +1542,15 @@ try {
   fetch(API + '/api', { mode: 'cors', cache: 'no-store' })
     .then(r => r.ok ? r.json() : null)
     .then(info => {
-      // Localnet goes with it. Localnet means 127.0.0.1 as seen by the engine,
-      // and a hosted engine's localhost is its own container, never the
-      // reader's machine — so on a public instance it is an option that cannot
-      // work. Offering it anyway used to answer with mainnet, which looks like
-      // success and is how someone debugs their program against another chain.
+      // Localnet means 127.0.0.1 as seen by whoever makes the call. An engine
+      // that can relay through this browser makes the call from here, so the
+      // address means this machine and Localnet works — keep it. An engine
+      // without the relay cannot reach it from anywhere, so drop it rather than
+      // offer an option that used to answer with mainnet.
+      const canRelay = !!(info && info.rpc_relay);
       if (info && info.custom_rpc === false) {
-        for (const v of ['custom', 'localnet']) {
+        const drop = canRelay ? ['custom'] : ['custom', 'localnet'];
+        for (const v of drop) {
           const opt = document.querySelector(`#cluster option[value="${v}"]`);
           if (opt) opt.remove();
         }
@@ -1559,14 +1568,100 @@ try {
 // Selected cluster — appended to GET requests and merged into POST bodies so one
 // instance serves mainnet / devnet / testnet / localnet / a custom RPC endpoint.
 const currentCluster = () => $('cluster').value;
+// ---------------- RPC relay: the engine borrows this browser ----------------
+// A validator on your machine answers at 127.0.0.1, which from the engine's side
+// is the engine's own container. The two are different machines and no setting
+// changes that. This browser, though, is on your machine — so for localnet (and
+// for a custom RPC pointing somewhere only you can reach) the page holds a
+// socket open and makes the engine's RPC calls for it.
+const relay = {
+  sock: null,      // the open WebSocket, once ready
+  session: null,   // the id to hand the engine as ?relay=
+  target: null,    // the endpoint this page fetches on the engine's behalf
+  opening: null,   // in-flight connect, so callers await one attempt
+};
+
+// Where a relayed call should actually go for the current selection.
+function relayTarget() {
+  const c = $('cluster').value;
+  if (c === 'localnet') return 'http://127.0.0.1:8899';
+  if (c === 'custom') {
+    const url = ($('customRpc').value || '').trim();
+    // Only endpoints the engine cannot reach itself need relaying. A public URL
+    // is better fetched by the engine, which is closer to it and can cache.
+    if (/^https?:\/\/(localhost|127\.0\.0\.1|\[?::1\]?|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(url)) return url;
+  }
+  return null;
+}
+
+// Connect, or reuse the connection we have. Resolves to a session id, or null
+// if the engine has no relay (an older build) or refused another one.
+function openRelay(target) {
+  if (relay.sock && relay.session && relay.target === target) return Promise.resolve(relay.session);
+  if (relay.opening) return relay.opening;
+  relay.opening = new Promise(resolve => {
+    let base = API || location.origin;
+    let ws;
+    try {
+      ws = new WebSocket(base.replace(/^http/, 'ws') + '/rpc_relay?label=' + encodeURIComponent(target));
+    } catch (e) { relay.opening = null; return resolve(null); }
+    const done = (v) => { relay.opening = null; resolve(v); };
+    const giveUp = setTimeout(() => { try { ws.close(); } catch (e) {} done(null); }, 8000);
+    ws.onmessage = async (ev) => {
+      let msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg.type === 'ready') {
+        clearTimeout(giveUp);
+        relay.sock = ws; relay.session = msg.session; relay.target = target;
+        return done(msg.session);
+      }
+      if (msg.type === 'busy') { clearTimeout(giveUp); try { ws.close(); } catch (e) {} return done(null); }
+      if (msg.type !== 'call') return;
+      // One RPC call, forwarded to the endpoint only this browser can see.
+      const req = msg.request;
+      let reply;
+      try {
+        const r = await fetch(relay.target, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(req),
+        });
+        reply = { id: req.id, body: await r.json() };
+      } catch (e) {
+        // Almost always: nothing is listening, so say that rather than let the
+        // engine wait out its timeout wondering.
+        reply = { id: req.id, transport_error: `could not reach ${relay.target} from this browser — is the validator running? (${e.message || e})` };
+      }
+      try { ws.send(JSON.stringify(reply)); } catch (e) {}
+    };
+    ws.onerror = () => { clearTimeout(giveUp); done(null); };
+    ws.onclose = () => {
+      clearTimeout(giveUp);
+      if (relay.sock === ws) { relay.sock = null; relay.session = null; relay.target = null; }
+      done(null);
+    };
+  });
+  return relay.opening;
+}
+
+// Make sure a relay is up before a request that will need one. Returns the
+// session id, or null when none is needed (or none could be opened).
+async function ensureRelay() {
+  const target = relayTarget();
+  if (!target) return null;
+  return await openRelay(target);
+}
+
 // Request params for the current selection: a named cluster, or {rpc:<url>} when
 // "Custom RPC…" is chosen (the backend prefers an explicit rpc over a cluster).
+// When this page is relaying, the session id goes too and takes precedence.
 function clusterParams() {
+  const withRelay = (p) => (relay.session && relay.target === relayTarget())
+    ? { ...p, relay: relay.session } : p;
   if ($('cluster').value === 'custom') {
     const url = ($('customRpc').value || '').trim();
-    return url ? { rpc: url } : {}; // empty custom → backend default (mainnet)
+    return withRelay(url ? { rpc: url } : {}); // empty custom → backend default
   }
-  return { cluster: $('cluster').value };
+  return withRelay({ cluster: $('cluster').value });
 }
 const clusterQ = () => {
   const q = new URLSearchParams(clusterParams()).toString();
