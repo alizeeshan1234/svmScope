@@ -580,6 +580,11 @@ pub struct SuiteRequest {
     /// the transaction's slot; the server vets it like `rpc`.
     #[serde(default)]
     pub archive: Option<String>,
+    /// A page offering to make this request's RPC calls from its own browser,
+    /// so a validator on the reader's machine is reachable. Ignored outside the
+    /// server, which is what holds the relay sessions.
+    #[serde(default)]
+    pub relay: Option<String>,
     /// Optional clock warp applied to every scenario in the suite.
     #[serde(default)]
     pub time_travel: TimeTravel,

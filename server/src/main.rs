@@ -1138,7 +1138,7 @@ async fn suite_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
-        None,
+        req.relay.as_deref(),
     )?;
     let scenarios = req
         .scenarios
