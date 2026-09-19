@@ -19,8 +19,18 @@ on:
   schedule:
     - cron: "17 */6 * * *"
 
+# One recorder at a time, for real. The group was `recorder-${{ github.run_id }}`,
+# which is unique per run, so every run sat in a group of its own and the limit
+# never applied. Handoffs then accumulated instead of replacing each other: 20
+# recorders were running at once on 2026-09-19, which is the whole free-tier
+# concurrency allowance, and every other workflow — the image build that ships
+# the site — queued behind them indefinitely.
+#
+# A constant group means a new run waits for the running one. `cancel-in-progress`
+# stays false so the outgoing recorder finishes its final push rather than being
+# killed mid-write, and the handoff overlap it was designed around still works.
 concurrency:
-  group: recorder-${{ github.run_id }}
+  group: recorder
   cancel-in-progress: false
 
 env:
