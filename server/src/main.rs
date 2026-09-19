@@ -50,6 +50,11 @@ fn cluster_env_rpc(cluster: Option<&str>) -> Option<String> {
         Some("mainnet") | Some("mainnet-beta") | Some("m") => env_http("SVMSCOPE_RPC_URL_MAINNET")
             .or_else(|| env_http("SVMSCOPE_RPC_URL"))
             .or_else(|| env_http("RPC_URL")),
+        // A validator on another port or another box on the desk: the operator
+        // names it, never the caller, so this stays outside the SSRF surface.
+        Some("localnet") | Some("local") | Some("localhost") | Some("l") => {
+            env_http("SVMSCOPE_RPC_URL_LOCALNET")
+        }
         _ => None,
     }
 }
@@ -533,34 +538,61 @@ fn endpoints_for(
     cluster: Option<&str>,
     rpc: Option<&str>,
     archive: Option<&str>,
-) -> (String, Option<String>) {
-    (rpc_for(cluster, rpc), archive_for(archive))
+) -> Result<(String, Option<String>), (StatusCode, String)> {
+    Ok((rpc_for(cluster, rpc)?, archive_for(archive)))
 }
 
-fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> String {
-    // Only trust a caller-supplied RPC when the operator has opted in.
+/// What to tell a caller who asked for an endpoint this engine will not serve.
+const NO_LOCAL_RPC: &str = "this engine serves the public clusters only. \
+Localnet lives on your machine, and a hosted engine cannot reach it. Run \
+svmscope locally with SVMSCOPE_ALLOW_CUSTOM_RPC=1 to point it at your own \
+validator, then open the UI against that engine.";
+
+/// The RPC endpoint for one request, or why it cannot be served.
+///
+/// Nothing here quietly substitutes a different chain. Answering a localnet
+/// request with mainnet data looks exactly like success, which is how someone
+/// ends up debugging their own program against somebody else's chain. A cluster
+/// this engine will not serve is an error the caller can read.
+fn rpc_for(cluster: Option<&str>, rpc: Option<&str>) -> Result<String, (StatusCode, String)> {
+    // A caller-supplied RPC is only trusted under the operator's opt-in, and
+    // then only if it passes the SSRF check. Neither rule is relaxed here.
     let allow = custom_rpc_allowed();
-    // Only ever act on named clusters: public presets always, plus localnet when
-    // the operator enabled custom RPC. A URL-shaped cluster is never honored — even
-    // by a self-hoster — so `cluster` can't be an SSRF vector; custom endpoints go
-    // through the vetted `rpc` field instead.
-    let cluster = cluster.filter(|c| public_cluster_ok(c) || (allow && localnet_alias(c)));
-    if allow {
-        if let Some(u) = rpc {
-            if let Some(safe) = vet_custom_rpc(u) {
-                return safe;
-            }
+    if let Some(u) = rpc.map(str::trim).filter(|u| !u.is_empty()) {
+        if !allow {
+            return Err((StatusCode::BAD_REQUEST, NO_LOCAL_RPC.to_string()));
         }
+        return vet_custom_rpc(u).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "that RPC endpoint was refused: it must be http(s) and must not \
+                 resolve to a loopback, private, or link-local address."
+                    .to_string(),
+            )
+        });
     }
-    if let Some(u) = cluster_env_rpc(cluster) {
-        return u;
+
+    let Some(name) = cluster.map(str::trim).filter(|c| !c.is_empty()) else {
+        return Ok(rpc_url());
+    };
+    // A URL-shaped cluster is never honored, by anyone, so `cluster` cannot be
+    // an SSRF vector: it selects among names, and the endpoint each name maps to
+    // comes from this process's own configuration.
+    if localnet_alias(name) {
+        if !allow {
+            return Err((StatusCode::BAD_REQUEST, NO_LOCAL_RPC.to_string()));
+        }
+    } else if !public_cluster_ok(name) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("unknown cluster '{name}' (expected mainnet, devnet, testnet, or localnet)"),
+        ));
     }
-    // Never let a caller `rpc` reach resolve_rpc's verbatim-URL branch unless it's
-    // both allowed and vetted. `cluster` is already sanitized above.
-    let safe_rpc = rpc.filter(|u| allow && vet_custom_rpc(u).is_some());
-    // `cluster` is pre-sanitized above, so an unknown name can't reach here;
-    // fall back to the default endpoint defensively anyway.
-    svmscope::resolve_rpc_url(cluster, safe_rpc, &rpc_url()).unwrap_or_else(|_| rpc_url())
+    if let Some(u) = cluster_env_rpc(Some(name)) {
+        return Ok(u);
+    }
+    svmscope::resolve_rpc_url(Some(name), None, &rpc_url())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
 /// POST body for /simulate.
@@ -728,7 +760,7 @@ async fn slot_at_handler(
             "time must be unix seconds or an ISO 8601 date".to_string(),
         )
     })?;
-    let (url, archive) = endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), None);
+    let (url, archive) = endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), None)?;
     let out = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, svmscope::Error> {
         let scope = scope_for(url, archive);
         let client = scope.client();
@@ -926,7 +958,7 @@ async fn analyze_inner(
     body: IdlBody,
 ) -> Result<Json<Analysis>, (StatusCode, String)> {
     let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
     // `analyze` does blocking I/O (RPC) and heavy CPU work (replay), so run it on
     // the blocking thread pool instead of stalling the async runtime.
     let result = tokio::task::spawn_blocking(move || {
@@ -983,7 +1015,7 @@ async fn simulate_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
-    );
+    )?;
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
         let scope = scope_for(url, archive);
         let mut replay = replay_for(&scope, &req.signature, req.slot)?;
@@ -1030,7 +1062,7 @@ async fn suite_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
-    );
+    )?;
     let scenarios = req
         .scenarios
         .into_iter()
@@ -1104,7 +1136,7 @@ async fn preflight_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
-    );
+    )?;
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
         let replay = scope_for(url, archive).preflight(&req.transaction)?;
         Ok(replay.simulate(&mutations)?.result)
@@ -1129,7 +1161,7 @@ async fn account_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::AccountOverview>, (StatusCode, String)> {
     let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
     let result = tokio::task::spawn_blocking(move || scope_for(url, archive).account(&address))
         .await
         .map_err(|e| {
@@ -1151,7 +1183,7 @@ async fn signatures_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::SigInfo>>, (StatusCode, String)> {
     let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
     let result =
         tokio::task::spawn_blocking(move || scope_for(url, archive).signatures(&address, 25))
             .await
@@ -1187,7 +1219,7 @@ async fn preflight_report_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
-    );
+    )?;
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(
         move || -> Result<svmscope::SimulationReport, svmscope::Error> {
@@ -1239,7 +1271,7 @@ async fn replay_report_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
-    );
+    )?;
     let tt = req.time_travel.clone();
     let result = tokio::task::spawn_blocking(
         move || -> Result<svmscope::SimulationReport, svmscope::Error> {
@@ -1411,7 +1443,7 @@ async fn profile_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
-    );
+    )?;
     let tt = req.time_travel.clone();
     let tier = req.tier.clone();
     let sig = req.signature;
@@ -1443,7 +1475,7 @@ async fn profile_get_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<ProfileResponse>, (StatusCode, String)> {
     let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
     tokio::task::spawn_blocking(move || {
         run_profile(
             scope_for(url, archive),
@@ -1490,7 +1522,7 @@ async fn trace_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
-    );
+    )?;
     let tt = req.time_travel.clone();
     let pinned = req.tier.clone();
 
@@ -1672,7 +1704,7 @@ async fn trace_get_handler(
             .into_response()
     };
     let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
     // Keyed by every endpoint that shaped the world: two callers with
     // different archives must never share a cached trace.
     let key = format!("{}|{}|{}", signature, url, archive.as_deref().unwrap_or(""));
@@ -1754,7 +1786,7 @@ async fn decode_account_handler(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
-    );
+    )?;
     let idl = (!req.idl.is_null()).then_some(req.idl);
 
     let result = tokio::task::spawn_blocking(move || {
@@ -1785,7 +1817,7 @@ async fn instructions_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::idl::IdlInstruction>>, (StatusCode, String)> {
     let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
     let result =
         tokio::task::spawn_blocking(move || scope_for(url, archive).program_instructions(&program))
             .await
@@ -1805,7 +1837,7 @@ async fn replay_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<ReplayResult>, (StatusCode, String)> {
     let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
         Ok(scope_for(url, archive).replay(&signature)?.run()?.result)
     })
@@ -1930,7 +1962,7 @@ async fn analyze_at_inner(
         return Err((StatusCode::BAD_REQUEST, "slot must be positive".to_string()));
     }
     let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
     let slot = q.slot;
     // The fingerprint keeps an answer built with caller IDLs apart from one
     // built without them: same transaction, different decoding.
@@ -2021,7 +2053,7 @@ async fn replay_at_inner(
         return Err((StatusCode::BAD_REQUEST, "slot must be positive".to_string()));
     }
     let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
     let key = format!(
         "replay_at|{url}|{}|{signature}|{slot}|{}",
         archive.as_deref().unwrap_or(""),
@@ -2078,7 +2110,7 @@ async fn replay_at_slot_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<ReplayAtSlotResponse>, (StatusCode, String)> {
     let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
     let out =
         tokio::task::spawn_blocking(move || -> Result<ReplayAtSlotResponse, svmscope::Error> {
             // SVMSCOPE_ARCHIVE_URL (an archival endpoint honoring the `slot`
@@ -2146,7 +2178,7 @@ async fn counterfactual_handler(
     Query(q): Query<CounterfactualQuery>,
 ) -> Result<Json<CounterfactualResponse>, (StatusCode, String)> {
     let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
     let lo = q.lo.unwrap_or(0);
     let hi = q.hi.unwrap_or(100_000_000);
     if lo > hi {
@@ -2216,7 +2248,7 @@ async fn scan_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<Vec<svmscope::BreakingPoint>>, (StatusCode, String)> {
     let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
     let at_slot = q.slot;
     let out = tokio::task::spawn_blocking(
         move || -> Result<Vec<svmscope::BreakingPoint>, svmscope::Error> {
@@ -2257,7 +2289,7 @@ async fn diagnose_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::Diagnosis>, (StatusCode, String)> {
     let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
     let out = tokio::task::spawn_blocking(move || scope_for(url, archive).diagnose(&signature))
         .await
         .map_err(|e| {
@@ -2278,7 +2310,7 @@ async fn freeze_handler(
     Query(q): Query<ClusterQuery>,
 ) -> Result<Json<svmscope::Fixture>, (StatusCode, String)> {
     let (url, archive) =
-        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref());
+        endpoints_for(q.cluster.as_deref(), q.rpc.as_deref(), q.archive.as_deref())?;
     let result = tokio::task::spawn_blocking(move || scope_for(url, archive).capture(&signature))
         .await
         .map_err(|e| {
@@ -2682,7 +2714,26 @@ mod tests {
         // real SSRF backstop on the shared public instance, independent of DNS.
         assert!(!custom_rpc_allowed());
         let out = rpc_for(None, Some("http://8.8.8.8:9999/evil"));
-        assert_ne!(out, "http://8.8.8.8:9999/evil");
+        assert!(out.is_err(), "a caller RPC must be refused, not honoured");
+        assert_ne!(out.ok().as_deref(), Some("http://8.8.8.8:9999/evil"));
+    }
+
+    // The bug this replaced: asking for localnet on an engine that cannot serve
+    // it used to answer with mainnet, so a local program looked like it was
+    // deployed and working when the data came from another chain entirely.
+    #[test]
+    fn localnet_is_refused_not_quietly_swapped_for_mainnet() {
+        assert!(!custom_rpc_allowed());
+        for name in ["localnet", "local", "localhost", "l"] {
+            let out = rpc_for(Some(name), None);
+            assert!(out.is_err(), "{name} must be refused");
+            assert_ne!(out.ok(), Some(rpc_url()));
+        }
+        // An unknown name is an error too, rather than the default endpoint.
+        assert!(rpc_for(Some("mainnnet"), None).is_err());
+        // The public clusters still resolve.
+        assert!(rpc_for(Some("devnet"), None).is_ok());
+        assert!(rpc_for(None, None).is_ok());
     }
 
     #[test]
@@ -2720,12 +2771,21 @@ mod tests {
         // resolve_rpc honors URL-shaped and localnet clusters verbatim. On a public
         // instance neither may reach an internal target.
         assert!(!custom_rpc_allowed());
+        // Both are refused outright now. The endpoint never appears in the
+        // answer, because there is no answer.
         let meta = rpc_for(Some("http://169.254.169.254/latest/meta-data"), None);
-        assert!(!meta.contains("169.254"), "url cluster leaked: {meta}");
+        assert!(meta.is_err(), "a URL-shaped cluster must be refused");
+        assert!(!meta.unwrap_or_default().contains("169.254"));
         let local = rpc_for(Some("localnet"), None);
-        assert!(!local.contains("127.0.0.1"), "localnet leaked: {local}");
+        assert!(
+            local.is_err(),
+            "localnet must be refused on a public instance"
+        );
+        assert!(!local.unwrap_or_default().contains("127.0.0.1"));
         // A legitimate public cluster still resolves normally.
-        assert!(rpc_for(Some("devnet"), None).starts_with("http"));
+        assert!(rpc_for(Some("devnet"), None)
+            .expect("devnet resolves")
+            .starts_with("http"));
     }
 
     #[test]

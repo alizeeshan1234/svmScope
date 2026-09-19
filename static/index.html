@@ -1061,7 +1061,7 @@ input.derived { border-color: var(--green-border); color: var(--green); }
           <option value="mainnet">Mainnet</option>
           <option value="devnet">Devnet</option>
           <option value="testnet">Testnet</option>
-          <option value="localnet">Localnet</option>
+          <option value="localnet" title="A validator on this machine. Needs svmscope running locally too — a hosted engine cannot reach your localhost.">Localnet</option>
           <option value="custom">Custom RPC…</option>
         </select>
         <input id="customRpc" class="cluster customrpc hidden" placeholder="https://your-rpc…" spellcheck="false" autocomplete="off" title="Custom RPC endpoint" />
@@ -1535,9 +1535,17 @@ try {
   fetch(API + '/api', { mode: 'cors', cache: 'no-store' })
     .then(r => r.ok ? r.json() : null)
     .then(info => {
+      // Localnet goes with it. Localnet means 127.0.0.1 as seen by the engine,
+      // and a hosted engine's localhost is its own container, never the
+      // reader's machine — so on a public instance it is an option that cannot
+      // work. Offering it anyway used to answer with mainnet, which looks like
+      // success and is how someone debugs their program against another chain.
       if (info && info.custom_rpc === false) {
-        const opt = document.querySelector('#cluster option[value="custom"]');
-        if (opt) opt.remove();
+        for (const v of ['custom', 'localnet']) {
+          const opt = document.querySelector(`#cluster option[value="${v}"]`);
+          if (opt) opt.remove();
+        }
+        if (!$('cluster').selectedOptions.length) $('cluster').value = 'mainnet';
       }
       if (info) {
         windowInfo.recordedFrom = info.recorded_from ?? null;
