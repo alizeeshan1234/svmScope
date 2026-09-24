@@ -739,6 +739,18 @@ details.advanced .adv-body { padding-top: var(--s-2); }
 .tab:hover { color: var(--text-2); }
 .tab.on { color: var(--text-1); border-bottom-color: var(--accent); }
 .flabel { display: block; margin-bottom: var(--s-2); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); }
+/* Dependency watch: the run-a-check form. Labels sit above their fields;
+   the two ids get the room, cluster and count stay compact, the button
+   lines up with the inputs' bottom edge. */
+.wform { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 3fr) 120px 200px auto; gap: var(--s-3); align-items: end; margin: var(--s-4) 0 var(--s-3); }
+.wfield { min-width: 0; }
+.wfield .flabel { margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wfield input, .wfield select { width: 100%; box-sizing: border-box; height: 38px; padding: 8px 12px; font-family: var(--font-mono); font-size: 12.5px; background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-sm); color: var(--text); transition: border-color .12s, box-shadow .12s; }
+.wfield input::placeholder { color: var(--text-3); font-family: var(--font-sans, inherit); font-size: 12px; }
+.wfield input:focus, .wfield select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(139,124,246,.18); }
+.wfield input[type=number] { font-variant-numeric: tabular-nums; }
+.wact .btn { height: 38px; white-space: nowrap; }
+@media (max-width: 1000px) { .wform { grid-template-columns: 1fr 1fr; } .wfield.wide { grid-column: 1 / -1; } .wact { grid-column: 1 / -1; } .wact .btn { width: 100%; justify-content: center; } }
 .ta { width: 100%; min-height: 130px; resize: vertical; padding: var(--s-3) var(--s-4); font-family: var(--font-mono); font-size: 12px; line-height: 1.6; }
 .finput { width: 100%; padding: 8px var(--s-3); }
 .finput.mono { font-family: var(--font-mono); font-size: 12.5px; }
@@ -1441,12 +1453,26 @@ input.derived { border-color: var(--green-border); color: var(--green); }
       <div class="card full">
         <h2>Run a check now <span class="count" id="watchCheckState"></span></h2>
         <p class="whatif-lead">Replay a program's recent transactions with a dependency's current binary swapped in. If the watcher holds the dependency's previous binary, that is the baseline; otherwise the report can only say the transactions still execute.</p>
-        <div class="row" style="flex-wrap:wrap;gap:8px">
-          <input id="watchProgram" placeholder="your program id" spellcheck="false" autocomplete="off" style="flex:2;min-width:220px" />
-          <input id="watchDependency" placeholder="dependency program id" spellcheck="false" autocomplete="off" style="flex:2;min-width:220px" />
-          <select id="watchCluster" title="cluster the program lives on" style="width:110px"><option value="mainnet">mainnet</option><option value="devnet">devnet</option></select>
-          <input id="watchLimit" type="number" min="1" max="50" value="10" title="how many recent transactions to replay" style="width:80px" />
-          <button class="btn" id="watchRun">Check<svg class="ic" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
+        <div class="wform">
+          <div class="wfield wide">
+            <label class="flabel" for="watchProgram">Your program id</label>
+            <input id="watchProgram" placeholder="the program whose transactions are replayed" spellcheck="false" autocomplete="off" />
+          </div>
+          <div class="wfield wide">
+            <label class="flabel" for="watchDependency">Dependency program id</label>
+            <input id="watchDependency" placeholder="the program whose new binary is swapped in" spellcheck="false" autocomplete="off" />
+          </div>
+          <div class="wfield">
+            <label class="flabel" for="watchCluster">Cluster</label>
+            <select id="watchCluster" title="the cluster your program lives on"><option value="mainnet">mainnet</option><option value="devnet">devnet</option></select>
+          </div>
+          <div class="wfield">
+            <label class="flabel" for="watchLimit">Transactions to replay</label>
+            <input id="watchLimit" type="number" min="1" max="50" value="10" />
+          </div>
+          <div class="wfield wact">
+            <button class="btn" id="watchRun">Check<svg class="ic" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
+          </div>
         </div>
         <div class="dbg-progress hidden" id="watchProgress"><span class="spinner"></span><span id="watchProgressText">replaying…</span></div>
         <div id="watchResult"></div>
