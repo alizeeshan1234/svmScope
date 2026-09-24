@@ -13,7 +13,7 @@ async function main() {
   anchor.setProvider(provider);
   const program = new Program<DependencyRegistry>(idl as DependencyRegistry, provider);
   const [protocol] = PublicKey.findProgramAddressSync(
-    [Buffer.from("protocol"), new PublicKey(programIdArg).toBuffer()],
+    [Buffer.from("protocol"), new PublicKey(programIdArg).toBuffer(), provider.wallet.publicKey.toBuffer()],
     program.programId
   );
   const sig = await program.methods

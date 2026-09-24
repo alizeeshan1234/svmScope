@@ -40,7 +40,7 @@ pub mod dependency_registry {
         handle_update_protocol(ctx, params)
     }
 
-    pub fn transfer_authority(ctx: Context<TransferAuthority>) -> Result<()> {
-        handle_transfer_authority(ctx)
+    pub fn unregister(ctx: Context<Unregister>) -> Result<()> {
+        handle_unregister(ctx)
     }
 }

@@ -54,6 +54,11 @@
                 "kind": "account",
                 "path": "protocol.program_id",
                 "account": "Protocol"
+              },
+              {
+                "kind": "account",
+                "path": "protocol.authority",
+                "account": "Protocol"
               }
             ]
           }
@@ -121,10 +126,20 @@
         },
         {
           "name": "authority",
+          "docs": [
+            "Becomes the protocol authority. With `program_data` present it must be",
+            "the program's upgrade authority on this cluster."
+          ],
           "signer": true
         },
         {
-          "name": "program_data"
+          "name": "program_data",
+          "docs": [
+            "The ProgramData account of `program_id`, proving who controls it.",
+            "Optional: a program that lives only on another cluster has none here,",
+            "and the engine verifies the entry against that cluster instead."
+          ],
+          "optional": true
         },
         {
           "name": "protocol",
@@ -147,6 +162,10 @@
               {
                 "kind": "arg",
                 "path": "program_id"
+              },
+              {
+                "kind": "account",
+                "path": "authority"
               }
             ]
           }
@@ -213,6 +232,11 @@
               {
                 "kind": "account",
                 "path": "protocol.program_id",
+                "account": "Protocol"
+              },
+              {
+                "kind": "account",
+                "path": "protocol.authority",
                 "account": "Protocol"
               }
             ]
@@ -297,6 +321,11 @@
                 "kind": "account",
                 "path": "protocol.program_id",
                 "account": "Protocol"
+              },
+              {
+                "kind": "account",
+                "path": "protocol.authority",
+                "account": "Protocol"
               }
             ]
           },
@@ -345,27 +374,28 @@
       ]
     },
     {
-      "name": "transfer_authority",
+      "name": "unregister",
       "discriminator": [
-        48,
-        169,
-        76,
-        72,
-        229,
-        180,
-        55,
-        161
+        143,
+        28,
+        144,
+        79,
+        140,
+        220,
+        228,
+        248
       ],
       "accounts": [
         {
           "name": "authority",
+          "docs": [
+            "Receives the closed account's rent."
+          ],
+          "writable": true,
           "signer": true,
           "relations": [
             "protocol"
           ]
-        },
-        {
-          "name": "new_authority"
         },
         {
           "name": "protocol",
@@ -388,6 +418,11 @@
               {
                 "kind": "account",
                 "path": "protocol.program_id",
+                "account": "Protocol"
+              },
+              {
+                "kind": "account",
+                "path": "protocol.authority",
                 "account": "Protocol"
               }
             ]
@@ -437,6 +472,11 @@
               {
                 "kind": "account",
                 "path": "protocol.program_id",
+                "account": "Protocol"
+              },
+              {
+                "kind": "account",
+                "path": "protocol.authority",
                 "account": "Protocol"
               }
             ]
@@ -513,6 +553,11 @@
       "code": 6005,
       "name": "Overflow",
       "msg": "Arithmetic overflow"
+    },
+    {
+      "code": 6006,
+      "name": "HasDependencies",
+      "msg": "Remove the protocol's dependencies before unregistering it"
     }
   ],
   "types": [
@@ -546,6 +591,13 @@
     },
     {
       "name": "Protocol",
+      "docs": [
+        "One registered protocol. PDA on `[\"protocol\", program_id, authority]`,",
+        "so several parties may register the same program and only the entry",
+        "whose authority holds the program's upgrade authority is the one the",
+        "engine trusts. The authority is a seed and cannot change; to hand over,",
+        "register anew and `unregister` the old entry."
+      ],
       "type": {
         "kind": "struct",
         "fields": [
@@ -568,6 +620,15 @@
           {
             "name": "dependency_count",
             "type": "u8"
+          },
+          {
+            "name": "proven",
+            "docs": [
+              "Whether `register` was given the program data account and checked the",
+              "upgrade authority on this cluster. A program that lives only on",
+              "another cluster registers without it; the engine verifies there."
+            ],
+            "type": "bool"
           },
           {
             "name": "bump",

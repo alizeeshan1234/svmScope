@@ -14,4 +14,6 @@ pub enum ErrorCode {
     TooManyDependencies,
     #[msg("Arithmetic overflow")]
     Overflow,
+    #[msg("Remove the protocol's dependencies before unregistering it")]
+    HasDependencies,
 }

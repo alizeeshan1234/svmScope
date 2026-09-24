@@ -505,9 +505,14 @@ where the compute moved. The hosted engine shows it under **Watch**.
 
 The on-chain half is `programs/dependency_registry`, an Anchor program on
 devnet at `4nH59dWUJ5rgTZJTybPbfGY1sgBDwKgrKMBXpRtdxhhg`. A protocol registers
-its program (the signer must hold the program's upgrade authority, proven
-through the program data account), lists the programs it depends on, and
-gives a URL to alert:
+its program, lists the programs it depends on, and gives a URL to alert. If
+the program is deployed on the registry's cluster the signer must hold its
+upgrade authority, proven through the program data account; a program that
+lives only on mainnet registers without proof, and the engine verifies the
+entry against its mainnet upgrade authority before it is ever checked or
+alerted. Entries are keyed by program and authority, so nobody can squat a
+program id, and an entry with no dependencies can be closed with
+`unregister`:
 
 ```
 cd programs/dependency_registry && yarn install

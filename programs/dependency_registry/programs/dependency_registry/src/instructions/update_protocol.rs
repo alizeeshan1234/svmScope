@@ -10,7 +10,7 @@ pub struct UpdateProtocol<'info> {
 
     #[account(
         mut,
-        seeds = [PROTOCOL_SEED, protocol.program_id.as_ref()],
+        seeds = [PROTOCOL_SEED, protocol.program_id.as_ref(), protocol.authority.as_ref()],
         bump = protocol.bump,
         has_one = authority @ ErrorCode::Unauthorized,
     )]

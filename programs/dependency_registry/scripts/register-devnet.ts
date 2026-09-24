@@ -4,7 +4,10 @@
 //   ANCHOR_WALLET=~/.config/solana/id.json \
 //   yarn ts-node scripts/register-devnet.ts <program_id> <alert_url> <dep_program_id>...
 //
-// The wallet must be the upgrade authority of <program_id>.
+// If <program_id> is deployed on this cluster the wallet must be its upgrade
+// authority and the entry is registered as proven; a program that lives only
+// on another cluster (mainnet) registers without proof and the engine verifies
+// it there.
 import * as anchor from "@anchor-lang/core";
 import { Program } from "@anchor-lang/core";
 import { PublicKey } from "@solana/web3.js";
@@ -30,7 +33,7 @@ async function main() {
     BPF_LOADER_UPGRADEABLE
   );
   const [protocol] = PublicKey.findProgramAddressSync(
-    [Buffer.from("protocol"), watched.toBuffer()],
+    [Buffer.from("protocol"), watched.toBuffer(), provider.wallet.publicKey.toBuffer()],
     program.programId
   );
 
@@ -38,15 +41,16 @@ async function main() {
   if (existing) {
     console.log(`protocol already registered at ${protocol.toBase58()}`);
   } else {
+    const hasProgramDataHere = !!(await provider.connection.getAccountInfo(programData));
     const sig = await program.methods
       .register(watched, alertUrl, 200)
       .accountsPartial({
         payer: provider.wallet.publicKey,
         authority: provider.wallet.publicKey,
-        programData,
+        programData: hasProgramDataHere ? programData : null,
       })
       .rpc();
-    console.log(`registered ${watched.toBase58()} as ${protocol.toBase58()} in ${sig}`);
+    console.log(`registered ${watched.toBase58()} as ${protocol.toBase58()} (${hasProgramDataHere ? "proven here" : "unproven here; verified by the engine on the cluster it lives on"}) in ${sig}`);
   }
 
   for (const dep of deps) {

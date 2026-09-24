@@ -45,6 +45,10 @@ pub struct RegistryProtocol {
     pub corpus_size: u16,
     /// How many `Dependency` accounts point at this protocol.
     pub dependency_count: u8,
+    /// Whether `register` checked the upgrade authority on the registry's
+    /// own cluster. A program that lives elsewhere registers unproven and
+    /// the engine verifies it on the cluster it lives on (`verified`).
+    pub proven: bool,
     /// Set by the engine: whether `authority` is the upgrade authority of
     /// `program_id` on the cluster the checks run on. `None` until checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -298,7 +302,10 @@ fn read_u64(data: &[u8], at: usize) -> Option<u64> {
 }
 
 /// `Protocol` layout: discriminator, authority, program_id, alert_url
-/// (u32 length + bytes), corpus_size u16, dependency_count u8, bump u8.
+/// (u32 length + bytes), corpus_size u16, dependency_count u8, proven bool,
+/// bump u8. Entries from the first program version, which had no `proven`
+/// byte, are one byte shorter and are skipped: their address no longer
+/// matches the program's seeds, so nothing can edit or close them.
 fn parse_protocol(address: &str, data: &[u8]) -> Option<RegistryProtocol> {
     let authority = read_address(data, 8)?;
     let program_id = read_address(data, 40)?;
@@ -307,6 +314,11 @@ fn parse_protocol(address: &str, data: &[u8]) -> Option<RegistryProtocol> {
     let rest = 76 + len;
     let corpus_size = u16::from_le_bytes(data.get(rest..rest + 2)?.try_into().ok()?);
     let dependency_count = *data.get(rest + 2)?;
+    // corpus_size, dependency_count, proven, bump: exactly five bytes remain.
+    if data.len() != rest + 5 {
+        return None;
+    }
+    let proven = *data.get(rest + 3)? != 0;
     Some(RegistryProtocol {
         address: address.to_string(),
         authority,
@@ -314,6 +326,7 @@ fn parse_protocol(address: &str, data: &[u8]) -> Option<RegistryProtocol> {
         alert_url,
         corpus_size,
         dependency_count,
+        proven,
         verified: None,
         cluster: None,
     })
@@ -748,8 +761,14 @@ mod tests {
         data.extend_from_slice(url);
         data.extend_from_slice(&200u16.to_le_bytes());
         data.push(3); // dependency_count
+        data.push(1); // proven
         data.push(254); // bump
         let p = parse_protocol("addr", &data).unwrap();
+        assert!(p.proven);
+        // The first program version had no `proven` byte; such entries are skipped.
+        let mut old = data.clone();
+        old.remove(old.len() - 2);
+        assert!(parse_protocol("addr", &old).is_none());
         assert_eq!(p.authority, Address::from([1u8; 32]).to_string());
         assert_eq!(p.program_id, Address::from([2u8; 32]).to_string());
         assert_eq!(p.alert_url, "https://x.test/hook");

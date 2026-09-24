@@ -29,7 +29,7 @@ describe("dependency_registry", () => {
     BPF_LOADER_UPGRADEABLE
   );
   const [protocol] = PublicKey.findProgramAddressSync(
-    [Buffer.from("protocol"), watchedProgram.toBuffer()],
+    [Buffer.from("protocol"), watchedProgram.toBuffer(), authority.publicKey.toBuffer()],
     program.programId
   );
   const depA = Keypair.generate().publicKey;
@@ -118,6 +118,57 @@ describe("dependency_registry", () => {
     assert.equal(p.alertUrl, "https://example.com/alert");
     assert.equal(p.corpusSize, 200);
     assert.equal(p.dependencyCount, 0);
+    assert.equal(p.proven, true);
+  });
+
+  it("registers a program that lives elsewhere without proof, as unproven", async () => {
+    // A mainnet-only program has no program data here; the engine verifies it
+    // on mainnet instead. The entry is its own PDA, keyed by the authority.
+    const elsewhere = Keypair.generate().publicKey;
+    const [entry] = PublicKey.findProgramAddressSync(
+      [Buffer.from("protocol"), elsewhere.toBuffer(), stranger.publicKey.toBuffer()],
+      program.programId
+    );
+    await program.methods
+      .register(elsewhere, "https://example.com/elsewhere", 50)
+      .accountsPartial({
+        payer: stranger.publicKey,
+        authority: stranger.publicKey,
+        programData: null,
+      })
+      .signers([stranger])
+      .rpc();
+    const p = await program.account.protocol.fetch(entry);
+    assert.equal(p.proven, false);
+    assert.ok(p.authority.equals(stranger.publicKey));
+
+    // Someone else registering the same program gets their own entry rather
+    // than being blocked by the first one.
+    const [second] = PublicKey.findProgramAddressSync(
+      [Buffer.from("protocol"), elsewhere.toBuffer(), authority.publicKey.toBuffer()],
+      program.programId
+    );
+    await program.methods
+      .register(elsewhere, "https://example.com/other", 50)
+      .accountsPartial({
+        payer: authority.publicKey,
+        authority: authority.publicKey,
+        programData: null,
+      })
+      .rpc();
+    assert.ok((await program.account.protocol.fetch(second)).authority.equals(authority.publicKey));
+
+    // Clean up the unproven entries: unregister closes an entry with no dependencies.
+    await program.methods
+      .unregister()
+      .accountsPartial({ authority: stranger.publicKey, protocol: entry })
+      .signers([stranger])
+      .rpc();
+    assert.isNull(await provider.connection.getAccountInfo(entry));
+    await program.methods
+      .unregister()
+      .accountsPartial({ authority: authority.publicKey, protocol: second })
+      .rpc();
   });
 
   it("rejects an alert url over 128 bytes", async () => {
@@ -217,39 +268,40 @@ describe("dependency_registry", () => {
     );
   });
 
-  it("transfers authority, after which the old authority is refused", async () => {
-    await program.methods
-      .transferAuthority()
-      .accounts({
-        authority: authority.publicKey,
-        newAuthority: stranger.publicKey,
-        protocol,
-      })
-      .rpc();
-    const p = await program.account.protocol.fetch(protocol);
-    assert.ok(p.authority.equals(stranger.publicKey));
-
+  it("refuses to unregister while dependencies remain, then unregisters", async () => {
     await expectError(
       program.methods
-        .setAlerts(true)
-        .accounts({
-          authority: authority.publicKey,
-          protocol,
-          dependency: dependencyPda(depB),
-        })
+        .unregister()
+        .accountsPartial({ authority: authority.publicKey, protocol })
+        .rpc(),
+      "HasDependencies"
+    );
+    await program.methods
+      .removeDependency()
+      .accounts({ authority: authority.publicKey, protocol, dependency: dependencyPda(depB) })
+      .rpc();
+    const before = await provider.connection.getBalance(authority.publicKey);
+    await program.methods
+      .unregister()
+      .accountsPartial({ authority: authority.publicKey, protocol })
+      .rpc();
+    assert.isAbove(await provider.connection.getBalance(authority.publicKey), before);
+    assert.isNull(await provider.connection.getAccountInfo(protocol));
+  });
+
+  it("refuses unregister from a non-authority signer", async () => {
+    // Re-register, then let the stranger try to close it.
+    await program.methods
+      .register(watchedProgram, "https://example.com/alert", 200)
+      .accounts({ payer: authority.publicKey, authority: authority.publicKey, programData })
+      .rpc();
+    await expectError(
+      program.methods
+        .unregister()
+        .accountsPartial({ authority: stranger.publicKey, protocol })
+        .signers([stranger])
         .rpc(),
       "Unauthorized"
     );
-
-    // and the new authority works
-    await program.methods
-      .setAlerts(true)
-      .accounts({
-        authority: stranger.publicKey,
-        protocol,
-        dependency: dependencyPda(depB),
-      })
-      .signers([stranger])
-      .rpc();
   });
 });
