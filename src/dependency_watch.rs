@@ -605,13 +605,38 @@ impl Scope {
         // enough transactions that reach the dependency have been found or
         // the walk has looked far enough: a busy router calls any one venue
         // in a small share of its transactions.
-        let qualifies = |signature: &str| -> bool {
-            fetch(signature)
-                .map(|tx| {
-                    invokes_program(&tx, program_id)
-                        && (dependency == program_id || invokes_program(&tx, dependency))
-                })
-                .unwrap_or(false)
+        let qualifies = |tx: &serde_json::Value| -> bool {
+            invokes_program(tx, program_id)
+                && (dependency == program_id || invokes_program(tx, dependency))
+        };
+        // A page of transactions is one batched request; a batch the endpoint
+        // refuses falls back to one fetch per transaction, with retries.
+        let fetch_page = |signatures: &[String]| -> Vec<Option<serde_json::Value>> {
+            let mut out: Vec<Option<serde_json::Value>> = Vec::with_capacity(signatures.len());
+            for chunk in signatures.chunks(25) {
+                let calls: Vec<serde_json::Value> = chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(i, sig)| {
+                        json!({ "jsonrpc": "2.0", "id": i as u64, "method": "getTransaction",
+                                "params": [sig, { "encoding": "json", "commitment": "confirmed", "maxSupportedTransactionVersion": 1 }] })
+                    })
+                    .collect();
+                match self.rpc_batch(&calls) {
+                    Some(answers) if answers.iter().any(|a| !a["result"].is_null()) => {
+                        out.extend(answers.into_iter().map(|a| {
+                            let tx = a["result"].clone();
+                            if tx.is_null() {
+                                None
+                            } else {
+                                Some(tx)
+                            }
+                        }));
+                    }
+                    _ => out.extend(chunk.iter().map(|sig| fetch(sig))),
+                }
+            }
+            out
         };
         let mut recent: Vec<crate::SigInfo> = Vec::new();
         let mut cursor: Option<String> = None;
@@ -638,11 +663,13 @@ impl Scope {
             }
             looked += batch.len();
             cursor = batch.last().map(|s| s.signature.clone());
-            for s in batch {
+            let signatures: Vec<String> = batch.iter().map(|s| s.signature.clone()).collect();
+            let fetched = fetch_page(&signatures);
+            for (s, tx) in batch.into_iter().zip(fetched) {
                 if recent.len() >= wanted.saturating_mul(2) {
                     break;
                 }
-                if qualifies(&s.signature) {
+                if tx.as_ref().is_some_and(qualifies) {
                     recent.push(s);
                 }
             }

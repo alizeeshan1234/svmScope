@@ -280,7 +280,7 @@ impl Scope {
     }
 
     /// A batch of JSON-RPC calls in one HTTP request, answered in id order.
-    fn rpc_batch(&self, calls: &[serde_json::Value]) -> Option<Vec<serde_json::Value>> {
+    pub(crate) fn rpc_batch(&self, calls: &[serde_json::Value]) -> Option<Vec<serde_json::Value>> {
         let http = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
