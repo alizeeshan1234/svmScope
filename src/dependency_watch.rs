@@ -312,6 +312,13 @@ fn read_u64(data: &[u8], at: usize) -> Option<u64> {
         .map(u64::from_le_bytes)
 }
 
+/// Allocated size of a `Protocol` account: discriminator, two keys, the URL
+/// at its 128-byte limit plus length prefix, corpus_size, dependency_count,
+/// proven, bump.
+const PROTOCOL_LEN: usize = 8 + 32 + 32 + 4 + 128 + 2 + 1 + 1 + 1;
+/// The first program version had no `proven` byte.
+const PROTOCOL_V1_LEN: usize = PROTOCOL_LEN - 1;
+
 /// `Protocol` layout: discriminator, authority, program_id, alert_url
 /// (u32 length + bytes), corpus_size u16, dependency_count u8, proven bool,
 /// bump u8. Entries from the first program version, which had no `proven`
@@ -325,8 +332,10 @@ fn parse_protocol(address: &str, data: &[u8]) -> Option<RegistryProtocol> {
     let rest = 76 + len;
     let corpus_size = u16::from_le_bytes(data.get(rest..rest + 2)?.try_into().ok()?);
     let dependency_count = *data.get(rest + 2)?;
-    // corpus_size, dependency_count, proven, bump: exactly five bytes remain.
-    if data.len() != rest + 5 {
+    // Accounts are allocated at their maximum size (the URL field is padded
+    // to its limit), so the layout is told by the total length: the first
+    // program version's accounts are one byte shorter than the current ones.
+    if data.len() == PROTOCOL_V1_LEN {
         return None;
     }
     let proven = *data.get(rest + 3)? != 0;
@@ -774,11 +783,16 @@ mod tests {
         data.push(3); // dependency_count
         data.push(1); // proven
         data.push(254); // bump
+                        // Borsh writes the fields right after the URL's actual bytes; the
+                        // account is allocated for a 128-byte URL, so the rest is padding.
+        data.resize(PROTOCOL_LEN, 0);
         let p = parse_protocol("addr", &data).unwrap();
         assert!(p.proven);
-        // The first program version had no `proven` byte; such entries are skipped.
+        // The first program version had no `proven` byte and one byte less
+        // of allocation; such entries are skipped.
         let mut old = data.clone();
-        old.remove(old.len() - 2);
+        old.remove(76 + "https://x.test/hook".len() + 3);
+        assert_eq!(old.len(), PROTOCOL_V1_LEN);
         assert!(parse_protocol("addr", &old).is_none());
         assert_eq!(p.authority, Address::from([1u8; 32]).to_string());
         assert_eq!(p.program_id, Address::from([2u8; 32]).to_string());
