@@ -5219,7 +5219,7 @@ function renderReport(r) {
     const err = t.error ? `<div class="post-bal">${esc(t.error)}</div>` : '';
     return `<tr><td><a href="/tx/${encodeURIComponent(t.signature)}" data-sig="${esc(t.signature)}" class="mono">${short(t.signature)}</a>${err}</td><td>${t.slot ?? ''}</td><td>${t.onchain_success ? 'ok' : 'failed'}</td><td>${before}</td><td>${after}</td><td>${delta}</td><td>${flag}</td></tr>`;
   }).join('');
-  return `<div class="empty">baseline: ${base}${dep} · ${esc(r.verdict || '')}</div>${note}` +
+  return `<div class="empty">baseline: ${base}${dep}</div><div class="empty">${esc(r.verdict || '')} · ${summaryLine(r.summary)}</div>${note}` +
     `<div style="overflow-x:auto"><table class="fields"><thead><tr><th>transaction</th><th>slot</th><th>on chain</th><th>before</th><th>after</th><th>compute</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="7" class="empty">no transactions</td></tr>'}</tbody></table></div>`;
 }
 async function loadWatch() {

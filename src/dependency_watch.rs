@@ -236,7 +236,8 @@ impl DependencyReport {
                 s.total
             );
         }
-        if s.newly_failing == 0 && s.error_changed == 0 {
+        let checked = s.total - s.errored;
+        let mut verdict = if s.newly_failing == 0 && s.error_changed == 0 {
             format!(
                 "{} of {} unchanged; nothing newly fails",
                 s.unchanged, s.total
@@ -246,7 +247,17 @@ impl DependencyReport {
                 "{} newly failing, {} changed error, {} unchanged of {}",
                 s.newly_failing, s.error_changed, s.unchanged, s.total
             )
+        };
+        // A baseline that disagrees with the chain means the state the
+        // transactions ran on has drifted; before and after are still
+        // comparable to each other, but neither describes what happened.
+        let drifted = checked.saturating_sub(s.baseline_matches_chain);
+        if checked > 0 && drifted * 2 >= checked {
+            verdict.push_str(&format!(
+                "; baseline disagrees with the chain for {drifted} of {checked}, so current state has drifted from when they ran"
+            ));
         }
+        verdict
     }
 }
 
@@ -824,6 +835,7 @@ mod tests {
             summary: ReportSummary {
                 total: 10,
                 unchanged: 10,
+                baseline_matches_chain: 10,
                 ..Default::default()
             },
             transactions: vec![],
