@@ -1055,6 +1055,7 @@ input.derived { border-color: var(--green-border); color: var(--green); }
         <button class="navtab" id="navSim"><svg class="ic" aria-hidden="true"><use href="#i-bolt"/></svg>Simulate</button>
         <button class="navtab" id="navDebug"><svg class="ic" aria-hidden="true"><use href="#i-bug"/></svg>Debugger</button>
         <button class="navtab" id="navProfile" title="Where the compute went: a flamegraph of every instruction the transaction executed"><svg class="ic" aria-hidden="true"><use href="#i-flame"/></svg>Profile</button>
+        <button class="navtab" id="navWatch" title="When a program you depend on is upgraded, your recent transactions are replayed against the new binary"><svg class="ic" aria-hidden="true"><use href="#i-eye"/></svg>Watch</button>
       </nav>
       <div class="search">
         <select id="cluster" class="cluster" title="Cluster / RPC">
@@ -1426,6 +1427,43 @@ input.derived { border-color: var(--green-border); color: var(--green); }
         <button class="btn ghost sm" id="profBack"><svg class="ic" aria-hidden="true"><use href="#i-arrow-left"/></svg>Back</button>
       </div>
       <div class="card"><h2 style="margin-top:0">Where the compute went</h2><div id="profView"></div></div>
+    </div>
+  </section>
+
+  <!-- Dependency watch: the on-chain registry, checks on demand, and the reports the watcher produced -->
+  <section id="watch" class="hidden">
+    <div class="dbg-landing" id="watchLanding">
+      <h1>Know before your users do</h1>
+      <p>Your program calls programs you do not control. When one of them is upgraded, svmscope replays your recent mainnet transactions against the new binary and tells you what broke: which transactions now fail, which errors are new, where the compute moved. Register your program in the on-chain registry with the programs it depends on, and the report arrives at your alert URL.</p>
+      <div class="dbg-err hidden" id="watchErr"></div>
+    </div>
+    <div class="grid" id="watchMain">
+      <div class="card full">
+        <h2>Run a check now <span class="count" id="watchCheckState"></span></h2>
+        <p class="whatif-lead">Replay a program's recent transactions with a dependency's current binary swapped in. If the watcher holds the dependency's previous binary, that is the baseline; otherwise the report can only say the transactions still execute.</p>
+        <div class="row" style="flex-wrap:wrap;gap:8px">
+          <input id="watchProgram" placeholder="your program id" spellcheck="false" autocomplete="off" style="flex:2;min-width:220px" />
+          <input id="watchDependency" placeholder="dependency program id" spellcheck="false" autocomplete="off" style="flex:2;min-width:220px" />
+          <input id="watchLimit" type="number" min="1" max="50" value="10" title="transactions to replay" style="width:80px" />
+          <button class="btn" id="watchRun">Check<svg class="ic" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
+        </div>
+        <div class="dbg-progress hidden" id="watchProgress"><span class="spinner"></span><span id="watchProgressText">replaying…</span></div>
+        <div id="watchResult"></div>
+      </div>
+      <div class="card">
+        <h2>Registry <span class="count" id="watchRegCount"></span></h2>
+        <p class="whatif-lead">Protocols registered on devnet and the programs they watch. Register yours with the <code>dependency_registry</code> program in the repo: the signer must hold your program's upgrade authority.</p>
+        <div id="watchRegistry" class="rows"><div class="empty">loading…</div></div>
+      </div>
+      <div class="card">
+        <h2>Watcher <span class="count" id="watchStatusCount"></span></h2>
+        <div id="watchStatus" class="rows"><div class="empty">loading…</div></div>
+      </div>
+      <div class="card full">
+        <h2>Reports <span class="count" id="watchRepCount"></span></h2>
+        <p class="whatif-lead">Every redeploy the watcher caught, the check it ran, and whether the alert was delivered.</p>
+        <div id="watchReports" class="rows"><div class="empty">loading…</div></div>
+      </div>
     </div>
   </section>
   </main>
@@ -3132,7 +3170,7 @@ function runInput() {
 // transactions to pick from.
 async function showAddress(address) {
   hideAllViews();
-  ['navSim', 'navDebug', 'navProfile'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on');
+  ['navSim', 'navDebug', 'navProfile', 'navWatch'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on'); $('watch').classList.add('hidden');
   $('go').disabled = true;
   $('out').classList.add('hidden'); $('hero').classList.add('hidden'); $('txlist').classList.add('hidden');
   const st = $('status'); st.className = 'status'; st.classList.remove('hidden');
@@ -3229,7 +3267,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function analyze() {
   hideAllViews();
-  ['navSim', 'navDebug', 'navProfile'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on');
+  ['navSim', 'navDebug', 'navProfile', 'navWatch'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on'); $('watch').classList.add('hidden');
   const sig = $('sig').value.trim(); if (!sig) return;
   currentSig = sig; mutations = []; onchainAnalysis = null;
   $('go').disabled = true; $('txlist').classList.add('hidden'); $('out').classList.add('hidden'); $('hero').classList.add('hidden');
@@ -3400,8 +3438,8 @@ function bs58encode(bytes) {
 }
 
 function showSim(on) {
-  $('debug').classList.add('hidden'); $('profile').classList.add('hidden');
-  $('navDebug').classList.remove('on'); $('navProfile').classList.remove('on');
+  $('debug').classList.add('hidden'); $('profile').classList.add('hidden'); $('watch').classList.add('hidden');
+  $('navDebug').classList.remove('on'); $('navProfile').classList.remove('on'); $('navWatch').classList.remove('on');
   $('sim').classList.toggle('hidden', !on);
   // Keep whatever analysis is on screen when leaving Simulate, so switching tabs
   // doesn't throw away the user's work.
@@ -4366,11 +4404,11 @@ function showDbgLanding() {
   $('debug').classList.remove('hidden');
   $('dbgLanding').classList.remove('hidden');
   $('dbgMain').classList.add('hidden');
-  $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on'); $('navProfile').classList.remove('on');
+  $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on'); $('navProfile').classList.remove('on'); $('navWatch').classList.remove('on');
   $('dbgInput').focus();
 }
 $('navDebug').addEventListener('click', () => {
-  if (trace && dbgSigCur) { hideAllViews(); $('debug').classList.remove('hidden'); $('dbgLanding').classList.add('hidden'); $('dbgMain').classList.remove('hidden'); $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on'); $('navProfile').classList.remove('on'); history.pushState({ debug: dbgSigCur }, '', '/debug/' + encodeURIComponent(dbgSigCur) + location.search); }
+  if (trace && dbgSigCur) { hideAllViews(); $('debug').classList.remove('hidden'); $('dbgLanding').classList.add('hidden'); $('dbgMain').classList.remove('hidden'); $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on'); $('navProfile').classList.remove('on'); $('navWatch').classList.remove('on'); history.pushState({ debug: dbgSigCur }, '', '/debug/' + encodeURIComponent(dbgSigCur) + location.search); }
   else showDbgLanding();
 });
 $('dbgGo').addEventListener('click', () => {
@@ -4488,7 +4526,7 @@ $('dbgReset').addEventListener('click', () => {
 });
 
 function hideAllViews() {
-  ['hero', 'status', 'txlist', 'out', 'sim', 'debug', 'profile'].forEach(id => $(id).classList.add('hidden'));
+  ['hero', 'status', 'txlist', 'out', 'sim', 'debug', 'profile', 'watch'].forEach(id => $(id).classList.add('hidden'));
 }
 
 async function showDebug(sig, push) {
@@ -4500,7 +4538,7 @@ async function showDebug(sig, push) {
   $('debug').classList.remove('hidden');
   $('dbgLanding').classList.remove('hidden');
   $('dbgMain').classList.add('hidden');
-  $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on'); $('navProfile').classList.remove('on');
+  $('navDebug').classList.add('on'); $('navAnalyze').classList.remove('on'); $('navSim').classList.remove('on'); $('navProfile').classList.remove('on'); $('navWatch').classList.remove('on');
   $('dbgInput').value = sig; $('sig').value = sig;
   $('dbgErr').classList.add('hidden');
   $('dbgProgress').classList.remove('hidden');
@@ -4915,6 +4953,7 @@ document.addEventListener('keydown', e => {
 window.addEventListener('popstate', e => {
   if (e.state && e.state.debug) showDebug(e.state.debug, false);
   else if (e.state && e.state.flame) showProfile(e.state.flame, false);
+  else if (e.state && e.state.watch) showWatch(false);
   else if (e.state && e.state.tx) {
     if (analysis && currentSig === e.state.tx) { hideAllViews(); $('out').classList.remove('hidden'); $('navAnalyze').classList.add('on'); }
     else { $('sig').value = e.state.tx; analyze(); }
@@ -4926,7 +4965,7 @@ window.addEventListener('popstate', e => {
     // Back past the first analysis: the landing, with the analysis kept in
     // memory so Forward is instant.
     hideAllViews(); $('hero').classList.remove('hidden');
-    ['navSim', 'navDebug', 'navProfile'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on');
+    ['navSim', 'navDebug', 'navProfile', 'navWatch'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on'); $('watch').classList.add('hidden');
   }
 });
 // ---------------- compute profiler ----------------
@@ -5101,7 +5140,7 @@ function showProfLanding() {
   $('profile').classList.remove('hidden');
   $('profLanding').classList.remove('hidden');
   $('profMain').classList.add('hidden');
-  ['navDebug', 'navAnalyze', 'navSim'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on');
+  ['navDebug', 'navAnalyze', 'navSim', 'navWatch'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on');
   $('profInput').focus();
 }
 async function showProfile(sig, push) {
@@ -5110,7 +5149,7 @@ async function showProfile(sig, push) {
   $('profile').classList.remove('hidden');
   $('profLanding').classList.remove('hidden');
   $('profMain').classList.add('hidden');
-  ['navDebug', 'navAnalyze', 'navSim'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on');
+  ['navDebug', 'navAnalyze', 'navSim', 'navWatch'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on');
   $('profInput').value = sig; $('sig').value = sig;
   $('profErr').classList.add('hidden');
   $('profProgress').classList.remove('hidden');
@@ -5147,8 +5186,106 @@ async function showProfile(sig, push) {
   renderProfile();
   window.scrollTo(0, 0);
 }
+// ---- Dependency watch ----------------------------------------------------
+function showWatch(push) {
+  hideAllViews(); $('watch').classList.remove('hidden');
+  ['navDebug', 'navAnalyze', 'navSim', 'navProfile'].forEach(id => $(id).classList.remove('on')); $('navWatch').classList.add('on');
+  if (push !== false) history.pushState({ watch: true }, '', '/watch' + location.search);
+  loadWatch();
+}
+const fmtTs = (t) => t ? new Date(t * 1000).toLocaleString() : '—';
+const okBad = (ok, label) => `<span class="amt ${ok ? 'pos' : 'neg'}">${label}</span>`;
+function summaryLine(sm) {
+  const bits = [`${sm.total} checked`];
+  if (sm.newly_failing) bits.push(`<span class="amt neg">${sm.newly_failing} newly failing</span>`);
+  if (sm.error_changed) bits.push(`<span class="amt neg">${sm.error_changed} changed error</span>`);
+  if (sm.newly_passing) bits.push(`${sm.newly_passing} newly passing`);
+  bits.push(`${sm.unchanged} unchanged`);
+  if (sm.errored) bits.push(`${sm.errored} could not replay`);
+  bits.push(`baseline matched chain ${sm.baseline_matches_chain}/${sm.total - sm.errored}`);
+  if (sm.compute_delta_total) bits.push(`compute ${sm.compute_delta_total > 0 ? '+' : ''}${sm.compute_delta_total} CU`);
+  return bits.join(' · ');
+}
+function renderReport(r) {
+  const base = r.baseline === 'previous' ? 'previous binary' : r.baseline === 'at_slot' ? 'binary at each slot' : 'current binary on both sides';
+  const dep = r.dependency_deploy ? ` · deployed at slot ${r.dependency_deploy.last_deploy_slot}` : '';
+  const note = r.corpus_note ? `<div class="empty">${esc(r.corpus_note)}</div>` : '';
+  const rows = r.transactions.map(t => {
+    const before = t.error ? '<span class="amt neg">replay failed</span>' : okBad(t.before.success, t.before.success ? 'ok' : esc(t.before.error_name || t.before.error || 'fails'));
+    const after = t.error ? '' : okBad(t.after.success, t.after.success ? 'ok' : esc(t.after.error_name || t.after.error || 'fails'));
+    const delta = t.error ? '' : (t.compute_delta ? `${t.compute_delta > 0 ? '+' : ''}${t.compute_delta} CU` : '');
+    const flag = t.changed ? '<span class="amt neg">changed</span>' : '';
+    const err = t.error ? `<div class="post-bal">${esc(t.error)}</div>` : '';
+    return `<tr><td><a href="/tx/${encodeURIComponent(t.signature)}" data-sig="${esc(t.signature)}" class="mono">${short(t.signature)}</a>${err}</td><td>${t.slot ?? ''}</td><td>${t.onchain_success ? 'ok' : 'failed'}</td><td>${before}</td><td>${after}</td><td>${delta}</td><td>${flag}</td></tr>`;
+  }).join('');
+  return `<div class="empty">baseline: ${base}${dep} · ${esc(r.verdict || '')}</div>${note}` +
+    `<div style="overflow-x:auto"><table class="fields"><thead><tr><th>transaction</th><th>slot</th><th>on chain</th><th>before</th><th>after</th><th>compute</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="7" class="empty">no transactions</td></tr>'}</tbody></table></div>`;
+}
+async function loadWatch() {
+  const reg = api('/registry').then(r => r.json()).catch(() => null);
+  const st = api('/dependency_watch').then(r => r.json()).catch(() => null);
+  const reps = api('/dependency_reports').then(r => r.json()).catch(() => []);
+  const [registry, status, reports] = await Promise.all([reg, st, reps]);
+  if (registry) {
+    $('watchRegCount').textContent = `${registry.protocols.length} protocol${registry.protocols.length === 1 ? '' : 's'}`;
+    $('watchRegistry').innerHTML = registry.protocols.length ? registry.protocols.map(p => {
+      const deps = registry.dependencies.filter(d => d.protocol === p.address);
+      const depRows = deps.map(d => `<div class="row"><div class="grow">${copyPill(d.program_id)}</div><div class="amt-col"><span class="${d.alerts_enabled ? '' : 'empty'}">${d.alerts_enabled ? 'alerts on' : 'alerts off'}</span></div></div>`).join('') || '<div class="empty">no dependencies yet</div>';
+      return `<div class="row" style="flex-direction:column;align-items:stretch"><div class="row"><div class="grow">${copyPill(p.program_id)}</div><div class="amt-col"><span class="empty">corpus ${p.corpus_size}</span></div></div><div style="padding-left:14px">${depRows}<div class="empty">alerts → ${esc(p.alert_url || '—')}</div></div></div>`;
+    }).join('') : '<div class="empty">nothing registered yet</div>';
+    const first = registry.protocols[0], firstDep = registry.dependencies[0];
+    if (first && !$('watchProgram').value) $('watchProgram').value = first.program_id;
+    if (firstDep && !$('watchDependency').value) $('watchDependency').value = firstDep.program_id;
+  } else {
+    $('watchRegistry').innerHTML = '<div class="empty">could not read the registry</div>';
+  }
+  if (status) {
+    const held = Object.entries(status.watched || {});
+    $('watchStatusCount').textContent = status.enabled ? 'running' : 'off';
+    $('watchStatus').innerHTML =
+      `<div class="row"><div class="grow">registry</div><div class="amt-col">${copyPill(status.registry)}</div></div>` +
+      `<div class="row"><div class="grow">cluster</div><div class="amt-col"><span class="mono">${esc(status.rpc)}</span></div></div>` +
+      `<div class="row"><div class="grow">last poll</div><div class="amt-col">${fmtTs(status.last_poll_at)} · every ${status.interval_secs}s</div></div>` +
+      `<div class="row"><div class="grow">reporter</div><div class="amt-col">${status.reporter ? copyPill(status.reporter) : '<span class="empty">unsigned</span>'}</div></div>` +
+      (status.last_error ? `<div class="row"><div class="grow amt neg">${esc(status.last_error)}</div></div>` : '') +
+      `<div class="empty">binaries held for ${held.length} dependenc${held.length === 1 ? 'y' : 'ies'}</div>` +
+      held.map(([k, v]) => `<div class="row"><div class="grow">${copyPill(k)}</div><div class="amt-col"><span class="empty">deploy slot ${v}</span></div></div>`).join('');
+  }
+  $('watchRepCount').textContent = reports.length ? String(reports.length) : '';
+  $('watchReports').innerHTML = reports.length ? reports.map(r =>
+    `<div class="row" style="flex-direction:column;align-items:stretch;cursor:pointer" data-report="${r.id}">` +
+    `<div class="row"><div class="grow">${short(r.program_id)} · dependency ${short(r.dependency)} redeployed</div><div class="amt-col">${fmtTs(r.generated_at)}</div></div>` +
+    `<div class="empty">${esc(r.verdict)} · ${summaryLine(r.summary)} · alert: ${esc(r.delivery)}</div><div class="rep-body"></div></div>`
+  ).join('') : '<div class="empty">no redeploys caught yet</div>';
+  $('watchReports').querySelectorAll('[data-report]').forEach(el => el.addEventListener('click', async (e) => {
+    if (e.target.closest('a')) return;
+    const body = el.querySelector('.rep-body');
+    if (body.innerHTML) { body.innerHTML = ''; return; }
+    body.innerHTML = '<div class="empty">loading…</div>';
+    try { const d = await api('/dependency_reports/' + el.dataset.report).then(r => r.json()); body.innerHTML = renderReport(d.report); }
+    catch (err) { body.innerHTML = `<div class="empty">${esc(err.message || err)}</div>`; }
+  }));
+}
+$('navWatch').addEventListener('click', () => showWatch());
+$('watchRun').addEventListener('click', async () => {
+  const program = $('watchProgram').value.trim(), dependency = $('watchDependency').value.trim();
+  const limit = Math.max(1, Math.min(50, parseInt($('watchLimit').value, 10) || 10));
+  if (!program || !dependency) return;
+  $('watchProgress').classList.remove('hidden'); $('watchResult').innerHTML = ''; $('watchCheckState').textContent = '';
+  const t0 = Date.now();
+  try {
+    const res = await api(`/dependency_check/${encodeURIComponent(program)}?dependency=${encodeURIComponent(dependency)}&limit=${limit}`);
+    if (!res.ok) throw new Error(await res.text());
+    const rep = await res.json();
+    $('watchCheckState').textContent = `${((Date.now() - t0) / 1000).toFixed(1)}s`;
+    $('watchResult').innerHTML = renderReport(rep);
+  } catch (err) {
+    $('watchResult').innerHTML = `<div class="dbg-err">${esc(err.message || err)}</div>`;
+  } finally { $('watchProgress').classList.add('hidden'); }
+});
+
 $('navProfile').addEventListener('click', () => {
-  if (prof && profSigCur && profContainer === 'profView') { hideAllViews(); $('profile').classList.remove('hidden'); $('profLanding').classList.add('hidden'); $('profMain').classList.remove('hidden'); ['navDebug', 'navAnalyze', 'navSim'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on'); history.pushState({ flame: profSigCur }, '', '/flame/' + encodeURIComponent(profSigCur) + location.search); }
+  if (prof && profSigCur && profContainer === 'profView') { hideAllViews(); $('profile').classList.remove('hidden'); $('profLanding').classList.add('hidden'); $('profMain').classList.remove('hidden'); ['navDebug', 'navAnalyze', 'navSim', 'navWatch'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on'); history.pushState({ flame: profSigCur }, '', '/flame/' + encodeURIComponent(profSigCur) + location.search); }
   else showProfLanding();
 });
 $('profStart').addEventListener('click', () => {
@@ -5190,6 +5327,7 @@ if (location.pathname.startsWith('/debug/')) {
   const sig = decodeURIComponent(location.pathname.slice('/debug/'.length)).replace(/\/$/, '');
   if (sig) { $('sig').value = sig; showDebug(sig, false); }
 }
+if (location.pathname === '/watch' || location.pathname === '/watch/') showWatch(false);
 
 // "/" focuses whichever search is on screen.
 document.addEventListener('keydown', e => {

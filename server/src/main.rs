@@ -2,6 +2,7 @@
 //!
 //! Run with `cargo run --bin server`, then open http://127.0.0.1:3000.
 
+mod depwatch;
 mod guard;
 mod relay;
 mod stats;
@@ -2607,6 +2608,11 @@ async fn api_index() -> Json<serde_json::Value> {
             "GET  /diagnose/{signature}": "A failure explained: error name, docs, the step and accounts involved.",
             "GET  /account/{address}":    "An account decoded through its program's layout or IDL.",
             "GET  /signatures/{address}": "Recent signatures for an address.",
+            "GET  /registry":               "?registry= — every protocol and dependency in the on-chain dependency registry (devnet).",
+            "GET  /dependency_check/{program}": "?dependency=&limit=&baseline=previous|at_slot|current — replay the program's recent transactions against the dependency's current binary and report what changed.",
+            "GET  /dependency_watch":       "The watcher: registry, last poll, dependencies whose binary it holds.",
+            "GET  /dependency_reports":     "Reports the watcher produced on redeploys, newest first; /dependency_reports/{id} for one in full.",
+            "POST /alerts/test":            "A sink for alert_url while trying the feature; GET lists what it received.",
             "GET  /instructions/{program}": "The instructions a program's on-chain IDL declares.",
             "POST /idl_instructions":     "{ idl } — the same, for an IDL supplied in the request.",
             "POST /decode_account":       "{ owner, data_b64 } — decode raw account bytes.",
@@ -2811,6 +2817,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[tokio::main]
 async fn main() {
     spawn_recorder();
+    depwatch::spawn();
     // Restore any persisted usage tally before serving.
     stats::load();
 
@@ -2844,11 +2851,22 @@ async fn main() {
         .route("/tx/{signature}", get(index))
         .route("/address/{address}", get(index))
         .route("/flame/{signature}", get(index))
+        .route("/watch", get(index))
         .route("/instructions/{program}", get(instructions_handler))
         .route("/idl_instructions", post(idl_instructions_handler))
         .route("/decode_account", post(decode_account_handler))
         .route("/account/{address}", get(account_handler))
         .route("/signatures/{address}", get(signatures_handler))
+        // Dependency watch: the on-chain registry plus checks and reports.
+        .route("/registry", get(depwatch::registry_handler))
+        .route("/dependency_check/{program}", get(depwatch::check_handler))
+        .route("/dependency_watch", get(depwatch::status_handler))
+        .route("/dependency_reports", get(depwatch::reports_handler))
+        .route("/dependency_reports/{id}", get(depwatch::report_handler))
+        .route(
+            "/alerts/test",
+            get(depwatch::alert_sink_list).post(depwatch::alert_sink_handler),
+        )
         .route("/replay/{signature}", get(replay_handler))
         .route("/slot_at", get(slot_at_handler))
         .route("/replay_at_slot/{signature}", get(replay_at_slot_handler))

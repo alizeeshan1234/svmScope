@@ -496,6 +496,48 @@ label the certificate counts as drift, along with `SameBlock`, an unproven
 `Absent`, an inexact
 reconstruction or an upgraded program).
 
+## Dependency watch
+
+Your program calls programs you do not control. When one of them is
+upgraded, svmscope replays your recent transactions against the new binary
+and reports what changed: which transactions now fail, which errors are new,
+where the compute moved. The hosted engine shows it under **Watch**.
+
+The on-chain half is `programs/dependency_registry`, an Anchor program on
+devnet at `4nH59dWUJ5rgTZJTybPbfGY1sgBDwKgrKMBXpRtdxhhg`. A protocol registers
+its program (the signer must hold the program's upgrade authority, proven
+through the program data account), lists the programs it depends on, and
+gives a URL to alert:
+
+```
+cd programs/dependency_registry && yarn install
+ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=~/.config/solana/id.json \
+  yarn ts-node scripts/register-devnet.ts <your program id> <alert url> <dependency id>...
+```
+
+The engine half is `svmscope::dependency_watch`. The server's watcher reads
+the registry, keeps the current binary of every watched dependency, and when
+a deploy slot moves it replays each dependent protocol's last `corpus_size`
+transactions twice on the same state, once with the held binary and once
+with the new one, so only the binary change shows. The report goes to the
+alert URL as JSON, signed by the engine's reporter key
+(`x-svmscope-reporter`, `x-svmscope-signature` over the body), and is kept at
+`/dependency_reports/{id}`. `GET /dependency_check/{program}?dependency=…`
+runs a check on demand.
+
+| Variable | Meaning |
+|---|---|
+| `SVMSCOPE_DEPWATCH` | `0` turns the watcher off. |
+| `SVMSCOPE_DEPWATCH_REGISTRY` | The registry program (default: the devnet one above). |
+| `SVMSCOPE_DEPWATCH_RPC` | The cluster the registry and its protocols live on (default: public devnet). |
+| `SVMSCOPE_DEPWATCH_INTERVAL_SECS` | Poll period (default 120). |
+| `SVMSCOPE_DEPWATCH_MAX_CORPUS` | Cap on transactions per check (default 50). |
+| `SVMSCOPE_REPORTER_KEYPAIR` | Keypair that signs alerts: a JSON array, a file path or base58. Without it alerts are unsigned. |
+| `SVMSCOPE_PUBLIC_URL` | This engine's public base URL, used for report links in alerts. |
+
+Anchor 1.0 starts Surfpool for `anchor test`; if it does not start on your
+machine, `anchor test --validator legacy` uses the Solana test validator.
+
 ## Roadmap
 
 - [x] Decode, reconstruct, replay, mutate, time-travel, feature gates

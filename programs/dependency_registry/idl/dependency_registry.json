@@ -1,0 +1,617 @@
+{
+  "address": "4nH59dWUJ5rgTZJTybPbfGY1sgBDwKgrKMBXpRtdxhhg",
+  "metadata": {
+    "name": "dependency_registry",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Created with Anchor"
+  },
+  "instructions": [
+    {
+      "name": "add_dependency",
+      "discriminator": [
+        16,
+        0,
+        180,
+        29,
+        243,
+        47,
+        132,
+        117
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "authority",
+          "signer": true,
+          "relations": [
+            "protocol"
+          ]
+        },
+        {
+          "name": "protocol",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "protocol.program_id",
+                "account": "Protocol"
+              }
+            ]
+          }
+        },
+        {
+          "name": "dependency",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  101,
+                  110,
+                  100,
+                  101,
+                  110,
+                  99,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "protocol"
+              },
+              {
+                "kind": "arg",
+                "path": "dependency_program_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "dependency_program_id",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "register",
+      "discriminator": [
+        211,
+        124,
+        67,
+        15,
+        211,
+        194,
+        178,
+        240
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "program_data"
+        },
+        {
+          "name": "protocol",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "program_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "program_id",
+          "type": "pubkey"
+        },
+        {
+          "name": "alert_url",
+          "type": "string"
+        },
+        {
+          "name": "corpus_size",
+          "type": "u16"
+        }
+      ]
+    },
+    {
+      "name": "remove_dependency",
+      "discriminator": [
+        6,
+        253,
+        46,
+        233,
+        215,
+        136,
+        246,
+        127
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "protocol"
+          ]
+        },
+        {
+          "name": "protocol",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "protocol.program_id",
+                "account": "Protocol"
+              }
+            ]
+          },
+          "relations": [
+            "dependency"
+          ]
+        },
+        {
+          "name": "dependency",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  101,
+                  110,
+                  100,
+                  101,
+                  110,
+                  99,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "protocol"
+              },
+              {
+                "kind": "account",
+                "path": "dependency.program_id",
+                "account": "Dependency"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "set_alerts",
+      "discriminator": [
+        66,
+        151,
+        30,
+        175,
+        126,
+        51,
+        19,
+        241
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true,
+          "relations": [
+            "protocol"
+          ]
+        },
+        {
+          "name": "protocol",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "protocol.program_id",
+                "account": "Protocol"
+              }
+            ]
+          },
+          "relations": [
+            "dependency"
+          ]
+        },
+        {
+          "name": "dependency",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  100,
+                  101,
+                  112,
+                  101,
+                  110,
+                  100,
+                  101,
+                  110,
+                  99,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "protocol"
+              },
+              {
+                "kind": "account",
+                "path": "dependency.program_id",
+                "account": "Dependency"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "alerts_enabled",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "transfer_authority",
+      "discriminator": [
+        48,
+        169,
+        76,
+        72,
+        229,
+        180,
+        55,
+        161
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true,
+          "relations": [
+            "protocol"
+          ]
+        },
+        {
+          "name": "new_authority"
+        },
+        {
+          "name": "protocol",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "protocol.program_id",
+                "account": "Protocol"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "update_protocol",
+      "discriminator": [
+        206,
+        25,
+        218,
+        114,
+        109,
+        41,
+        74,
+        173
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true,
+          "relations": [
+            "protocol"
+          ]
+        },
+        {
+          "name": "protocol",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "protocol.program_id",
+                "account": "Protocol"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "UpdateParameters"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Dependency",
+      "discriminator": [
+        37,
+        204,
+        7,
+        234,
+        85,
+        194,
+        9,
+        47
+      ]
+    },
+    {
+      "name": "Protocol",
+      "discriminator": [
+        45,
+        39,
+        101,
+        43,
+        115,
+        72,
+        131,
+        40
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "Unauthorized",
+      "msg": "Signer is not the protocol authority"
+    },
+    {
+      "code": 6001,
+      "name": "NotUpgradeAuthority",
+      "msg": "Signer is not the upgrade authority of the program being registered"
+    },
+    {
+      "code": 6002,
+      "name": "ProgramDataMismatch",
+      "msg": "The program data account does not belong to the program being registered"
+    },
+    {
+      "code": 6003,
+      "name": "AlertUrlTooLong",
+      "msg": "alert_url exceeds the maximum length"
+    },
+    {
+      "code": 6004,
+      "name": "TooManyDependencies",
+      "msg": "The protocol already has the maximum number of dependencies"
+    },
+    {
+      "code": 6005,
+      "name": "Overflow",
+      "msg": "Arithmetic overflow"
+    }
+  ],
+  "types": [
+    {
+      "name": "Dependency",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "protocol",
+            "type": "pubkey"
+          },
+          {
+            "name": "program_id",
+            "type": "pubkey"
+          },
+          {
+            "name": "last_checked_slot",
+            "type": "u64"
+          },
+          {
+            "name": "alerts_enabled",
+            "type": "bool"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Protocol",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "program_id",
+            "type": "pubkey"
+          },
+          {
+            "name": "alert_url",
+            "type": "string"
+          },
+          {
+            "name": "corpus_size",
+            "type": "u16"
+          },
+          {
+            "name": "dependency_count",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateParameters",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "alert_url",
+            "type": {
+              "option": "string"
+            }
+          },
+          {
+            "name": "corpus_size",
+            "type": {
+              "option": "u16"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "constants": [
+    {
+      "name": "DEPENDENCY_SEED",
+      "type": "bytes",
+      "value": "[100, 101, 112, 101, 110, 100, 101, 110, 99, 121]"
+    },
+    {
+      "name": "MAX_DEPENDENCIES",
+      "type": "u8",
+      "value": "32"
+    },
+    {
+      "name": "PROTOCOL_SEED",
+      "type": "bytes",
+      "value": "[112, 114, 111, 116, 111, 99, 111, 108]"
+    }
+  ]
+}

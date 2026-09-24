@@ -584,7 +584,7 @@ impl Scope {
         Ok(Some(tx))
     }
 
-    fn transaction_json(&self, signature: &str) -> Result<serde_json::Value> {
+    pub(crate) fn transaction_json(&self, signature: &str) -> Result<serde_json::Value> {
         self.fetch_transaction_json(signature)?
             .ok_or_else(|| Error::TransactionNotFound(signature.to_string()))
     }

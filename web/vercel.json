@@ -17,6 +17,10 @@
     {
       "source": "/flame/:sig*",
       "destination": "/"
+    },
+    {
+      "source": "/watch",
+      "destination": "/"
     }
   ],
   "headers": [

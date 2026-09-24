@@ -132,6 +132,7 @@ mod check;
 mod compute;
 mod cpi_tree;
 mod decode;
+pub mod dependency_watch;
 mod diagnose;
 mod diffs;
 mod error;
@@ -170,6 +171,10 @@ pub use check::{AccountCheck, Check, Cmp, Scenario};
 pub use compute::CuUsage;
 pub use cpi_tree::{CpiEntry, IxAccount, IxArg};
 pub use decode::{AccountInfo, DecodedAccount, Field};
+pub use dependency_watch::{
+    AlertPayload, Baseline, CheckedTransaction, DependencyReport, DeployInfo, Registry,
+    RegistryDependency, RegistryProtocol, ReportSummary, Reporter,
+};
 pub use diagnose::Diagnosis;
 pub use diffs::{BalanceChange, TokenChange};
 pub use error::{Error, Result};

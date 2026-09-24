@@ -35,6 +35,7 @@ include = [
 # `svmscope-server`) so library consumers never see axum/tokio at all.
 [workspace]
 members = ["server"]
+exclude = ["programs/dependency_registry"]
 resolver = "2"
 
 [dependencies]
@@ -74,6 +75,7 @@ solana-reward-info = ">=6.2, <6.3"
 solana-instruction = "=3.4.1"
 solana-message = "=4.4.1"
 solana-signer = "=3.0.1"
+solana-keypair = "=3.1.2"
 sha2 = "0.10"
 # The account-changes stream (`history`): a native gRPC client for the
 # Substreams `Stream.Blocks` call, messages hand-derived from the published
