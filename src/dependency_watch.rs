@@ -45,6 +45,14 @@ pub struct RegistryProtocol {
     pub corpus_size: u16,
     /// How many `Dependency` accounts point at this protocol.
     pub dependency_count: u8,
+    /// Set by the engine: whether `authority` is the upgrade authority of
+    /// `program_id` on the cluster the checks run on. `None` until checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
+    /// Set by the engine: the cluster the program was found on with the
+    /// registered authority, e.g. `mainnet` or `devnet`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<String>,
 }
 
 /// One dependency of a protocol, decoded from a `Dependency` account.
@@ -306,6 +314,8 @@ fn parse_protocol(address: &str, data: &[u8]) -> Option<RegistryProtocol> {
         alert_url,
         corpus_size,
         dependency_count,
+        verified: None,
+        cluster: None,
     })
 }
 
@@ -441,6 +451,20 @@ impl Scope {
         }))
     }
 
+    /// Whether `authority` holds the upgrade authority of `program_id` on
+    /// this scope's cluster. `Ok(false)` when the program is absent here, is
+    /// not upgradeable, or belongs to someone else, so a registry on one
+    /// cluster can vouch for programs on another only when the same key
+    /// controls them there.
+    pub fn holds_upgrade_authority(&self, program_id: &str, authority: &str) -> Result<bool> {
+        match self.deploy_info(program_id) {
+            Ok(Some(d)) => Ok(d.upgrade_authority.as_deref() == Some(authority)),
+            Ok(None) => Ok(false),
+            Err(Error::AccountNotFound(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// A program's current binary, whichever loader owns it.
     pub fn program_elf(&self, program_id: &str) -> Result<Vec<u8>> {
         if Address::from_str(program_id).is_err() {
@@ -487,7 +511,9 @@ impl Scope {
         };
 
         // One page of signatures, newest first; keep those before the deploy.
-        let page = limit.max(1).saturating_mul(2).min(1000);
+        // Recent history is often mostly deploys and unrelated mentions, so
+        // the page is well over the limit.
+        let page = limit.max(1).saturating_mul(4).clamp(50, 1000);
         // Signatures for an address include every transaction that mentions
         // it, deploys of the program itself among them; a deploy invokes the
         // loader, not the program, and cannot be replayed as a program call.
@@ -729,6 +755,7 @@ mod tests {
         assert_eq!(p.alert_url, "https://x.test/hook");
         assert_eq!(p.corpus_size, 200);
         assert_eq!(p.dependency_count, 3);
+        assert_eq!(p.verified, None);
     }
 
     #[test]

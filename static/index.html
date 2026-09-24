@@ -1444,6 +1444,7 @@ input.derived { border-color: var(--green-border); color: var(--green); }
         <div class="row" style="flex-wrap:wrap;gap:8px">
           <input id="watchProgram" placeholder="your program id" spellcheck="false" autocomplete="off" style="flex:2;min-width:220px" />
           <input id="watchDependency" placeholder="dependency program id" spellcheck="false" autocomplete="off" style="flex:2;min-width:220px" />
+          <select id="watchCluster" title="cluster the program lives on" style="width:110px"><option value="mainnet">mainnet</option><option value="devnet">devnet</option></select>
           <input id="watchLimit" type="number" min="1" max="50" value="10" title="transactions to replay" style="width:80px" />
           <button class="btn" id="watchRun">Check<svg class="ic" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
         </div>
@@ -5231,10 +5232,11 @@ async function loadWatch() {
     $('watchRegistry').innerHTML = registry.protocols.length ? registry.protocols.map(p => {
       const deps = registry.dependencies.filter(d => d.protocol === p.address);
       const depRows = deps.map(d => `<div class="row"><div class="grow">${copyPill(d.program_id)}</div><div class="amt-col"><span class="${d.alerts_enabled ? '' : 'empty'}">${d.alerts_enabled ? 'alerts on' : 'alerts off'}</span></div></div>`).join('') || '<div class="empty">no dependencies yet</div>';
-      return `<div class="row" style="flex-direction:column;align-items:stretch"><div class="row"><div class="grow">${copyPill(p.program_id)}</div><div class="amt-col"><span class="empty">corpus ${p.corpus_size}</span></div></div><div style="padding-left:14px">${depRows}<div class="empty">alerts → ${esc(p.alert_url || '—')}</div></div></div>`;
+      const badge = p.verified === true ? `<span class="amt pos">verified on ${esc(p.cluster || '?')}</span>` : p.verified === false ? '<span class="amt neg">unverified</span>' : '';
+      return `<div class="row" style="flex-direction:column;align-items:stretch"><div class="row"><div class="grow">${copyPill(p.program_id)} ${badge}</div><div class="amt-col"><span class="empty">corpus ${p.corpus_size}</span></div></div><div style="padding-left:14px">${depRows}<div class="empty">alerts → ${esc(p.alert_url || '—')}${p.verified === false ? ' · not checked: the registered authority does not hold this program\'s upgrade authority on any watched cluster' : ''}</div></div></div>`;
     }).join('') : '<div class="empty">nothing registered yet</div>';
     const first = registry.protocols[0], firstDep = registry.dependencies[0];
-    if (first && !$('watchProgram').value) $('watchProgram').value = first.program_id;
+    if (first && !$('watchProgram').value) { $('watchProgram').value = first.program_id; if (first.cluster) $('watchCluster').value = first.cluster; }
     if (firstDep && !$('watchDependency').value) $('watchDependency').value = firstDep.program_id;
   } else {
     $('watchRegistry').innerHTML = '<div class="empty">could not read the registry</div>';
@@ -5244,17 +5246,19 @@ async function loadWatch() {
     $('watchStatusCount').textContent = status.enabled ? 'running' : 'off';
     $('watchStatus').innerHTML =
       `<div class="row"><div class="grow">registry</div><div class="amt-col">${copyPill(status.registry)}</div></div>` +
-      `<div class="row"><div class="grow">cluster</div><div class="amt-col"><span class="mono">${esc(status.rpc)}</span></div></div>` +
+      `<div class="row"><div class="grow">registry cluster</div><div class="amt-col"><span class="mono">${esc(status.rpc)}</span></div></div>` +
+      `<div class="row"><div class="grow">checks run on</div><div class="amt-col"><span class="mono">${esc(status.check_rpc || '')}</span></div></div>` +
       `<div class="row"><div class="grow">last poll</div><div class="amt-col">${fmtTs(status.last_poll_at)} · every ${status.interval_secs}s</div></div>` +
       `<div class="row"><div class="grow">reporter</div><div class="amt-col">${status.reporter ? copyPill(status.reporter) : '<span class="empty">unsigned</span>'}</div></div>` +
       (status.last_error ? `<div class="row"><div class="grow amt neg">${esc(status.last_error)}</div></div>` : '') +
       `<div class="empty">binaries held for ${held.length} dependenc${held.length === 1 ? 'y' : 'ies'}</div>` +
-      held.map(([k, v]) => `<div class="row"><div class="grow">${copyPill(k)}</div><div class="amt-col"><span class="empty">deploy slot ${v}</span></div></div>`).join('');
+      held.map(([k, v]) => { const [cl, prog] = k.includes(':') ? k.split(':') : ['', k]; return `<div class="row"><div class="grow">${copyPill(prog)} <span class="empty">${esc(cl)}</span></div><div class="amt-col"><span class="empty">deploy slot ${v}</span></div></div>`; }).join('') +
+      ((status.unverified || []).length ? `<div class="empty">unverified: ${status.unverified.map(short).join(', ')}</div>` : '');
   }
   $('watchRepCount').textContent = reports.length ? String(reports.length) : '';
   $('watchReports').innerHTML = reports.length ? reports.map(r =>
     `<div class="row" style="flex-direction:column;align-items:stretch;cursor:pointer" data-report="${r.id}">` +
-    `<div class="row"><div class="grow">${short(r.program_id)} · dependency ${short(r.dependency)} redeployed</div><div class="amt-col">${fmtTs(r.generated_at)}</div></div>` +
+    `<div class="row"><div class="grow">${short(r.program_id)} · dependency ${short(r.dependency)} redeployed${r.cluster ? ' on ' + esc(r.cluster) : ''}</div><div class="amt-col">${fmtTs(r.generated_at)}</div></div>` +
     `<div class="empty">${esc(r.verdict)} · ${summaryLine(r.summary)} · alert: ${esc(r.delivery)}</div><div class="rep-body"></div></div>`
   ).join('') : '<div class="empty">no redeploys caught yet</div>';
   $('watchReports').querySelectorAll('[data-report]').forEach(el => el.addEventListener('click', async (e) => {
@@ -5274,7 +5278,8 @@ $('watchRun').addEventListener('click', async () => {
   $('watchProgress').classList.remove('hidden'); $('watchResult').innerHTML = ''; $('watchCheckState').textContent = '';
   const t0 = Date.now();
   try {
-    const res = await api(`/dependency_check/${encodeURIComponent(program)}?dependency=${encodeURIComponent(dependency)}&limit=${limit}`);
+    const cluster = $('watchCluster').value;
+    const res = await api(`/dependency_check/${encodeURIComponent(program)}?dependency=${encodeURIComponent(dependency)}&limit=${limit}&cluster=${encodeURIComponent(cluster)}`);
     if (!res.ok) throw new Error(await res.text());
     const rep = await res.json();
     $('watchCheckState').textContent = `${((Date.now() - t0) / 1000).toFixed(1)}s`;

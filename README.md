@@ -516,7 +516,9 @@ ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=~/.config/solana
 ```
 
 The engine half is `svmscope::dependency_watch`. The server's watcher reads
-the registry, keeps the current binary of every watched dependency, and when
+the registry, verifies each entry against the program's upgrade authority on
+the cluster it is checked on, keeps the current binary of every watched
+dependency, and when
 a deploy slot moves it replays each dependent protocol's last `corpus_size`
 transactions twice on the same state, once with the held binary and once
 with the new one, so only the binary change shows. The report goes to the
@@ -529,7 +531,8 @@ runs a check on demand.
 |---|---|
 | `SVMSCOPE_DEPWATCH` | `0` turns the watcher off. |
 | `SVMSCOPE_DEPWATCH_REGISTRY` | The registry program (default: the devnet one above). |
-| `SVMSCOPE_DEPWATCH_RPC` | The cluster the registry and its protocols live on (default: public devnet). |
+| `SVMSCOPE_DEPWATCH_RPC` | The cluster the registry lives on (default: public devnet). |
+| `SVMSCOPE_DEPWATCH_CHECK_RPC` | Where checks run for programs that live there (default: `SVMSCOPE_RPC_URL`, else public mainnet). A protocol is checked on whichever of the two clusters its registered authority holds the program's upgrade authority, so a devnet registry can watch mainnet programs; an entry whose authority holds the program nowhere is shown as unverified and never alerted. |
 | `SVMSCOPE_DEPWATCH_INTERVAL_SECS` | Poll period (default 120). |
 | `SVMSCOPE_DEPWATCH_MAX_CORPUS` | Cap on transactions per check (default 50). |
 | `SVMSCOPE_REPORTER_KEYPAIR` | Keypair that signs alerts: a JSON array, a file path or base58. Without it alerts are unsigned. |

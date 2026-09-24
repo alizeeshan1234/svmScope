@@ -6,8 +6,12 @@
 //! Configuration (all optional):
 //! - `SVMSCOPE_DEPWATCH=0` disables the watcher.
 //! - `SVMSCOPE_DEPWATCH_REGISTRY`: the registry program (default: the devnet one).
-//! - `SVMSCOPE_DEPWATCH_RPC`: the cluster the registry and its protocols live on
-//!   (default: the public devnet endpoint).
+//! - `SVMSCOPE_DEPWATCH_RPC`: the cluster the registry lives on (default: the
+//!   public devnet endpoint).
+//! - `SVMSCOPE_DEPWATCH_CHECK_RPC`: where checks run for programs that live
+//!   there (default: `SVMSCOPE_RPC_URL`, else public mainnet). A protocol is
+//!   checked on whichever of the two clusters its registered authority holds
+//!   the program's upgrade authority; one that holds it nowhere is ignored.
 //! - `SVMSCOPE_DEPWATCH_INTERVAL_SECS`: poll period (default 120).
 //! - `SVMSCOPE_DEPWATCH_MAX_CORPUS`: cap on transactions per check (default 50).
 //! - `SVMSCOPE_REPORTER_KEYPAIR`: a keypair (JSON array, file path or base58)
@@ -34,6 +38,8 @@ use svmscope::{
 pub struct StoredReport {
     pub id: u64,
     pub protocol: String,
+    /// The cluster the check ran on.
+    pub cluster: String,
     pub alert_url: String,
     /// HTTP status the alert URL answered with, or the delivery error.
     pub delivery: String,
@@ -71,14 +77,18 @@ pub struct WatchStatus {
     pub enabled: bool,
     pub registry: String,
     pub rpc: String,
+    /// Where checks run for programs that live there.
+    pub check_rpc: String,
     pub reporter: Option<String>,
     pub interval_secs: u64,
     pub last_poll_at: Option<i64>,
     pub last_error: Option<String>,
     pub protocols: usize,
     pub dependencies: usize,
-    /// Dependency program id to the deploy slot the watcher holds a binary for.
+    /// `cluster:program` to the deploy slot the watcher holds a binary for.
     pub watched: HashMap<String, u64>,
+    /// Protocols the watcher could not verify on any cluster.
+    pub unverified: Vec<String>,
     pub reports: usize,
 }
 
@@ -104,6 +114,104 @@ pub fn registry_rpc() -> String {
     env_or("SVMSCOPE_DEPWATCH_RPC", "https://api.devnet.solana.com")
 }
 
+/// The cluster checks run on for programs that live there: mainnet by
+/// default, through the engine's own RPC. The registry may sit on another
+/// cluster; a protocol is checked wherever its registered authority really
+/// holds the program.
+pub fn check_rpc() -> String {
+    std::env::var("SVMSCOPE_DEPWATCH_CHECK_RPC")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            std::env::var("SVMSCOPE_RPC_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .unwrap_or_else(|| "https://api.mainnet-beta.solana.com".to_string())
+}
+
+/// An RPC URL with its query string and userinfo removed: keys ride in
+/// both, and the status endpoint is public.
+pub fn redact_url(url: &str) -> String {
+    let no_query = url.split(['?', '#']).next().unwrap_or(url);
+    match no_query.split_once("://") {
+        Some((scheme, rest)) => {
+            let host = rest.split('/').next().unwrap_or(rest);
+            let host = host.rsplit('@').next().unwrap_or(host);
+            format!("{scheme}://{host}")
+        }
+        None => no_query.to_string(),
+    }
+}
+
+/// A short name for a cluster URL, for keys and the page.
+pub fn cluster_label(url: &str) -> &'static str {
+    let u = url.to_ascii_lowercase();
+    if u.contains("devnet") {
+        "devnet"
+    } else if u.contains("testnet") {
+        "testnet"
+    } else if u.contains("localhost") || u.contains("127.0.0.1") {
+        "localnet"
+    } else {
+        "mainnet"
+    }
+}
+
+/// The RPC for a cluster name the page may send.
+pub fn rpc_for_label(label: &str) -> Option<String> {
+    let check = check_rpc();
+    let registry = registry_rpc();
+    if label == cluster_label(&check) {
+        Some(check)
+    } else if label == cluster_label(&registry) {
+        Some(registry)
+    } else {
+        None
+    }
+}
+
+/// The clusters a protocol may live on, check cluster first, without
+/// repeating a URL.
+fn candidate_clusters() -> Vec<(String, &'static str)> {
+    let mut out: Vec<(String, &'static str)> = Vec::new();
+    for url in [check_rpc(), registry_rpc()] {
+        if !out.iter().any(|(u, _)| *u == url) {
+            let label = cluster_label(&url);
+            out.push((url, label));
+        }
+    }
+    out
+}
+
+/// Mark every protocol with the cluster on which its registered authority
+/// holds the program's upgrade authority, if any. A protocol nobody can
+/// vouch for is left `verified: false` and gets no checks and no alerts.
+pub fn verify_protocols(reg: &mut Registry) {
+    let clusters: Vec<(Scope, &'static str)> = candidate_clusters()
+        .into_iter()
+        .map(|(url, label)| (Scope::new(url), label))
+        .collect();
+    for p in reg.protocols.iter_mut() {
+        p.verified = Some(false);
+        p.cluster = None;
+        for (scope, label) in &clusters {
+            match scope.holds_upgrade_authority(&p.program_id, &p.authority) {
+                Ok(true) => {
+                    p.verified = Some(true);
+                    p.cluster = Some((*label).to_string());
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => eprintln!(
+                    "depwatch: could not verify {} on {label}: {e}",
+                    p.program_id
+                ),
+            }
+        }
+    }
+}
+
 fn max_corpus() -> usize {
     env_or("SVMSCOPE_DEPWATCH_MAX_CORPUS", "50")
         .parse()
@@ -123,9 +231,17 @@ fn reporter() -> Option<Reporter> {
         .and_then(|v| Reporter::from_env_value(&v))
 }
 
-/// The previous binary the watcher holds for `program`, if any.
-pub fn previous_binary(program: &str) -> Option<(u64, Arc<Vec<u8>>)> {
-    BINARIES.lock().ok()?.get(program).cloned()
+fn held_key(cluster: &str, program: &str) -> String {
+    format!("{cluster}:{program}")
+}
+
+/// The previous binary the watcher holds for `program` on `cluster`, if any.
+pub fn previous_binary(cluster: &str, program: &str) -> Option<(u64, Arc<Vec<u8>>)> {
+    BINARIES
+        .lock()
+        .ok()?
+        .get(&held_key(cluster, program))
+        .cloned()
 }
 
 fn store_report(r: StoredReport) {
@@ -149,16 +265,17 @@ pub fn spawn() {
     if let Ok(mut s) = STATUS.lock() {
         s.enabled = true;
         s.registry = registry.clone();
-        s.rpc = rpc.clone();
+        s.rpc = redact_url(&rpc);
+        s.check_rpc = redact_url(&check_rpc());
         s.reporter = reporter.as_ref().map(|r| r.address());
         s.interval_secs = interval;
     }
     std::thread::Builder::new()
         .name("svmscope-depwatch".into())
         .spawn(move || {
-            let scope = Scope::new(rpc);
+            let registry_scope = Scope::new(rpc);
             loop {
-                if let Err(e) = poll_once(&scope, &registry, reporter.as_ref()) {
+                if let Err(e) = poll_once(&registry_scope, &registry, reporter.as_ref()) {
                     eprintln!("depwatch: {e}");
                     if let Ok(mut s) = STATUS.lock() {
                         s.last_error = Some(e);
@@ -170,61 +287,87 @@ pub fn spawn() {
         .expect("spawn depwatch thread");
 }
 
-/// One pass: read the registry, snapshot new dependencies, check the ones
-/// whose deploy slot moved.
-fn poll_once(scope: &Scope, registry: &str, reporter: Option<&Reporter>) -> Result<(), String> {
-    let reg = scope.registry(registry).map_err(|e| e.to_string())?;
+/// One pass: read the registry, place every protocol on the cluster where
+/// its authority holds the program, snapshot new dependencies there, and
+/// check the ones whose deploy slot moved.
+fn poll_once(
+    registry_scope: &Scope,
+    registry: &str,
+    reporter: Option<&Reporter>,
+) -> Result<(), String> {
+    let mut reg = registry_scope
+        .registry(registry)
+        .map_err(|e| e.to_string())?;
+    verify_protocols(&mut reg);
     if let Ok(mut s) = STATUS.lock() {
         s.last_poll_at = Some(now());
         s.last_error = None;
         s.protocols = reg.protocols.len();
         s.dependencies = reg.dependencies.len();
+        s.unverified = reg
+            .protocols
+            .iter()
+            .filter(|p| p.verified != Some(true))
+            .map(|p| p.program_id.clone())
+            .collect();
     }
-    let mut programs: Vec<String> = reg
-        .dependencies
-        .iter()
-        .map(|d| d.program_id.clone())
-        .collect();
-    programs.sort();
-    programs.dedup();
 
-    for program in programs {
-        let Some(deploy) = scope.deploy_info(&program).map_err(|e| e.to_string())? else {
-            // Not upgradeable: nothing can change, nothing to hold.
-            continue;
-        };
-        let held = previous_binary(&program);
-        match held {
-            None => snapshot(scope, &program, deploy.last_deploy_slot)?,
-            Some((slot, old)) if slot != deploy.last_deploy_slot => {
-                eprintln!(
-                    "depwatch: {program} redeployed at slot {} (held {slot}); checking dependents",
-                    deploy.last_deploy_slot
-                );
-                run_checks(scope, &reg, &program, old, reporter);
-                snapshot(scope, &program, deploy.last_deploy_slot)?;
+    // Dependencies are watched per cluster: a protocol on mainnet needs the
+    // mainnet bytes of its dependencies, one on devnet the devnet bytes.
+    for (url, label) in candidate_clusters() {
+        let scope = Scope::new(url);
+        let mut programs: Vec<String> = reg
+            .dependencies
+            .iter()
+            .filter(|d| {
+                reg.protocols
+                    .iter()
+                    .any(|p| p.address == d.protocol && p.cluster.as_deref() == Some(label))
+            })
+            .map(|d| d.program_id.clone())
+            .collect();
+        programs.sort();
+        programs.dedup();
+
+        for program in programs {
+            let Some(deploy) = scope.deploy_info(&program).map_err(|e| e.to_string())? else {
+                // Not upgradeable: nothing can change, nothing to hold.
+                continue;
+            };
+            match previous_binary(label, &program) {
+                None => snapshot(&scope, label, &program, deploy.last_deploy_slot)?,
+                Some((slot, old)) if slot != deploy.last_deploy_slot => {
+                    eprintln!(
+                        "depwatch: {program} redeployed on {label} at slot {} (held {slot}); checking dependents",
+                        deploy.last_deploy_slot
+                    );
+                    run_checks(&scope, label, &reg, &program, old, reporter);
+                    snapshot(&scope, label, &program, deploy.last_deploy_slot)?;
+                }
+                Some(_) => {}
             }
-            Some(_) => {}
         }
     }
     Ok(())
 }
 
-fn snapshot(scope: &Scope, program: &str, slot: u64) -> Result<(), String> {
+fn snapshot(scope: &Scope, cluster: &str, program: &str, slot: u64) -> Result<(), String> {
     let elf = scope.program_elf(program).map_err(|e| e.to_string())?;
+    let key = held_key(cluster, program);
     if let Ok(mut b) = BINARIES.lock() {
-        b.insert(program.to_string(), (slot, Arc::new(elf)));
+        b.insert(key.clone(), (slot, Arc::new(elf)));
     }
     if let Ok(mut s) = STATUS.lock() {
-        s.watched.insert(program.to_string(), slot);
+        s.watched.insert(key, slot);
     }
     Ok(())
 }
 
-/// Check every protocol that depends on `program` with alerts on, and
-/// deliver each report.
+/// Check every verified protocol on `cluster` that depends on `program`
+/// with alerts on, and deliver each report.
 fn run_checks(
     scope: &Scope,
+    cluster: &str,
     reg: &Registry,
     program: &str,
     previous: Arc<Vec<u8>>,
@@ -235,7 +378,11 @@ fn run_checks(
         .iter()
         .filter(|d| d.program_id == program && d.alerts_enabled)
     {
-        let Some(protocol) = reg.protocols.iter().find(|p| p.address == dep.protocol) else {
+        let Some(protocol) = reg.protocols.iter().find(|p| {
+            p.address == dep.protocol
+                && p.verified == Some(true)
+                && p.cluster.as_deref() == Some(cluster)
+        }) else {
             continue;
         };
         let limit = (protocol.corpus_size as usize).clamp(1, max_corpus());
@@ -268,12 +415,13 @@ fn run_checks(
             "no alert url".to_string()
         };
         eprintln!(
-            "depwatch: {} vs {}: {} -> {} ({delivery})",
+            "depwatch: {} vs {} on {cluster}: {} -> {} ({delivery})",
             protocol.program_id, program, payload.verdict, protocol.alert_url
         );
         store_report(StoredReport {
             id,
             protocol: protocol.address.clone(),
+            cluster: cluster.to_string(),
             alert_url: protocol.alert_url.clone(),
             delivery,
             verdict: payload.verdict,
@@ -289,22 +437,27 @@ pub struct RegistryQuery {
     pub registry: Option<String>,
 }
 
-/// GET /registry — every protocol and dependency in the registry.
+/// GET /registry — every protocol and dependency in the registry, each
+/// protocol marked with whether and where the engine could verify it.
 pub async fn registry_handler(
     Query(q): Query<RegistryQuery>,
 ) -> Result<Json<Registry>, (StatusCode, String)> {
     let registry = q.registry.unwrap_or_else(registry_program);
     let rpc = registry_rpc();
-    tokio::task::spawn_blocking(move || Scope::new(rpc).registry(&registry))
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("task error: {e}"),
-            )
-        })?
-        .map(Json)
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))
+    tokio::task::spawn_blocking(move || {
+        let mut reg = Scope::new(rpc).registry(&registry)?;
+        verify_protocols(&mut reg);
+        Ok::<_, svmscope::Error>(reg)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?
+    .map(Json)
+    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -313,16 +466,32 @@ pub struct CheckQuery {
     pub limit: Option<usize>,
     /// `previous` (default when the watcher holds one), `at_slot`, or `current`.
     pub baseline: Option<String>,
+    /// `mainnet` or `devnet` (whatever the two configured clusters are);
+    /// default is the check cluster.
+    pub cluster: Option<String>,
 }
 
-/// GET /dependency_check/{program}?dependency=… — run a check now against
-/// the registry's cluster.
+/// GET /dependency_check/{program}?dependency=…&cluster=… — run a check now.
 pub async fn check_handler(
     Path(program): Path<String>,
     Query(q): Query<CheckQuery>,
 ) -> Result<Json<DependencyReport>, (StatusCode, String)> {
     let limit = q.limit.unwrap_or(20).clamp(1, max_corpus());
-    let held = previous_binary(&q.dependency);
+    let rpc = match q.cluster.as_deref() {
+        None => check_rpc(),
+        Some(label) => rpc_for_label(label).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "cluster must be {} or {}",
+                    cluster_label(&check_rpc()),
+                    cluster_label(&registry_rpc())
+                ),
+            )
+        })?,
+    };
+    let label = cluster_label(&rpc);
+    let held = previous_binary(label, &q.dependency);
     let baseline = match q.baseline.as_deref() {
         Some("at_slot") => Baseline::AtSlot,
         Some("current") => Baseline::Current,
@@ -331,7 +500,10 @@ pub async fn check_handler(
             None => {
                 return Err((
                     StatusCode::CONFLICT,
-                    format!("the watcher holds no previous binary for {}", q.dependency),
+                    format!(
+                        "the watcher holds no previous binary for {} on {label}",
+                        q.dependency
+                    ),
                 ))
             }
         },
@@ -340,7 +512,6 @@ pub async fn check_handler(
             None => Baseline::Current,
         },
     };
-    let rpc = registry_rpc();
     let dependency = q.dependency.clone();
     tokio::task::spawn_blocking(move || {
         Scope::new(rpc).dependency_check(&program, &dependency, limit, baseline)
@@ -374,6 +545,7 @@ pub async fn reports_handler() -> Json<serde_json::Value> {
                     json!({
                         "id": r.id,
                         "protocol": r.protocol,
+                        "cluster": r.cluster,
                         "program_id": r.report.program_id,
                         "dependency": r.report.dependency,
                         "generated_at": r.report.generated_at,
@@ -427,4 +599,27 @@ pub async fn alert_sink_handler(
 /// GET /alerts/test — what the sink has received.
 pub async fn alert_sink_list() -> Json<Vec<ReceivedAlert>> {
     Json(RECEIVED.lock().map(|v| v.clone()).unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redaction_drops_keys_and_paths() {
+        assert_eq!(
+            redact_url("https://mainnet.helius-rpc.com/?api-key=SECRET"),
+            "https://mainnet.helius-rpc.com"
+        );
+        assert_eq!(
+            redact_url("https://user:pw@rpc.example.com/v1/SECRET#frag"),
+            "https://rpc.example.com"
+        );
+        assert_eq!(redact_url("http://127.0.0.1:8899"), "http://127.0.0.1:8899");
+        assert_eq!(cluster_label("https://api.devnet.solana.com"), "devnet");
+        assert_eq!(
+            cluster_label("https://mainnet.helius-rpc.com/?api-key=x"),
+            "mainnet"
+        );
+    }
 }
