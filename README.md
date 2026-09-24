@@ -524,8 +524,8 @@ The engine half is `svmscope::dependency_watch`. The server's watcher reads
 the registry, verifies each entry against the program's upgrade authority on
 the cluster it is checked on, keeps the current binary of every watched
 dependency, and when
-a deploy slot moves it replays each dependent protocol's last `corpus_size`
-transactions twice on the same state, once with the held binary and once
+a deploy slot moves it replays each dependent protocol's most recent
+transactions (`corpus_size` of them, the number set at registration) twice on the same state, once with the held binary and once
 with the new one, so only the binary change shows. The report goes to the
 alert URL as JSON, signed by the engine's reporter key
 (`x-svmscope-reporter`, `x-svmscope-signature` over the body), and is kept at

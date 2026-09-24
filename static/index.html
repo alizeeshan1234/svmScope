@@ -1445,7 +1445,7 @@ input.derived { border-color: var(--green-border); color: var(--green); }
           <input id="watchProgram" placeholder="your program id" spellcheck="false" autocomplete="off" style="flex:2;min-width:220px" />
           <input id="watchDependency" placeholder="dependency program id" spellcheck="false" autocomplete="off" style="flex:2;min-width:220px" />
           <select id="watchCluster" title="cluster the program lives on" style="width:110px"><option value="mainnet">mainnet</option><option value="devnet">devnet</option></select>
-          <input id="watchLimit" type="number" min="1" max="50" value="10" title="transactions to replay" style="width:80px" />
+          <input id="watchLimit" type="number" min="1" max="50" value="10" title="how many recent transactions to replay" style="width:80px" />
           <button class="btn" id="watchRun">Check<svg class="ic" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
         </div>
         <div class="dbg-progress hidden" id="watchProgress"><span class="spinner"></span><span id="watchProgressText">replaying…</span></div>
@@ -5233,7 +5233,7 @@ async function loadWatch() {
       const deps = registry.dependencies.filter(d => d.protocol === p.address);
       const depRows = deps.map(d => `<div class="row"><div class="grow">${copyPill(d.program_id)}</div><div class="amt-col"><span class="${d.alerts_enabled ? '' : 'empty'}">${d.alerts_enabled ? 'alerts on' : 'alerts off'}</span></div></div>`).join('') || '<div class="empty">no dependencies yet</div>';
       const badge = (p.verified === true ? `<span class="amt pos">verified on ${esc(p.cluster || '?')}</span>` : p.verified === false ? '<span class="amt neg">unverified</span>' : '') + (p.proven ? ' <span class="empty">proof on chain</span>' : '');
-      return `<div class="row" style="flex-direction:column;align-items:stretch"><div class="row"><div class="grow">${copyPill(p.program_id)} ${badge}</div><div class="amt-col"><span class="empty">corpus ${p.corpus_size}</span></div></div><div style="padding-left:14px">${depRows}<div class="empty">alerts → ${esc(p.alert_url || '—')}${p.verified === false ? ' · not checked: the registered authority does not hold this program\'s upgrade authority on any watched cluster' : ''}</div></div></div>`;
+      return `<div class="row" style="flex-direction:column;align-items:stretch"><div class="row"><div class="grow">${copyPill(p.program_id)} ${badge}</div><div class="amt-col"><span class="empty">replays ${p.corpus_size} per check</span></div></div><div style="padding-left:14px">${depRows}<div class="empty">alerts → ${esc(p.alert_url || '—')}${p.verified === false ? ' · not checked: the registered authority does not hold this program\'s upgrade authority on any watched cluster' : ''}</div></div></div>`;
     }).join('') : '<div class="empty">nothing registered yet</div>';
     const first = registry.protocols[0], firstDep = registry.dependencies[0];
     if (first && !$('watchProgram').value) { $('watchProgram').value = first.program_id; if (first.cluster) $('watchCluster').value = first.cluster; }
