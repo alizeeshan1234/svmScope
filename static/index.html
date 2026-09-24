@@ -5267,7 +5267,14 @@ async function loadWatch() {
     const tries = registry.protocols.filter(p => p.verified === true).flatMap(p =>
       registry.dependencies.filter(d => d.protocol === p.address).slice(0, 2).map(d =>
         `<a data-try-program="${esc(p.program_id)}" data-try-dependency="${esc(d.program_id)}" data-try-cluster="${esc(p.cluster || 'mainnet')}">${short(p.program_id)} against ${short(d.program_id)} on ${esc(p.cluster || 'mainnet')}</a>`));
-    $('watchTry').innerHTML = tries.length ? 'Try: ' + tries.join(' · ') : '';
+    // Mainnet pairs whose dependency was upgraded recently enough for the
+    // stream to supply the earlier binary; the registry's own entries follow.
+    const mainnetTries = [
+      ['JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA', 'Jupiter v6 against Pump AMM'],
+      ['JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', 'cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG', 'Jupiter v6 against Meteora DAMM v2'],
+      ['6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P', '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P', 'Pump against its own upgrade'],
+    ].map(([p, d, label]) => `<a data-try-program="${p}" data-try-dependency="${d}" data-try-cluster="mainnet">${label}</a>`);
+    $('watchTry').innerHTML = 'Try: ' + mainnetTries.concat(tries).join(' · ');
     $('watchTry').querySelectorAll('a[data-try-program]').forEach(a => a.addEventListener('click', () => {
       $('watchProgram').value = a.dataset.tryProgram;
       $('watchDependency').value = a.dataset.tryDependency;
