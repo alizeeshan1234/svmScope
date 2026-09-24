@@ -580,11 +580,28 @@ impl Scope {
         // loader, not the program, and cannot be replayed as a program call.
         // A transaction that never reaches the dependency cannot be changed
         // by it either, so only those that call both are worth replaying.
+        // Fetching each transaction in a tight loop trips public and paid
+        // endpoints' rate limits alike; a rate-limited fetch is retried with
+        // a growing pause rather than silently dropping the transaction.
+        let fetch = |signature: &str| -> Option<serde_json::Value> {
+            let mut wait = std::time::Duration::from_millis(250);
+            for attempt in 0..5 {
+                match self.transaction_json(signature) {
+                    Ok(tx) => return Some(tx),
+                    Err(_) if attempt < 4 => {
+                        std::thread::sleep(wait);
+                        wait *= 2;
+                    }
+                    Err(_) => return None,
+                }
+            }
+            None
+        };
         let recent: Vec<_> = self
             .signatures(program_id, page)?
             .into_iter()
             .filter(|s| {
-                self.transaction_json(&s.signature)
+                fetch(&s.signature)
                     .map(|tx| {
                         invokes_program(&tx, program_id)
                             && (dependency == program_id || invokes_program(&tx, dependency))
