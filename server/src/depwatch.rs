@@ -171,6 +171,29 @@ pub fn rpc_for_label(label: &str) -> Option<String> {
     }
 }
 
+/// A scope for checks on `url`: the account-changes stream and the record
+/// store are attached for the mainnet endpoint, so an earlier binary of a
+/// dependency can be fetched; other clusters get a plain scope.
+pub fn check_scope(url: String) -> Scope {
+    let mainnet = cluster_label(&url) == "mainnet";
+    let scope = Scope::new(url);
+    if !mainnet {
+        return scope;
+    }
+    let scope = match svmscope::history::HistoryStream::from_env() {
+        Some(stream) => scope.with_history_stream(stream),
+        None => scope,
+    };
+    match crate::RECORDS.as_ref() {
+        Some(store) => {
+            let dynamic: Arc<dyn svmscope::records::StateStore> =
+                Arc::<svmscope::records::LogStore>::clone(store);
+            scope.with_records(dynamic)
+        }
+        None => scope,
+    }
+}
+
 /// The clusters a protocol may live on, check cluster first, without
 /// repeating a URL.
 fn candidate_clusters() -> Vec<(String, &'static str)> {
@@ -315,7 +338,7 @@ fn poll_once(
     // Dependencies are watched per cluster: a protocol on mainnet needs the
     // mainnet bytes of its dependencies, one on devnet the devnet bytes.
     for (url, label) in candidate_clusters() {
-        let scope = Scope::new(url);
+        let scope = check_scope(url);
         let mut programs: Vec<String> = reg
             .dependencies
             .iter()
@@ -464,7 +487,10 @@ pub async fn registry_handler(
 pub struct CheckQuery {
     pub dependency: String,
     pub limit: Option<usize>,
-    /// `previous` (default when the watcher holds one), `at_slot`, or `current`.
+    /// `previous` (the watcher's held binary), `before_deploy` (the binary
+    /// before the current deploy, from the stream), `at_slot`, or `current`.
+    /// Default: `previous` when held, else `before_deploy` when the stream
+    /// can supply it, else `current`.
     pub baseline: Option<String>,
     /// `mainnet` or `devnet` (whatever the two configured clusters are);
     /// default is the check cluster.
@@ -495,6 +521,7 @@ pub async fn check_handler(
     let baseline = match q.baseline.as_deref() {
         Some("at_slot") => Baseline::AtSlot,
         Some("current") => Baseline::Current,
+        Some("before_deploy") => Baseline::BeforeDeploy,
         Some("previous") => match held {
             Some((_, elf)) => Baseline::Previous((*elf).clone()),
             None => {
@@ -509,12 +536,24 @@ pub async fn check_handler(
         },
         _ => match held {
             Some((_, elf)) => Baseline::Previous((*elf).clone()),
-            None => Baseline::Current,
+            None => Baseline::BeforeDeploy,
         },
     };
+    let explicit = q.baseline.is_some();
     let dependency = q.dependency.clone();
     tokio::task::spawn_blocking(move || {
-        Scope::new(rpc).dependency_check(&program, &dependency, limit, baseline)
+        let scope = check_scope(rpc);
+        let first = scope.dependency_check(&program, &dependency, limit, baseline.clone());
+        // Without an explicit choice, a missing earlier binary is not an
+        // error: fall back to the current one and let the report say so.
+        match first {
+            Err(svmscope::Error::InvalidSpec(_))
+                if !explicit && matches!(baseline, Baseline::BeforeDeploy) =>
+            {
+                scope.dependency_check(&program, &dependency, limit, Baseline::Current)
+            }
+            other => other,
+        }
     })
     .await
     .map_err(|e| {

@@ -1064,11 +1064,24 @@ impl Scope {
     /// newest mention before `slot` is the deploy in force then; the stream
     /// returns that block's version, one block wide.
     fn program_elf_at(&self, ctx: &ReplayContext, key: &str, slot: u64) -> Option<(u64, Vec<u8>)> {
-        let stream = self.history.as_ref()?;
         let data = match ctx.pre_account_owned(key) {
             Some(a) => a.data,
             None => self.account_raw(key).ok().flatten()?.3,
         };
+        self.program_elf_at_from(&data, key, slot)
+    }
+
+    /// An upgradeable program's binary as deployed before `slot`, with that
+    /// deploy's slot, from the account-changes stream; `None` without the
+    /// stream or when the program's history does not reach back that far.
+    pub fn program_elf_before(&self, program_id: &str, slot: u64) -> Option<(u64, Vec<u8>)> {
+        let data = self.account_raw(program_id).ok().flatten()?.3;
+        self.program_elf_at_from(&data, program_id, slot)
+    }
+
+    fn program_elf_at_from(&self, data: &[u8], key: &str, slot: u64) -> Option<(u64, Vec<u8>)> {
+        let stream = self.history.as_ref()?;
+        let _ = key;
         let pd_bytes: [u8; 32] = data.get(4..36)?.try_into().ok()?;
         let pd_addr = Address::from(pd_bytes).to_string();
         // Deploys are the mentions that write the programdata account;

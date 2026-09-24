@@ -1452,7 +1452,7 @@ input.derived { border-color: var(--green-border); color: var(--green); }
     <div class="grid" id="watchMain">
       <div class="card full">
         <h2>Run a check now <span class="count" id="watchCheckState"></span></h2>
-        <p class="whatif-lead">Replay a program's recent transactions with a dependency's current binary swapped in. If the watcher holds the dependency's previous binary, that is the baseline; otherwise the report can only say the transactions still execute.</p>
+        <p class="whatif-lead">Replay a program's recent transactions that call a dependency, once with the dependency's binary from before its latest deploy and once with the current one, and see what the deploy changed. The earlier binary comes from the watcher when it holds one, else from the account history stream on mainnet; without either the report can only say the transactions still execute.</p>
         <div class="wform">
           <div class="wfield wide">
             <label class="flabel" for="watchProgram">Your program id</label>
@@ -5235,7 +5235,7 @@ function summaryLine(sm) {
   return bits.join(' · ');
 }
 function renderReport(r) {
-  const base = r.baseline === 'previous' ? 'previous binary' : r.baseline === 'at_slot' ? 'binary at each slot' : 'current binary on both sides';
+  const base = r.baseline === 'previous' ? 'the binary before its current deploy' : r.baseline === 'at_slot' ? 'the binary at each transaction\'s slot' : 'the current binary on both sides (no earlier binary available)';
   const dep = r.dependency_deploy ? ` · deployed at slot ${r.dependency_deploy.last_deploy_slot}` : '';
   const note = r.corpus_note ? `<div class="empty">${esc(r.corpus_note)}</div>` : '';
   const rows = r.transactions.map(t => {

@@ -366,6 +366,12 @@ pub fn is_stream_limit(message: &str) -> bool {
         || message.contains("concurrent stream limit")
 }
 
+/// Whether a failure is the provider's monthly egress quota, which no
+/// retry will clear: the key is done until the quota resets.
+pub fn is_quota_exhausted(message: &str) -> bool {
+    message.contains("quota exceeded") || message.contains("Quota exceeded")
+}
+
 /// Stream `[start, stop)` and return every block's filtered accounts, in
 /// block order. Blocks with no matching account are not sent by the server
 /// in production mode. Runs its own single-threaded runtime: the rest of

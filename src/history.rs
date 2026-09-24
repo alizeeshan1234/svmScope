@@ -103,6 +103,9 @@ impl Drop for StreamSlot {
 static LIMIT_HIT_UNTIL: std::sync::Mutex<Option<HashMap<String, std::time::Instant>>> =
     std::sync::Mutex::new(None);
 const LIMIT_BACKOFF: Duration = Duration::from_secs(300);
+/// A key whose monthly quota is spent stays off for this long before it is
+/// tried again, in case the quota has reset.
+const QUOTA_BACKOFF: Duration = Duration::from_secs(6 * 3600);
 /// Waits between retries of a call the provider answered with its limit,
 /// before the key is backed off: a finished stream stays counted for a
 /// few seconds, so back-to-back calls collide with our own last one.
@@ -121,10 +124,14 @@ fn key_backed_off(key: &str) -> bool {
 }
 
 fn back_off_key(key: &str) {
+    back_off_key_for(key, LIMIT_BACKOFF);
+}
+
+fn back_off_key_for(key: &str, how_long: Duration) {
     let mut guard = LIMIT_HIT_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
     guard
         .get_or_insert_with(HashMap::new)
-        .insert(key.to_string(), std::time::Instant::now() + LIMIT_BACKOFF);
+        .insert(key.to_string(), std::time::Instant::now() + how_long);
 }
 
 impl HistoryStream {
@@ -324,6 +331,8 @@ impl HistoryStream {
                             std::thread::sleep(*wait);
                             attempt = substreams::stream_accounts(&call);
                         }
+                        // A spent quota will not clear by waiting; move on.
+                        Err(e) if substreams::is_quota_exhausted(&e.to_string()) => break,
                         Err(_) => {
                             std::thread::sleep(Duration::from_secs(2));
                             attempt = substreams::stream_accounts(&call);
@@ -338,7 +347,14 @@ impl HistoryStream {
                         break;
                     }
                     Err(e) => {
-                        if substreams::is_stream_limit(&e.to_string()) {
+                        let message = e.to_string();
+                        if substreams::is_quota_exhausted(&message) {
+                            eprintln!(
+                                "history stream: key …{} has spent its quota; trying the next key",
+                                &key[key.len().saturating_sub(4)..]
+                            );
+                            back_off_key_for(key, QUOTA_BACKOFF);
+                        } else if substreams::is_stream_limit(&message) {
                             back_off_key(key);
                         }
                         last_error = Error::Fixture(format!("history stream: {e}"));

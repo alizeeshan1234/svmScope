@@ -193,61 +193,62 @@ const BUNDLED_SEEDS: &str = include_str!("../../seeds/mainnet.txt");
 
 /// The record store behind this instance (see `svmscope::records`), opened
 /// from `SVMSCOPE_RECORD_DIR` at startup; `None` when recording is off.
-static RECORDS: std::sync::LazyLock<Option<std::sync::Arc<svmscope::records::LogStore>>> =
-    std::sync::LazyLock::new(|| {
-        let dir = std::env::var("SVMSCOPE_RECORD_DIR").ok()?;
-        let dir = dir.trim();
-        if dir.is_empty() {
-            return None;
-        }
-        match svmscope::records::LogStore::open(dir) {
-            Ok(store) => {
-                let store = std::sync::Arc::new(store);
-                use svmscope::records::StateStore;
-                // The bundled seed list: the accounts the busiest programs'
-                // transactions share (pools, markets, vaults), regenerated
-                // with `cargo run --example seed_list`. Recording them from
-                // day one is what makes a first replay of a popular pool
-                // exact instead of "watched from now on".
-                // Each hot account costs about 1 MB a day in the dense tier,
-                // so the bundled list is taken from the top, most-shared first,
-                // up to `SVMSCOPE_RECORD_MAX_SEEDS` (default 400; 0 = none).
-                let max_seeds: usize = std::env::var("SVMSCOPE_RECORD_MAX_SEEDS")
-                    .ok()
-                    .and_then(|v| v.trim().parse().ok())
-                    .unwrap_or(400);
-                let mut seeded = 0;
-                for line in BUNDLED_SEEDS.lines() {
-                    if seeded >= max_seeds {
-                        break;
-                    }
-                    let addr = line.split('#').next().unwrap_or("").trim();
-                    if !addr.is_empty() && store.watch(addr).is_ok() {
-                        seeded += 1;
-                    }
+pub(crate) static RECORDS: std::sync::LazyLock<
+    Option<std::sync::Arc<svmscope::records::LogStore>>,
+> = std::sync::LazyLock::new(|| {
+    let dir = std::env::var("SVMSCOPE_RECORD_DIR").ok()?;
+    let dir = dir.trim();
+    if dir.is_empty() {
+        return None;
+    }
+    match svmscope::records::LogStore::open(dir) {
+        Ok(store) => {
+            let store = std::sync::Arc::new(store);
+            use svmscope::records::StateStore;
+            // The bundled seed list: the accounts the busiest programs'
+            // transactions share (pools, markets, vaults), regenerated
+            // with `cargo run --example seed_list`. Recording them from
+            // day one is what makes a first replay of a popular pool
+            // exact instead of "watched from now on".
+            // Each hot account costs about 1 MB a day in the dense tier,
+            // so the bundled list is taken from the top, most-shared first,
+            // up to `SVMSCOPE_RECORD_MAX_SEEDS` (default 400; 0 = none).
+            let max_seeds: usize = std::env::var("SVMSCOPE_RECORD_MAX_SEEDS")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(400);
+            let mut seeded = 0;
+            for line in BUNDLED_SEEDS.lines() {
+                if seeded >= max_seeds {
+                    break;
                 }
-                for seed in std::env::var("SVMSCOPE_RECORD_SEEDS")
-                    .unwrap_or_default()
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    if store.watch(seed).is_ok() {
-                        seeded += 1;
-                    }
+                let addr = line.split('#').next().unwrap_or("").trim();
+                if !addr.is_empty() && store.watch(addr).is_ok() {
+                    seeded += 1;
                 }
-                eprintln!(
-                    "record store: {} watched ({seeded} seeds)",
-                    store.watched().map(|w| w.len()).unwrap_or(0)
-                );
-                Some(store)
             }
-            Err(e) => {
-                eprintln!("record store disabled: {e}");
-                None
+            for seed in std::env::var("SVMSCOPE_RECORD_SEEDS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if store.watch(seed).is_ok() {
+                    seeded += 1;
+                }
             }
+            eprintln!(
+                "record store: {} watched ({seeded} seeds)",
+                store.watched().map(|w| w.len()).unwrap_or(0)
+            );
+            Some(store)
         }
-    });
+        Err(e) => {
+            eprintln!("record store disabled: {e}");
+            None
+        }
+    }
+});
 
 /// The durable queue behind the record store, from
 /// `SVMSCOPE_RECORD_GITHUB=owner/repo` and `SVMSCOPE_GITHUB_TOKEN`.

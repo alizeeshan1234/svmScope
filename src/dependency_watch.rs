@@ -184,6 +184,9 @@ pub struct DependencyReport {
 pub enum Baseline {
     /// The dependency's binary as it was before the deploy.
     Previous(Vec<u8>),
+    /// The dependency's binary before its current deploy, fetched from the
+    /// account-changes stream; fails without the stream.
+    BeforeDeploy,
     /// The binary in force at each transaction's own slot, from the history stream.
     AtSlot,
     /// No old binary; the current one on both sides.
@@ -195,6 +198,7 @@ impl Baseline {
     pub fn kind(&self) -> &'static str {
         match self {
             Baseline::Previous(_) => "previous",
+            Baseline::BeforeDeploy => "before_deploy",
             Baseline::AtSlot => "at_slot",
             Baseline::Current => "current",
         }
@@ -537,11 +541,35 @@ impl Scope {
         let deploy = self.deploy_info(dependency)?;
         let new_elf = self.program_elf(dependency)?;
         let exact = matches!(baseline, Baseline::AtSlot);
-        let baseline_kind = baseline.kind();
+        let mut baseline_kind = baseline.kind();
         let previous_elf = match baseline {
             Baseline::Previous(elf) => Some(elf),
+            Baseline::BeforeDeploy => {
+                let Some(d) = deploy.as_ref() else {
+                    return Err(Error::InvalidSpec(format!(
+                        "{dependency} is not an upgradeable program, so it has no earlier binary"
+                    )));
+                };
+                match self.program_elf_before(dependency, d.last_deploy_slot) {
+                    Some((_, elf)) if elf != new_elf => Some(elf),
+                    Some(_) => {
+                        return Err(Error::InvalidSpec(format!(
+                            "the stream returned the current binary for {dependency}; its earlier deploy is out of the stream's reach"
+                        )))
+                    }
+                    None => {
+                        return Err(Error::InvalidSpec(format!(
+                            "no earlier binary for {dependency}: the engine has no account-changes stream, or the deploy before slot {} is beyond its reach",
+                            d.last_deploy_slot
+                        )))
+                    }
+                }
+            }
             _ => None,
         };
+        if previous_elf.is_some() && baseline_kind == "before_deploy" {
+            baseline_kind = "previous";
+        }
 
         // One page of signatures, newest first; keep those before the deploy.
         // Recent history is often mostly deploys and unrelated mentions, so
@@ -550,12 +578,17 @@ impl Scope {
         // Signatures for an address include every transaction that mentions
         // it, deploys of the program itself among them; a deploy invokes the
         // loader, not the program, and cannot be replayed as a program call.
+        // A transaction that never reaches the dependency cannot be changed
+        // by it either, so only those that call both are worth replaying.
         let recent: Vec<_> = self
             .signatures(program_id, page)?
             .into_iter()
             .filter(|s| {
                 self.transaction_json(&s.signature)
-                    .map(|tx| invokes_program(&tx, program_id))
+                    .map(|tx| {
+                        invokes_program(&tx, program_id)
+                            && (dependency == program_id || invokes_program(&tx, dependency))
+                    })
                     .unwrap_or(false)
             })
             .collect();
@@ -571,7 +604,11 @@ impl Scope {
         // Nothing landed before the current deploy: every recent transaction
         // already ran under the new binary. Check them anyway and say so,
         // rather than answering with an empty report.
-        let corpus_note = if corpus.is_empty() && !recent.is_empty() {
+        let corpus_note = if recent.is_empty() {
+            Some(format!(
+                "none of {program_id}'s recent transactions call {dependency}"
+            ))
+        } else if corpus.is_empty() {
             corpus = recent.iter().take(limit).cloned().collect();
             Some(format!(
                 "no transactions landed before the dependency's current deploy (slot {}); \
