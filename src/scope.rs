@@ -258,7 +258,7 @@ impl Scope {
 
     /// Up to `limit` mentions of `address` strictly before `signature`,
     /// newest first, as `(slot, signature)`.
-    fn mentions_before(
+    pub(crate) fn mentions_before(
         &self,
         address: &str,
         signature: &str,

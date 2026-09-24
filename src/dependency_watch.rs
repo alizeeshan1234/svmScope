@@ -27,6 +27,10 @@ use crate::error::{Error, Result};
 use crate::replay::ReplayResult;
 use crate::scope::Scope;
 
+/// How many of a program's recent signatures a check will examine while
+/// looking for transactions that reach the dependency.
+const CORPUS_MAX_LOOKED: usize = 400;
+
 /// The `dependency_registry` program on devnet.
 pub const DEVNET_REGISTRY: &str = "4nH59dWUJ5rgTZJTybPbfGY1sgBDwKgrKMBXpRtdxhhg";
 
@@ -597,18 +601,52 @@ impl Scope {
             }
             None
         };
-        let recent: Vec<_> = self
-            .signatures(program_id, page)?
-            .into_iter()
-            .filter(|s| {
-                fetch(&s.signature)
-                    .map(|tx| {
-                        invokes_program(&tx, program_id)
-                            && (dependency == program_id || invokes_program(&tx, dependency))
-                    })
-                    .unwrap_or(false)
-            })
-            .collect();
+        // Walk the program's history newest first, page by page, until
+        // enough transactions that reach the dependency have been found or
+        // the walk has looked far enough: a busy router calls any one venue
+        // in a small share of its transactions.
+        let qualifies = |signature: &str| -> bool {
+            fetch(signature)
+                .map(|tx| {
+                    invokes_program(&tx, program_id)
+                        && (dependency == program_id || invokes_program(&tx, dependency))
+                })
+                .unwrap_or(false)
+        };
+        let mut recent: Vec<crate::SigInfo> = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut looked = 0usize;
+        let wanted = limit.max(1);
+        while recent.len() < wanted && looked < CORPUS_MAX_LOOKED {
+            let batch: Vec<crate::SigInfo> = match cursor.as_deref() {
+                None => self.signatures(program_id, page)?,
+                Some(c) => match self.mentions_before(program_id, c, page) {
+                    Some(v) => v
+                        .into_iter()
+                        .map(|(slot, signature)| crate::SigInfo {
+                            signature,
+                            slot: Some(slot),
+                            err: false,
+                            block_time: None,
+                        })
+                        .collect(),
+                    None => break,
+                },
+            };
+            if batch.is_empty() {
+                break;
+            }
+            looked += batch.len();
+            cursor = batch.last().map(|s| s.signature.clone());
+            for s in batch {
+                if recent.len() >= wanted.saturating_mul(2) {
+                    break;
+                }
+                if qualifies(&s.signature) {
+                    recent.push(s);
+                }
+            }
+        }
         let mut corpus: Vec<_> = recent
             .iter()
             .filter(|s| match (deploy.as_ref(), s.slot) {
@@ -641,13 +679,18 @@ impl Scope {
         let mut transactions = Vec::with_capacity(corpus.len());
         let mut summary = ReportSummary::default();
         for sig in corpus {
-            let onchain_success = !sig.err;
+            let mut onchain_success = !sig.err;
             let checked = (|| -> Result<CheckedTransaction> {
                 let mut replay = if exact {
                     self.replay_at_slot(&sig.signature)?
                 } else {
                     self.replay(&sig.signature)?
                 };
+                // Paged signatures carry no outcome; the replay's record of
+                // what the chain did is the authority either way.
+                if let Some(record) = replay.recorded() {
+                    onchain_success = record.success;
+                }
                 // With a snapshotted previous binary, "before" is that binary
                 // on the same state; the loaded (current) one is restored by
                 // compare_patch afterwards.
