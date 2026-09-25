@@ -546,6 +546,22 @@ runs a check on demand.
 Anchor 1.0 starts Surfpool for `anchor test`; if it does not start on your
 machine, `anchor test --validator legacy` uses the Solana test validator.
 
+## Lift: composition in transaction construction, measured
+
+A router such as Jupiter takes one instruction and calls the venues from
+inside its program. `GET /lift/{signature}` rebuilds a landed transaction
+with those inner calls as top-level instructions the client would send
+itself, runs the original and the rebuilt transaction on the state the
+original ran in, and reports: whether every token balance still moves the
+same, what the on-chain router cost in compute, whether the rebuilt
+transaction fits in a 1232-byte packet, and which inner calls cannot be
+lifted because only the router's program-derived address could sign them.
+A router's calls to itself (event emission) are dropped; token, associated
+token and system helpers are left in place unless named with `?router=`.
+`?exact=true` replays at the transaction's own slot, for swaps whose
+inputs have drifted since. The rebuilt transaction is returned unsigned
+as base64. From the library: `Scope::lift(signature, router)`.
+
 ## Roadmap
 
 - [x] Decode, reconstruct, replay, mutate, time-travel, feature gates
