@@ -2648,7 +2648,7 @@ impl Scope {
             }))
     }
 
-    fn account_raw(&self, address: &str) -> Result<Option<RawAccount>> {
+    pub(crate) fn account_raw(&self, address: &str) -> Result<Option<RawAccount>> {
         use base64::Engine;
         let resp: serde_json::Value = self
             .client

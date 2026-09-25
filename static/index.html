@@ -1452,11 +1452,11 @@ input.derived { border-color: var(--green-border); color: var(--green); }
     <div class="grid" id="watchMain">
       <div class="card full">
         <h2>Run a check now <span class="count" id="watchCheckState"></span></h2>
-        <p class="whatif-lead">Replay a program's recent transactions that call a dependency, once with the dependency's binary from before its latest deploy and once with the current one, and see what the deploy changed. The earlier binary comes from the watcher when it holds one, else from the account history stream on mainnet; without either the report can only say the transactions still execute.</p>
+        <p class="whatif-lead">Replay a program's recent transactions that call a dependency, once with the dependency's binary from before its latest deploy and once with the current one, and see what the deploy changed. No program of your own? Give the wallet that sends your transactions instead: every transaction it signed that calls the dependency is replayed. The earlier binary comes from the watcher when it holds one, else from the account history stream on mainnet; without either the report can only say the transactions still execute.</p>
         <div class="wform">
           <div class="wfield wide">
-            <label class="flabel" for="watchProgram">Your program id</label>
-            <input id="watchProgram" placeholder="the program whose transactions are replayed" spellcheck="false" autocomplete="off" />
+            <label class="flabel" for="watchProgram">Your program id, or your wallet</label>
+            <input id="watchProgram" placeholder="the program whose transactions are replayed, or the wallet that sends them" spellcheck="false" autocomplete="off" />
           </div>
           <div class="wfield wide">
             <label class="flabel" for="watchDependency">Dependency program id</label>
@@ -5246,7 +5246,8 @@ function renderReport(r) {
     const err = t.error ? `<div class="post-bal">${esc(t.error)}</div>` : '';
     return `<tr><td><a href="/tx/${encodeURIComponent(t.signature)}" data-sig="${esc(t.signature)}" class="mono">${short(t.signature)}</a>${err}</td><td>${t.slot ?? ''}</td><td>${t.onchain_success ? 'ok' : 'failed'}</td><td>${before}</td><td>${after}</td><td>${delta}</td><td>${flag}</td></tr>`;
   }).join('');
-  return `<div class="empty">baseline: ${base}${dep}</div><div class="empty">${esc(r.verdict || '')} · ${summaryLine(r.summary)}</div>${note}` +
+  const who = r.subject === 'address' ? ' · transactions signed or touched by the address' : '';
+  return `<div class="empty">baseline: ${base}${dep}${who}</div><div class="empty">${esc(r.verdict || '')} · ${summaryLine(r.summary)}</div>${note}` +
     `<div style="overflow-x:auto"><table class="fields"><thead><tr><th>transaction</th><th>slot</th><th>on chain</th><th>before</th><th>after</th><th>compute</th><th></th></tr></thead><tbody>${rows || '<tr><td colspan="7" class="empty">no transactions</td></tr>'}</tbody></table></div>`;
 }
 async function loadWatch() {

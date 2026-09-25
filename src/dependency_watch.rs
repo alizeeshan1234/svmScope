@@ -155,8 +155,15 @@ impl From<&ReplayResult> for Outcome {
 /// The report one dependency check produces.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DependencyReport {
-    /// The program whose transactions were replayed.
+    /// The program, or plain address, whose transactions were replayed.
     pub program_id: String,
+    /// `program` when the subject is executable and must appear as an
+    /// invoked program in each transaction; `address` when it is a wallet or
+    /// any other account, in which case every transaction that mentions it
+    /// and calls the dependency counts. Integrators with no program of
+    /// their own build transactions straight against a dependency, and
+    /// their fee payer is the address.
+    pub subject: &'static str,
     /// The dependency whose new binary was swapped in.
     pub dependency: String,
     /// The dependency's current deploy, `None` if it is not upgradeable.
@@ -492,12 +499,35 @@ impl Scope {
         }))
     }
 
+    /// Whether `address` is an executable account on this scope's cluster.
+    pub fn is_executable(&self, address: &str) -> Result<bool> {
+        if Address::from_str(address).is_err() {
+            return Err(Error::InvalidAddress(address.to_string()));
+        }
+        match self.account_raw(address)? {
+            Some((_, _, executable, _)) => Ok(executable),
+            None => Err(Error::AccountNotFound(address.to_string())),
+        }
+    }
+
     /// Whether `authority` holds the upgrade authority of `program_id` on
     /// this scope's cluster. `Ok(false)` when the program is absent here, is
     /// not upgradeable, or belongs to someone else, so a registry on one
     /// cluster can vouch for programs on another only when the same key
     /// controls them there.
+    ///
+    /// A registered subject that is not a program at all, a wallet that
+    /// builds transactions straight against a dependency, is vouched for by
+    /// being the authority itself: only that wallet could have signed the
+    /// registration.
     pub fn holds_upgrade_authority(&self, program_id: &str, authority: &str) -> Result<bool> {
+        if program_id == authority {
+            return match self.is_executable(program_id) {
+                Ok(executable) => Ok(!executable),
+                Err(Error::AccountNotFound(_)) => Ok(false),
+                Err(e) => Err(e),
+            };
+        }
         match self.deploy_info(program_id) {
             Ok(Some(d)) => Ok(d.upgrade_authority.as_deref() == Some(authority)),
             Ok(None) => Ok(false),
@@ -544,6 +574,12 @@ impl Scope {
         }
         let deploy = self.deploy_info(dependency)?;
         let new_elf = self.program_elf(dependency)?;
+        let subject_is_program = self.is_executable(program_id)?;
+        let subject = if subject_is_program {
+            "program"
+        } else {
+            "address"
+        };
         let exact = matches!(baseline, Baseline::AtSlot);
         let mut baseline_kind = baseline.kind();
         let previous_elf = match baseline {
@@ -605,8 +641,10 @@ impl Scope {
         // enough transactions that reach the dependency have been found or
         // the walk has looked far enough: a busy router calls any one venue
         // in a small share of its transactions.
+        // A program must be invoked in the transaction; a plain address only
+        // has to be mentioned, which the signature lookup already guarantees.
         let qualifies = |tx: &serde_json::Value| -> bool {
-            invokes_program(tx, program_id)
+            (!subject_is_program || invokes_program(tx, program_id))
                 && (dependency == program_id || invokes_program(tx, dependency))
         };
         // A page of transactions is one batched request; a batch the endpoint
@@ -777,6 +815,7 @@ impl Scope {
 
         let mut report = DependencyReport {
             program_id: program_id.to_string(),
+            subject,
             dependency: dependency.to_string(),
             dependency_deploy: deploy,
             baseline: baseline_kind,
@@ -963,6 +1002,7 @@ mod tests {
     fn verdict_reads_plainly() {
         let mut r = DependencyReport {
             program_id: "p".into(),
+            subject: "program",
             dependency: "d".into(),
             dependency_deploy: None,
             baseline: "previous",
