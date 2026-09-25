@@ -24,6 +24,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let exact = std::env::var("LIFT_EXACT").is_ok();
     let r = scope.lift_with(&sig, None, exact)?;
     println!("verdict: {}", r.verdict);
+    {
+        let mut o: Vec<(&String, &i128)> = r.original.token_deltas.iter().collect();
+        o.sort();
+        let mut l: Vec<(&String, &i128)> = r.lifted.token_deltas.iter().collect();
+        l.sort();
+        println!(
+            "  maps equal: {} | original {:?} | lifted {:?}",
+            r.original.token_deltas == r.lifted.token_deltas,
+            o.iter().map(|(k, v)| (&k[..6], **v)).collect::<Vec<_>>(),
+            l.iter().map(|(k, v)| (&k[..6], **v)).collect::<Vec<_>>()
+        );
+    }
+    println!("equivalent={} original.success={} lifted.success={} deltas original={} lifted={} compute {} vs {}", r.equivalent, r.original.success, r.lifted.success, r.original.token_deltas.len(), r.lifted.token_deltas.len(), r.original.compute_units, r.lifted.compute_units);
     for (i, ix) in r.lifted_instructions.iter().enumerate() {
         println!(
             "  lifted[{i}] {} from={:?} data={} accounts={:?}",

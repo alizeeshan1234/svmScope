@@ -559,7 +559,8 @@ impl Scope {
                     // signer that only exists inside a CPI.
                     let pda_signed = err.contains("MissingRequiredSignature")
                         || err.contains("Custom(2002)")
-                        || err.contains("Custom(2006)");
+                        || err.contains("Custom(2006)")
+                        || err.contains("Custom(3010)");
                     let logs_tail: Vec<String> = lifted_run
                         .result
                         .logs
@@ -574,7 +575,9 @@ impl Scope {
                         .collect();
                     let reason = if pda_signed {
                         format!(
-                            "needs a signer only the router's program-derived address could provide; cannot exist as a top-level instruction ({err})"
+                            "needs a signer only the router's program-derived address could provide, \
+                             so it cannot exist as a top-level instruction: the router itself is the \
+                             swapper here, holding the intermediate tokens in its own accounts ({err})"
                         )
                     } else if logs_tail.is_empty() {
                         err.clone()
