@@ -448,6 +448,13 @@ impl Scope {
                 None => static_r.push(a.clone()),
             }
         }
+        // Loaded addresses resolve table-major: every writable address of the
+        // first table, then the second's, then all readonly ones the same
+        // way. The compiled indexes must follow that order, not the order
+        // the instructions happened to use the addresses in.
+        let table_index = |a: &String| table_of.get(a).map(|(t, _, _)| *t).unwrap_or(0);
+        loaded_w.sort_by_key(table_index);
+        loaded_r.sort_by_key(table_index);
         let ro_unsigned = static_r.len();
         static_new.extend(static_w);
         static_new.extend(static_r);
