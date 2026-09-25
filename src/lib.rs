@@ -144,6 +144,7 @@ mod idl_encode;
 mod idl_model;
 mod invariant;
 pub(crate) mod ixname;
+pub mod lift;
 mod preflight;
 #[cfg(feature = "profiler")]
 pub mod profile;
@@ -180,6 +181,7 @@ pub use diffs::{BalanceChange, TokenChange};
 pub use error::{Error, Result};
 pub use fixture::{Fixture, FixtureEntry, FIXTURE_VERSION};
 pub use invariant::Invariant;
+pub use lift::{Blocked, LiftReport, LiftRun, RouterLift};
 pub use preflight::{compute_breakdown, AccountRole, PreflightIx, PreflightOverview};
 pub use program::{MethodBuilder, ProgramClient};
 pub use replay::{

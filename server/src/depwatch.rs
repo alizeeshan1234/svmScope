@@ -566,6 +566,51 @@ pub async fn check_handler(
     .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
+#[derive(Deserialize)]
+pub struct LiftQuery {
+    /// The one program to lift out; default lifts every router except helpers.
+    pub router: Option<String>,
+    /// Replay at the transaction's own slot instead of reconstructed state.
+    pub exact: Option<bool>,
+    /// `mainnet` or `devnet`; default is the check cluster.
+    pub cluster: Option<String>,
+}
+
+/// GET /lift/{signature} — rebuild a landed transaction with its router's
+/// inner calls at the top level, run both on the same state, and report.
+pub async fn lift_handler(
+    Path(signature): Path<String>,
+    Query(q): Query<LiftQuery>,
+) -> Result<Json<svmscope::LiftReport>, (StatusCode, String)> {
+    let rpc = match q.cluster.as_deref() {
+        None => check_rpc(),
+        Some(label) => rpc_for_label(label).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "cluster must be {} or {}",
+                    cluster_label(&check_rpc()),
+                    cluster_label(&registry_rpc())
+                ),
+            )
+        })?,
+    };
+    let exact = q.exact.unwrap_or(false);
+    let router = q.router.clone();
+    tokio::task::spawn_blocking(move || {
+        check_scope(rpc).lift_with(&signature, router.as_deref(), exact)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?
+    .map(Json)
+    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+}
+
 /// GET /dependency_watch — the watcher's status.
 pub async fn status_handler() -> Json<WatchStatus> {
     let mut s = STATUS.lock().map(|s| s.clone()).unwrap_or_default();

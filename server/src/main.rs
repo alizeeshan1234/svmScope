@@ -2,6 +2,9 @@
 //!
 //! Run with `cargo run --bin server`, then open http://127.0.0.1:3000.
 
+// The API index is one large `json!` literal; the macro recurses per entry.
+#![recursion_limit = "512"]
+
 mod depwatch;
 mod guard;
 mod relay;
@@ -2611,6 +2614,7 @@ async fn api_index() -> Json<serde_json::Value> {
             "GET  /signatures/{address}": "Recent signatures for an address.",
             "GET  /registry":               "?registry= — every protocol and dependency in the on-chain dependency registry (devnet).",
             "GET  /dependency_check/{program}": "?dependency=&limit=&baseline=previous|at_slot|current — replay the program's recent transactions against the dependency's current binary and report what changed.",
+            "GET  /lift/{signature}":       "?router=&exact=&cluster= — rebuild a landed transaction with its router's inner calls as top-level instructions (composition in transaction construction), run both on the same state, report equivalence, compute saved, packet fit, and what could not be lifted.",
             "GET  /dependency_watch":       "The watcher: registry, last poll, dependencies whose binary it holds.",
             "GET  /dependency_reports":     "Reports the watcher produced on redeploys, newest first; /dependency_reports/{id} for one in full.",
             "POST /alerts/test":            "A sink for alert_url while trying the feature; GET lists what it received.",
@@ -2861,6 +2865,7 @@ async fn main() {
         // Dependency watch: the on-chain registry plus checks and reports.
         .route("/registry", get(depwatch::registry_handler))
         .route("/dependency_check/{program}", get(depwatch::check_handler))
+        .route("/lift/{signature}", get(depwatch::lift_handler))
         .route("/dependency_watch", get(depwatch::status_handler))
         .route("/dependency_reports", get(depwatch::reports_handler))
         .route("/dependency_reports/{id}", get(depwatch::report_handler))

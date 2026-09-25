@@ -522,7 +522,7 @@ impl Scope {
     /// Accept a transaction signature OR an account/program address. A 32-byte
     /// value parses as an address and resolves to its most recent transaction;
     /// a 64-byte signature is used as-is.
-    fn resolve_signature(&self, input: &str) -> Result<String> {
+    pub(crate) fn resolve_signature(&self, input: &str) -> Result<String> {
         let input = input.trim();
         if Address::from_str(input).is_ok() {
             let resp: serde_json::Value = self
@@ -3386,6 +3386,25 @@ impl Replay {
     /// observation (`result.success == false`), never an `Err`.
     pub fn run(&self) -> Result<Replayed> {
         self.simulate(&[])
+    }
+
+    /// Run a different transaction on this replay's world, with nothing
+    /// mutated: the lift's rebuilt transaction against the original's state.
+    pub(crate) fn run_transaction(&self, tx: VersionedTransaction) -> Result<Replayed> {
+        let ctx = self.ctx.with_transaction(tx);
+        let (mut result, raw_diffs) = ctx.run_with_diff(&[])?;
+        let explain = (!result.success)
+            .then(|| explain_error(&result, ctx.idl_map()))
+            .flatten();
+        if result.error_name.is_none() {
+            result.error_name = explain.as_ref().map(|e| e.title.clone());
+        }
+        Ok(Replayed {
+            diffs: decode_diffs(raw_diffs, ctx.idl_map()),
+            clock: None,
+            explain,
+            result,
+        })
     }
 
     /// Replay after applying what-if `mutations` to a fresh copy of the state.

@@ -1478,6 +1478,30 @@ input.derived { border-color: var(--green-border); color: var(--green); }
         <div class="dbg-progress hidden" id="watchProgress"><span class="spinner"></span><span id="watchProgressText">replaying…</span></div>
         <div id="watchResult"></div>
       </div>
+      <div class="card full">
+        <h2>Lift a transaction <span class="count" id="liftState"></span></h2>
+        <p class="whatif-lead">Composition in transaction construction, measured. Take a landed transaction whose router called venues from inside its program, rebuild it with those calls as top-level instructions the client would send itself, and run both on the same state. You get whether every token balance still moves the same, how much compute the on-chain router cost, whether the rebuilt transaction even fits in a packet, and which inner calls cannot be lifted because only the router's program-derived address could sign them.</p>
+        <div class="wform" style="grid-template-columns: minmax(0, 4fr) minmax(0, 3fr) auto auto">
+          <div class="wfield">
+            <label class="flabel" for="liftSig">Transaction signature</label>
+            <input id="liftSig" placeholder="a landed transaction that routed through other programs" spellcheck="false" autocomplete="off" />
+          </div>
+          <div class="wfield">
+            <label class="flabel" for="liftRouter">Router to lift (optional)</label>
+            <input id="liftRouter" placeholder="default: every router except token/ATA/system helpers" spellcheck="false" autocomplete="off" />
+          </div>
+          <div class="wfield">
+            <label class="flabel" for="liftExact">Exact state</label>
+            <select id="liftExact" title="replay at the transaction's own slot (slower)"><option value="false">reconstructed</option><option value="true">at its slot</option></select>
+          </div>
+          <div class="wfield wact">
+            <button class="btn" id="liftRun">Lift<svg class="ic" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
+          </div>
+        </div>
+        <div class="ex" id="liftTry"></div>
+        <div class="dbg-progress hidden" id="liftProgress"><span class="spinner"></span><span>replaying original and lifted…</span></div>
+        <div id="liftResult"></div>
+      </div>
       <div class="card">
         <h2>Registry <span class="count" id="watchRegCount"></span></h2>
         <p class="whatif-lead">Protocols registered on devnet and the programs they watch. Register yours with the <code>dependency_registry</code> program in the repo: the signer must hold your program's upgrade authority.</p>
@@ -5276,6 +5300,8 @@ async function loadWatch() {
       ['6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P', '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P', 'Pump against its own upgrade'],
     ].map(([p, d, label]) => `<a data-try-program="${p}" data-try-dependency="${d}" data-try-cluster="mainnet">${label}</a>`);
     $('watchTry').innerHTML = 'Try: ' + mainnetTries.concat(tries).join(' · ');
+    $('liftTry').innerHTML = 'Try: <a data-try-lift="2bqmypceHwKj5zktPjHKfHMPdtVRchdzgJmfyCaZv33CEdPbJpxPFPbS4yHpM8fnmS18xaEEhdJZSTWoGTzXPKGq">a Jupiter swap that routed through Raydium v4</a>';
+    $('liftTry').querySelectorAll('a[data-try-lift]').forEach(a => a.addEventListener('click', () => { $('liftSig').value = a.dataset.tryLift; $('liftSig').focus(); }));
     $('watchTry').querySelectorAll('a[data-try-program]').forEach(a => a.addEventListener('click', () => {
       $('watchProgram').value = a.dataset.tryProgram;
       $('watchDependency').value = a.dataset.tryDependency;
@@ -5314,6 +5340,35 @@ async function loadWatch() {
     catch (err) { body.innerHTML = `<div class="empty">${esc(err.message || err)}</div>`; }
   }));
 }
+function renderLift(r) {
+  const run = (label, x) => `<div class="row"><div class="grow">${label}</div><div class="amt-col">${x.success ? '<span class="amt pos">ok</span>' : `<span class="amt neg">${esc(x.error || 'failed')}</span>`} · ${x.instructions} ix · ${x.compute_units.toLocaleString()} CU · ${x.size_bytes} bytes</div></div>`;
+  const routers = r.routers.map(x => `<div class="row"><div class="grow">${copyPill(x.program)} made ${x.inner_calls} inner call${x.inner_calls === 1 ? '' : 's'}</div><div class="amt-col"><span class="empty">${x.callees.map(short).join(', ')}</span></div></div>`).join('');
+  const blocked = r.blocked.map(b => `<div class="row"><div class="grow"><span class="amt neg">blocked</span> lifted instruction ${b.lifted_index}, ${copyPill(b.program)} out of ${short(b.router)}</div></div><div class="empty">${esc(b.reason)}</div>`).join('');
+  const ixs = r.lifted_instructions.map((ix, i) => `<tr><td>${i}</td><td>${copyPill(ix.program)}</td><td>${ix.from_router ? short(ix.from_router) : '<span class="empty">kept</span>'}</td><td>${ix.accounts.length}</td><td>${ix.data_len}</td></tr>`).join('');
+  const saved = r.compute_saved == null ? '' : `<div class="row"><div class="grow">compute the on-chain router cost</div><div class="amt-col"><span class="amt ${r.compute_saved >= 0 ? 'pos' : 'neg'}">${r.compute_saved >= 0 ? '' : '−'}${Math.abs(r.compute_saved).toLocaleString()} CU</span></div></div>`;
+  const fit = `<div class="row"><div class="grow">lifted transaction size</div><div class="amt-col">${r.lifted.size_bytes} bytes ${r.fits_packet ? '<span class="amt pos">fits the 1232-byte packet</span>' : '<span class="amt neg">over the 1232-byte packet limit</span>'}</div></div>`;
+  const eq = `<div class="row"><div class="grow">every token balance moves the same</div><div class="amt-col">${r.equivalent ? '<span class="amt pos">yes</span>' : '<span class="amt neg">no</span>'}</div></div>`;
+  const logs = r.lifted_logs && r.lifted_logs.length ? `<details><summary class="empty">last log lines of the lifted run</summary><pre style="white-space:pre-wrap;font-size:11px">${esc(r.lifted_logs.join('\n'))}</pre></details>` : '';
+  return `<div class="empty">${esc(r.verdict)}</div>` +
+    `<div class="rows">${run('original', r.original)}${run('lifted', r.lifted)}${eq}${saved}${fit}${routers}${r.dropped_self_calls ? `<div class="empty">${r.dropped_self_calls} self-call${r.dropped_self_calls === 1 ? '' : 's'} (event emission) dropped</div>` : ''}${blocked}</div>` +
+    `<details><summary class="empty">lifted transaction, ${r.lifted_instructions.length} instructions</summary><div style="overflow-x:auto"><table class="fields"><thead><tr><th>#</th><th>program</th><th>from</th><th>accounts</th><th>data</th></tr></thead><tbody>${ixs}</tbody></table></div><div class="empty">unsigned, base64: ${copyPill(r.lifted_tx_b64, 'copy')}</div></details>${logs}`;
+}
+$('liftRun').addEventListener('click', async () => {
+  const sig = $('liftSig').value.trim(); if (!sig) return;
+  const router = $('liftRouter').value.trim(); const exact = $('liftExact').value === 'true';
+  const cluster = $('watchCluster').value;
+  $('liftProgress').classList.remove('hidden'); $('liftResult').innerHTML = ''; $('liftState').textContent = '';
+  const t0 = Date.now();
+  try {
+    const res = await api(`/lift/${encodeURIComponent(sig)}?exact=${exact}&cluster=${encodeURIComponent(cluster)}${router ? '&router=' + encodeURIComponent(router) : ''}`);
+    if (!res.ok) throw new Error(await res.text());
+    const rep = await res.json();
+    $('liftState').textContent = `${((Date.now() - t0) / 1000).toFixed(1)}s`;
+    $('liftResult').innerHTML = renderLift(rep);
+  } catch (err) {
+    $('liftResult').innerHTML = `<div class="dbg-err">${esc(err.message || err)}</div>`;
+  } finally { $('liftProgress').classList.add('hidden'); }
+});
 $('navWatch').addEventListener('click', () => showWatch());
 $('watchRun').addEventListener('click', async () => {
   const program = $('watchProgram').value.trim(), dependency = $('watchDependency').value.trim();

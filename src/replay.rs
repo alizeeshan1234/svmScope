@@ -1596,7 +1596,10 @@ impl ReplayContext {
 }
 
 /// Fetch the raw transaction (base64 wire bytes) and deserialize it.
-fn fetch_transaction(client: &RpcClient, signature: &str) -> Result<VersionedTransaction> {
+pub(crate) fn fetch_transaction(
+    client: &RpcClient,
+    signature: &str,
+) -> Result<VersionedTransaction> {
     let resp: serde_json::Value = client
         .send(
             RpcRequest::GetTransaction,
@@ -2444,6 +2447,14 @@ impl ReplayContext {
             }
         }
         Ok(tx)
+    }
+
+    /// The same world with a different transaction to run: the lift compares
+    /// a rebuilt transaction against the original on identical state.
+    pub(crate) fn with_transaction(&self, tx: VersionedTransaction) -> ReplayContext {
+        let mut ctx = self.clone();
+        ctx.tx = tx;
+        ctx
     }
 
     /// The transaction with `mutations` applied to its instruction data, for
