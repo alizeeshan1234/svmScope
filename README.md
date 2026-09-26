@@ -434,6 +434,19 @@ cargo run -p svmscope-server   # → http://127.0.0.1:3000, GET /api lists the s
 A typed TypeScript client lives in [`sdk/`](./sdk). Point it at your own RPC
 endpoint — the public mainnet RPC is heavily rate-limited.
 
+### Who is using it
+
+The server counts every work-doing request and every page load per
+anonymous client (a hash of the address, never the address). Set
+`SVMSCOPE_STATS_TOKEN` and open `/analytics` on the UI with that token to see
+people per day, what they used, where they came from, and each client's
+activity; `GET /stats?token=…` is the same as JSON. The counters live in
+`SVMSCOPE_STATS_FILE` (default `svmscope-stats.json`) and, on a host whose
+disk does not survive a restart, are also kept as a release asset when
+`SVMSCOPE_STATS_GITHUB=owner/repo` (falling back to `SVMSCOPE_RECORD_GITHUB`)
+and `SVMSCOPE_GITHUB_TOKEN` are set: restored at boot, pushed every ten
+minutes while they change, and on shutdown.
+
 ### Recording state for historical replay
 
 `replay_at_slot` needs no archive. For every account the server has been

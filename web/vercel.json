@@ -21,6 +21,10 @@
     {
       "source": "/watch",
       "destination": "/"
+    },
+    {
+      "source": "/analytics",
+      "destination": "/"
     }
   ],
   "headers": [

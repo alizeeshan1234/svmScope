@@ -14,7 +14,7 @@ use axum::{
     body::Body,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::{ConnectInfo, Path, Query, Request},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -2621,7 +2621,8 @@ async fn api_index() -> Json<serde_json::Value> {
             "GET  /instructions/{program}": "The instructions a program's on-chain IDL declares.",
             "POST /idl_instructions":     "{ idl } — the same, for an IDL supplied in the request.",
             "POST /decode_account":       "{ owner, data_b64 } — decode raw account bytes.",
-            "GET  /stats":                "Usage counters (token-gated)."
+            "POST /hit":                  "{ page, referrer } — the UI reports one page load.",
+            "GET  /stats":                "Usage counters (token-gated); the /analytics page reads them."
         }
     }))
 }
@@ -2647,8 +2648,13 @@ fn trust_proxy() -> bool {
 }
 
 fn client_id(req: &Request, peer: Option<SocketAddr>) -> String {
+    client_id_from(req.headers(), peer)
+}
+
+/// The same identity from a handler's `HeaderMap` (see [`client_id`]).
+fn client_id_from(headers: &HeaderMap, peer: Option<SocketAddr>) -> String {
     let forwarded = if trust_proxy() {
-        req.headers()
+        headers
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.split(',').next_back())
@@ -2684,7 +2690,12 @@ async fn rate_limit(
         }
         // Count real usage (allowed, work-doing requests) so the operator can see
         // whether anyone is using svmscope. Private — read via the /stats token.
-        stats::record(label, &cid);
+        let agent = req
+            .headers()
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        stats::record(label, &cid, agent);
     }
     next.run(req).await
 }
@@ -2722,6 +2733,14 @@ fn endpoint_label(path: &str) -> Option<&'static str> {
         Some("decode_account")
     } else if path.starts_with("/instructions") || path.starts_with("/idl_instructions") {
         Some("instructions")
+    } else if path.starts_with("/lift") {
+        Some("lift")
+    } else if path.starts_with("/dependency_check") {
+        Some("dependency_check")
+    } else if path.starts_with("/dependency_watch") || path.starts_with("/dependency_reports") {
+        Some("dependency_reports")
+    } else if path.starts_with("/registry") {
+        Some("registry")
     } else {
         None
     }
@@ -2790,16 +2809,47 @@ struct StatsQuery {
 /// If the token isn't configured, or the caller's `?token=` doesn't match, this
 /// returns a plain 404 — so the endpoint is invisible to anyone who doesn't hold
 /// the secret, and never exposes usage data publicly.
-async fn stats_handler(Query(q): Query<StatsQuery>) -> Response {
+async fn stats_handler(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<StatsQuery>,
+) -> Response {
     let configured = std::env::var("SVMSCOPE_STATS_TOKEN")
         .ok()
         .filter(|t| !t.is_empty());
     match configured {
         Some(expected) if q.token.as_deref().is_some_and(|t| ct_eq(t, &expected)) => {
-            Json(stats::snapshot_json()).into_response()
+            let you = client_id_from(&headers, Some(peer));
+            Json(stats::snapshot_json(&you)).into_response()
         }
         _ => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
+}
+
+/// POST body for /hit: which page the UI loaded and the host that linked to it.
+#[derive(Deserialize)]
+struct HitBody {
+    #[serde(default)]
+    page: String,
+    #[serde(default)]
+    referrer: String,
+}
+
+/// POST /hit — the UI reports one page load, so visitors who never run
+/// anything still count. Nothing is returned and nothing is stored about
+/// the visitor beyond a hashed client id.
+async fn hit_handler(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<HitBody>,
+) -> StatusCode {
+    let cid = client_id_from(&headers, Some(peer));
+    let agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    stats::record_view(&body.page, &body.referrer, &cid, agent);
+    StatusCode::NO_CONTENT
 }
 
 /// Constant-time string equality for the stats token, so a mismatch can't be
@@ -2823,8 +2873,17 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 async fn main() {
     spawn_recorder();
     depwatch::spawn();
-    // Restore any persisted usage tally before serving.
-    stats::load();
+    // Restore the usage tally (local file, then the durable copy) before
+    // serving, and push it back while it changes.
+    let _ = tokio::task::spawn_blocking(stats::init).await;
+    tokio::spawn(async {
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(600));
+        every.tick().await;
+        loop {
+            every.tick().await;
+            let _ = tokio::task::spawn_blocking(|| stats::push(false)).await;
+        }
+    });
 
     // Permissive CORS so any web app can call the API cross-origin — this is what
     // turns the engine from a local binary into infrastructure others build on.
@@ -2857,6 +2916,8 @@ async fn main() {
         .route("/address/{address}", get(index))
         .route("/flame/{signature}", get(index))
         .route("/watch", get(index))
+        .route("/analytics", get(index))
+        .route("/hit", post(hit_handler))
         .route("/instructions/{program}", get(instructions_handler))
         .route("/idl_instructions", post(idl_instructions_handler))
         .route("/decode_account", post(decode_account_handler))
@@ -2933,6 +2994,8 @@ async fn main() {
     {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
+    // The usage tally too: the free tier's disk does not outlive the process.
+    let _ = tokio::task::spawn_blocking(|| stats::push(false)).await;
 }
 
 #[cfg(test)]

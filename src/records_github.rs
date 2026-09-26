@@ -145,6 +145,59 @@ impl GithubQueue {
             .ok_or_else(|| api_err("create release", "no id in response"))
     }
 
+    /// The release tagged `tag`, created (with `name` and `body`) if missing.
+    /// Returns its id. For a fixed, non-rolling slot such as the usage tally,
+    /// where one release is replaced in place rather than one made per day.
+    pub fn ensure_tagged_release(&self, tag: &str, name: &str, body: &str) -> Result<u64> {
+        let existing = self.get(&self.api(&format!("/releases/tags/{tag}")))?;
+        if let Some(id) = existing["id"].as_u64() {
+            return Ok(id);
+        }
+        let body = serde_json::json!({
+            "tag_name": tag,
+            "name": name,
+            "body": body,
+            "draft": false,
+            "prerelease": true,
+        });
+        let created = match self.create_release(&body)? {
+            Some(v) => v,
+            None => {
+                self.seed_readme()?;
+                self.create_release(&body)?
+                    .ok_or_else(|| api_err("create release", "still refused after seeding"))?
+            }
+        };
+        created["id"]
+            .as_u64()
+            .ok_or_else(|| api_err("create release", "no id in response"))
+    }
+
+    /// The bytes of the asset called `name` on `release_id`, or `None` when
+    /// the release has no such asset.
+    pub fn download_asset(&self, release_id: u64, name: &str) -> Result<Option<Vec<u8>>> {
+        let assets = self.get(&self.api(&format!("/releases/{release_id}/assets")))?;
+        let Some(url) = assets.as_array().and_then(|list| {
+            list.iter()
+                .find(|a| a["name"].as_str() == Some(name))
+                .and_then(|a| a["url"].as_str().map(str::to_string))
+        }) else {
+            return Ok(None);
+        };
+        let bytes = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.token)
+            .header("Accept", "application/octet-stream")
+            .send()
+            .map_err(|e| api_err("download", e))?
+            .error_for_status()
+            .map_err(|e| api_err("download", e))?
+            .bytes()
+            .map_err(|e| api_err("download bytes", e))?;
+        Ok(Some(bytes.to_vec()))
+    }
+
     /// `POST /releases`; `None` when GitHub answers 422 (an empty repository).
     fn create_release(&self, body: &serde_json::Value) -> Result<Option<serde_json::Value>> {
         let resp = self
