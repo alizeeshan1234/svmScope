@@ -2622,7 +2622,7 @@ async fn api_index() -> Json<serde_json::Value> {
             "POST /idl_instructions":     "{ idl } — the same, for an IDL supplied in the request.",
             "POST /decode_account":       "{ owner, data_b64 } — decode raw account bytes.",
             "POST /hit":                  "{ page, referrer } — the UI reports one page load.",
-            "GET  /stats":                "Usage counters (token-gated); the /analytics page reads them."
+            "GET  /stats":                "Usage counters (token-gated); the analytics site reads them."
         }
     }))
 }
@@ -2916,7 +2916,6 @@ async fn main() {
         .route("/address/{address}", get(index))
         .route("/flame/{signature}", get(index))
         .route("/watch", get(index))
-        .route("/analytics", get(index))
         .route("/hit", post(hit_handler))
         .route("/instructions/{program}", get(instructions_handler))
         .route("/idl_instructions", post(idl_instructions_handler))

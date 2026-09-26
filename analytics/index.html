@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex, nofollow" />
+<title>svmscope analytics</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+/* Base rules copied from the main UI's stylesheet so the page matches it. */
+:root {
+  /* surfaces */
+  --bg-0: #0a0c10;            /* page */
+  --bg-1: #11141a;            /* card */
+  --bg-2: #181c24;            /* raised / hover */
+  --bg-3: #1f242e;            /* pressed / selected */
+  --bg-inset: #07080b;        /* wells: logs, inputs */
+  /* hairlines */
+  --border: rgba(255,255,255,.07);
+  --border-strong: rgba(255,255,255,.14);
+  /* text */
+  --text-1: #eef1f6;
+  --text-2: #a3adbf;
+  --text-3: #667085;
+  /* the one accent, and the outcome colours */
+  --accent: #8b7cf6;
+  --accent-strong: #a89dff;
+  --accent-soft: rgba(139,124,246,.13);
+  --accent-border: rgba(139,124,246,.38);
+  --green: #3ddc97;
+  --green-soft: rgba(61,220,151,.11);
+  --green-border: rgba(61,220,151,.32);
+  --red: #f26d6d;
+  --red-soft: rgba(242,109,109,.11);
+  --red-border: rgba(242,109,109,.32);
+  --amber: #f2b544;
+  --amber-soft: rgba(242,181,68,.11);
+  --amber-border: rgba(242,181,68,.32);
+  --cyan: #58c7e8;            /* a data colour (instruction names in logs), never an action */
+  /* aliases the templates still use */
+  --brand: var(--accent);
+  --brand-strong: var(--accent-strong);
+  --brand-soft: var(--accent-soft);
+  --brand-border: var(--accent-border);
+  --muted: var(--text-3); --text: var(--text-1); --line: var(--border); --line-2: var(--border-strong);
+  --surface-2: var(--bg-2); --mono: var(--font-mono); --yellow: var(--amber);
+  /* type */
+  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --font-display: var(--font-sans);
+  /* radii */
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 10px;
+  --r-full: 999px;
+  /* spacing (4px scale) */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
+  --s-5: 20px; --s-6: 24px; --s-8: 32px; --s-10: 40px; --s-12: 48px;
+  /* elevation: only floating things get a shadow */
+  --shadow-1: 0 1px 2px rgba(0,0,0,.35);
+  --shadow-2: 0 6px 20px -6px rgba(0,0,0,.55);
+  --shadow-3: 0 16px 48px -16px rgba(0,0,0,.7);
+  --ring: 0 0 0 3px rgba(139,124,246,.28);
+  /* motion */
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  --t-fast: 120ms;
+  --t-med: 200ms;
+  --topbar-h: 56px;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: auto; color-scheme: dark; }
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-1);
+  background: var(--bg-0);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+a { color: var(--accent-strong); }
+.ic { width: 14px; height: 14px; flex: 0 0 auto; vertical-align: -2px; stroke: currentColor; fill: none; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
+.ic.lg { width: 18px; height: 18px; }
+.ic.xl { width: 22px; height: 22px; }
+.btn {
+  appearance: none; border: 1px solid transparent; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  padding: 7px var(--s-4);
+  border-radius: var(--r-md);
+  font-family: var(--font-sans); font-size: 13px; font-weight: 500; line-height: 1.3;
+  color: #fff; background: var(--accent);
+  transition: background var(--t-fast), border-color var(--t-fast), color var(--t-fast);
+  flex: 0 0 auto; white-space: nowrap;
+}
+.btn:hover { background: var(--accent-strong); }
+.btn:active { background: #7b6ce6; }
+.btn:focus-visible { outline: none; box-shadow: var(--ring); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn.ghost { background: var(--bg-1); color: var(--text-2); border-color: var(--border); }
+.btn.ghost:hover { color: var(--text-1); border-color: var(--border-strong); background: var(--bg-2); }
+.btn.sm { padding: 5px var(--s-3); font-size: 12.5px; border-radius: var(--r-sm); }
+.btn .ic { width: 13px; height: 13px; }
+input, select, textarea { color-scheme: dark; }
+input[type=datetime-local]::-webkit-calendar-picker-indicator { filter: invert(1) brightness(.85); opacity: .8; cursor: pointer; }
+input[type=datetime-local]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
+.spinner {
+  display: inline-block; width: 13px; height: 13px; margin-right: var(--s-2); vertical-align: -2px;
+  border: 2px solid var(--border-strong); border-top-color: var(--accent);
+  border-radius: var(--r-full); animation: spin .7s linear infinite;
+}
+.grid > .col { display: flex; flex-direction: column; gap: var(--s-4); min-width: 0; }
+.grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--s-4); }
+.grid > .card, .grid > .col > .card { min-width: 0; }
+.card { background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--r-lg); padding: var(--s-4) var(--s-5); }
+.card.full { grid-column: 1 / -1; }
+.card > h2 {
+  margin: 0 0 var(--s-3);
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3);
+  display: flex; align-items: center; gap: var(--s-2);
+}
+.card > h2 .count, .count {
+  font-family: var(--font-mono); font-weight: 500; font-size: 10.5px; letter-spacing: 0; text-transform: none;
+  color: var(--text-2); background: var(--bg-2); border: 1px solid var(--border);
+  border-radius: var(--r-full); padding: 0 7px; white-space: nowrap;
+}
+.whatif-lead { color: var(--text-2); font-size: 13.5px; line-height: 1.55; margin: 0 0 var(--s-4); max-width: 680px; }
+table.fields { width: 100%; border-collapse: collapse; margin-top: var(--s-3); }
+table.fields th { text-align: left; padding: 0 var(--s-3) var(--s-2); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-3); border-bottom: 1px solid var(--border); }
+table.fields td { padding: 9px var(--s-3); border-bottom: 1px solid var(--border); vertical-align: middle; }
+table.fields tr:last-child td { border-bottom: 0; }
+input.f-in { width: 100%; min-width: 120px; padding: 6px 10px; border-radius: var(--r-sm); font-family: var(--font-mono); font-size: 12px; }
+input.f-in.dirty { border-color: var(--amber-border); box-shadow: 0 0 0 3px rgba(242,181,68,.14); }
+.finput { width: 100%; padding: 8px var(--s-3); }
+.finput.mono { font-family: var(--font-mono); font-size: 12.5px; }
+input.derived { border-color: var(--green-border); color: var(--green); }
+.card > h2 .cu-link { margin-left: auto; font-size: 11.5px; font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--accent-strong); cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; }
+.card > h2 .cu-link:hover { text-decoration: underline; }
+.dbg-landing { max-width: 720px; margin: 40px auto; text-align: center; }
+.dbg-landing h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.025em; margin: 0 0 8px; }
+.dbg-landing p { color: var(--text-2); font-size: 14px; line-height: 1.6; margin: 0 0 18px; }
+.dbg-landing .row { display: flex; gap: var(--s-2); }
+.dbg-landing input { flex: 1; font-family: var(--font-mono); font-size: 13px; padding: 9px 12px; }
+.dbg-landing .ex { margin-top: 14px; font-size: 12px; color: var(--text-3); }
+.dbg-landing .ex a { color: var(--accent-strong); cursor: pointer; margin: 0 6px; }
+.dbg-err { margin-top: 14px; font-size: 13px; color: var(--red); background: var(--red-soft); border: 1px solid var(--red-border); border-radius: var(--r-md); padding: 8px 12px; text-align: left; }
+.hidden { display: none !important; }
+table.fields td.num, table.fields th.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.fields td { padding: 6px var(--s-3); font-size: 12.5px; border-bottom: 1px solid var(--border); color: var(--text-2); vertical-align: top; }
+table.fields tr.me td { color: var(--text-1); }
+.topbar { position: sticky; top: 0; z-index: 30; background: var(--bg-0); border-bottom: 1px solid var(--border); }
+.topbar-inner { max-width: 1180px; margin: 0 auto; padding: 12px 20px; display: flex; align-items: center; gap: 10px; }
+.mark { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; background: var(--accent); }
+.topbar b { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.topbar .tag { color: var(--text-3); font-size: 13px; }
+.topbar a { margin-left: auto; color: var(--text-3); font-size: 12.5px; text-decoration: none; }
+.topbar a:hover { color: var(--text-1); }
+main { max-width: 1180px; margin: 0 auto; padding: 20px; }
+
+/* Analytics: the operator's private usage page. Two data colours only —
+   accent for people, a deeper cyan (#2f9fc4, validated against the card
+   surface for colour-vision separation from the accent) for requests. */
+.an-controls { display: flex; gap: var(--s-4); align-items: center; flex-wrap: wrap; font-size: 12.5px; color: var(--text-2); margin-top: var(--s-2); }
+.an-controls label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.an-controls .btn { margin-left: auto; }
+.an-you { color: var(--accent-strong); font-family: var(--font-mono); font-size: 12px; }
+.an-kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--s-3); margin-top: var(--s-4); }
+@media (max-width: 1100px) { .an-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .an-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.an-kpi { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--r-md); padding: var(--s-3) var(--s-4); min-width: 0; }
+.an-kpi .v { font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text-1); line-height: 1.1; }
+.an-kpi .l { font-size: 10.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-3); margin-top: 6px; }
+.an-kpi .s { font-size: 12px; color: var(--text-2); margin-top: 6px; line-height: 1.4; }
+.an-figure { margin-top: var(--s-4); }
+.an-figure .t { font-size: 12.5px; color: var(--text-2); margin-bottom: var(--s-1); }
+.an-chart { width: 100%; height: auto; display: block; overflow: visible; }
+.an-chart text { font-family: var(--font-sans); font-size: 10.5px; fill: var(--text-3); }
+.an-chart text.val { fill: var(--text-2); font-variant-numeric: tabular-nums; }
+.an-chart .grid line { stroke: var(--border); shape-rendering: crispEdges; }
+.an-chart .base { stroke: var(--border-strong); shape-rendering: crispEdges; }
+.an-chart path.people { fill: var(--accent); }
+.an-chart path.requests { fill: #2f9fc4; }
+.an-chart path.mark.dim { opacity: .4; }
+.an-chart rect.hit { fill: transparent; cursor: default; }
+.an-tip { position: fixed; pointer-events: none; background: var(--bg-3); border: 1px solid var(--border-strong); border-radius: var(--r-sm); padding: 6px 10px; font-size: 12px; color: var(--text-1); box-shadow: var(--shadow-2); z-index: 60; white-space: nowrap; }
+.an-tip b { font-variant-numeric: tabular-nums; }
+.an-bars { display: grid; grid-template-columns: minmax(90px, 150px) 1fr 56px; gap: 7px var(--s-3); align-items: center; margin-top: var(--s-3); font-size: 12.5px; }
+.an-bars .n { color: var(--text-2); font-family: var(--font-mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.an-bars .b { height: 10px; background: var(--bg-2); border-radius: 3px; overflow: hidden; }
+.an-bars .b i { display: block; height: 100%; border-radius: 0 3px 3px 0; min-width: 2px; }
+.an-bars .b i.people { background: var(--accent); }
+.an-bars .b i.requests { background: #2f9fc4; }
+.an-bars .v { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-1); }
+.an-bars .empty { grid-column: 1 / -1; color: var(--text-3); font-size: 12.5px; }
+.an-sub { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--text-3); margin: var(--s-5) 0 0; }
+.an-tok { display: flex; gap: var(--s-2); align-items: center; margin-top: var(--s-4); max-width: 520px; }
+.an-tok input { flex: 1; }
+.an-meta { font-size: 12.5px; color: var(--text-2); margin-top: var(--s-3); line-height: 1.7; }
+.an-meta code { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-1); }
+table.fields td.num, table.fields th.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.fields td { padding: 6px var(--s-3); font-size: 12.5px; border-bottom: 1px solid var(--border); color: var(--text-2); vertical-align: top; }
+table.fields tr.me td { color: var(--text-1); }
+@media (max-width: 700px) { .an-bars { grid-template-columns: minmax(70px, 100px) 1fr 48px; } }
+
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol></svg>
+<div class="topbar"><div class="topbar-inner">
+  <div class="mark" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="6.4" stroke="#fff" stroke-width="2"/><circle cx="12" cy="12" r="2.1" fill="#fff"/><path d="M12 1.6v3.6M12 18.8v3.6M1.6 12h3.6M18.8 12h3.6" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg></div>
+  <b>svmscope</b><span class="tag">analytics</span>
+  <a href="https://svmscope.vercel.app">open the app</a>
+</div></div>
+<main>
+  <section id="analytics">
+    <div class="dbg-landing" id="anLanding">
+      <h1>Is anyone using svmscope?</h1>
+      <p>The engine counts every work-doing request it serves and every page the UI loads, per anonymous client: a hash, never an address. This page reads those counters. It needs the operator's token, and nothing here is public.</p>
+      <div class="an-tok">
+        <input id="anToken" class="finput mono" type="password" placeholder="the engine's SVMSCOPE_STATS_TOKEN" spellcheck="false" autocomplete="off" />
+        <button class="btn" id="anLoad">Show<svg class="ic" aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
+      </div>
+      <div class="dbg-err hidden" id="anErr"></div>
+    </div>
+    <div class="grid hidden" id="anMain">
+      <div class="card full">
+        <h2>People <span class="count" id="anRange"></span></h2>
+        <div class="an-controls">
+          <label><input type="checkbox" id="anExcludeMe" checked /> leave my own traffic out</label>
+          <label><input type="checkbox" id="anHumans" checked /> browsers only, no curl, scripts or bots</label>
+          <span id="anYou"></span>
+          <button class="btn ghost sm" id="anRefresh">Refresh</button>
+        </div>
+        <div class="an-kpis" id="anKpis"></div>
+      </div>
+      <div class="card full">
+        <h2>The last 30 days <span class="count">per UTC day</span></h2>
+        <div class="an-figure"><div class="t">Distinct people</div><div id="anDailyPeople"></div></div>
+        <div class="an-figure"><div class="t">API requests: analyses, replays, traces, checks</div><div id="anDailyRequests"></div></div>
+        <div class="an-figure"><div class="t">Page loads</div><div id="anDailyViews"></div></div>
+      </div>
+      <div class="card">
+        <h2>What they used <span class="count" id="anEpCount"></span></h2>
+        <div class="an-bars" id="anEndpoints"></div>
+      </div>
+      <div class="card">
+        <h2>Where they landed <span class="count" id="anPageCount"></span></h2>
+        <div class="an-bars" id="anPages"></div>
+        <div class="an-sub">Came from</div>
+        <div class="an-bars" id="anRefs"></div>
+        <div class="an-sub">Sent by</div>
+        <div class="an-bars" id="anAgents"></div>
+        <p class="an-meta" style="margin-top:var(--s-4)">These three count every hit, including yours and scripts'; the engine keeps no per-client breakdown for them.</p>
+      </div>
+      <div class="card full">
+        <h2>Each client <span class="count" id="anClientCount"></span></h2>
+        <div style="overflow-x:auto"><table class="fields" id="anClients"></table></div>
+      </div>
+      <div class="card full">
+        <h2>Counter health</h2>
+        <div class="an-meta" id="anMeta"></div>
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+// The engine whose counters this page reads; ?api=<url> points it elsewhere
+// (a local engine while developing).
+const API = (new URLSearchParams(location.search).get('api') || 'https://svmscope-engine.onrender.com').replace(/\/$/, '');
+// ---- Analytics (operator only) -------------------------------------------
+// Reads the token-gated /stats snapshot and draws it. Every number that has a
+// per-client breakdown honours the two filters; the three lists that don't
+// say so.
+let anData = null;
+const anEsc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const anN = (n) => Number(n || 0).toLocaleString();
+const anWhen = (t) => t ? new Date(t * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '—';
+const anAgo = (t, now) => {
+  if (!t) return '—';
+  const s = Math.max(0, now - t);
+  return s < 60 ? 'just now' : s < 3600 ? Math.floor(s / 60) + ' min ago' : s < 86400 ? Math.floor(s / 3600) + ' h ago' : Math.floor(s / 86400) + ' d ago';
+};
+function showAnalytics() {
+  let saved = '';
+  try { saved = localStorage.getItem('svmscope.statsToken') || ''; } catch (e) {}
+  if (saved && !$('anToken').value) $('anToken').value = saved;
+  if ($('anToken').value) loadAnalytics();
+}
+function anError(msg) { $('anErr').textContent = msg; $('anErr').classList.remove('hidden'); }
+async function loadAnalytics() {
+  const token = $('anToken').value.trim();
+  if (!token) { anError('Enter the token the engine was started with (SVMSCOPE_STATS_TOKEN).'); return; }
+  $('anErr').classList.add('hidden'); $('anLoad').disabled = true; $('anRefresh').disabled = true;
+  try {
+    const r = await fetch(API + '/stats?token=' + encodeURIComponent(token));
+    if (r.status === 404) throw new Error('The engine does not accept this token, or has none configured.');
+    if (!r.ok) throw new Error('stats failed: HTTP ' + r.status);
+    anData = await r.json();
+    try { localStorage.setItem('svmscope.statsToken', token); } catch (e) {}
+    $('anLanding').classList.add('hidden'); $('anMain').classList.remove('hidden');
+    renderAnalytics();
+  } catch (e) {
+    $('anLanding').classList.remove('hidden');
+    anError(/Failed to fetch/i.test(e.message) ? 'Could not reach the engine.' : e.message);
+  }
+  $('anLoad').disabled = false; $('anRefresh').disabled = false;
+}
+function anIncluded(c) {
+  if ($('anExcludeMe').checked && c.id === anData.you) return false;
+  if ($('anHumans').checked && c.agent !== 'browser') return false;
+  return true;
+}
+// A column chart of one series over the 30 days: thin columns with a rounded
+// data end, clean gridlines, the peak labelled, a tooltip on hover.
+function anColumns(el, days, key, cls, unit) {
+  const W = 720, H = 150, padL = 34, padR = 6, padT = 14, padB = 22;
+  const n = days.length, band = (W - padL - padR) / n, bw = Math.min(24, Math.max(6, band * 0.55));
+  const max = Math.max(1, ...days.map(d => d[key]));
+  const step = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000, 10000].find(s => max / s <= 4) || Math.pow(10, Math.ceil(Math.log10(max)));
+  const top = Math.ceil(max / step) * step;
+  const y = v => padT + (H - padT - padB) * (1 - v / top);
+  const base = y(0);
+  let g = '<g class="grid">';
+  for (let v = step; v <= top; v += step) g += `<line x1="${padL}" x2="${W - padR}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/><text x="${padL - 6}" y="${(y(v) + 3.5).toFixed(1)}" text-anchor="end">${anN(v)}</text>`;
+  g += '</g>';
+  let marks = '', hits = '', labels = '';
+  const peak = days.reduce((m, d, i) => d[key] > days[m][key] ? i : m, 0);
+  days.forEach((d, i) => {
+    const x = padL + band * i + (band - bw) / 2, v = d[key], yt = y(v), r = v > 0 ? Math.min(4, (base - yt) / 2) : 0;
+    if (v > 0) marks += `<path class="mark ${cls}" data-i="${i}" d="M${x.toFixed(1)},${base.toFixed(1)} V${(yt + r).toFixed(1)} a${r},${r} 0 0 1 ${r},-${r} h${(bw - 2 * r).toFixed(1)} a${r},${r} 0 0 1 ${r},${r} V${base.toFixed(1)} Z"/>`;
+    hits += `<rect class="hit" data-i="${i}" x="${(padL + band * i).toFixed(1)}" y="${padT}" width="${band.toFixed(1)}" height="${(H - padT - padB).toFixed(1)}"/>`;
+    if (i === peak && v > 0) labels += `<text class="val" x="${(x + bw / 2).toFixed(1)}" y="${(yt - 4).toFixed(1)}" text-anchor="middle">${anN(v)}</text>`;
+    if ((n - 1 - i) % 5 === 0) labels += `<text x="${(x + bw / 2).toFixed(1)}" y="${H - 6}" text-anchor="middle">${d.date.slice(5)}</text>`;
+  });
+  el.innerHTML = `<svg class="an-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${anEsc(unit)} per day, last 30 days">${g}<line class="base" x1="${padL}" x2="${W - padR}" y1="${base.toFixed(1)}" y2="${base.toFixed(1)}"/>${marks}${labels}${hits}</svg>`;
+  const svg = el.firstElementChild;
+  let tip = null;
+  const clear = () => { if (tip) { tip.remove(); tip = null; } svg.querySelectorAll('.mark').forEach(m => m.classList.remove('dim')); };
+  svg.addEventListener('mousemove', e => {
+    const i = e.target.dataset ? e.target.dataset.i : undefined;
+    if (i == null) { clear(); return; }
+    if (!tip) { tip = document.createElement('div'); tip.className = 'an-tip'; document.body.appendChild(tip); }
+    const d = days[+i];
+    tip.innerHTML = `${anEsc(d.date)} · <b>${anN(d[key])}</b> ${anEsc(unit)}`;
+    tip.style.left = (e.clientX + 12) + 'px'; tip.style.top = (e.clientY - 28) + 'px';
+    svg.querySelectorAll('.mark').forEach(m => m.classList.toggle('dim', m.dataset.i !== i));
+  });
+  svg.addEventListener('mouseleave', clear);
+}
+// A ranked list: name, proportional bar, count. Top `limit`, the rest folded.
+function anBarList(el, entries, cls, limit = 12) {
+  const rows = Object.entries(entries).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  if (!rows.length) { el.innerHTML = '<div class="empty">nothing yet</div>'; return 0; }
+  const shown = rows.slice(0, limit), rest = rows.slice(limit).reduce((a, [, v]) => a + v, 0);
+  if (rest) shown.push(['other', rest]);
+  const max = shown[0][1];
+  el.innerHTML = shown.map(([k, v]) => `<div class="n" title="${anEsc(k)}">${anEsc(k)}</div><div class="b"><i class="${cls}" style="width:${(100 * v / max).toFixed(1)}%"></i></div><div class="v">${anN(v)}</div>`).join('');
+  return rows.length;
+}
+function renderAnalytics() {
+  const d = anData, now = d.generated_at_unix;
+  const clients = d.clients.filter(anIncluded);
+  const inc = new Set(clients.map(c => c.id));
+  const me = d.clients.find(c => c.id === d.you);
+  $('anYou').innerHTML = me
+    ? `you are <span class="an-you">${anEsc(me.id.slice(0, 8))}</span> · ${anN(me.requests)} requests, ${anN(me.views)} loads`
+    : `you are <span class="an-you">${anEsc(d.you.slice(0, 8))}</span> · no traffic recorded from here yet`;
+  const wk = now - 7 * 86400, day = now - 86400;
+  const sum = (arr, f) => arr.reduce((a, x) => a + f(x), 0);
+  const days = d.days.map(x => {
+    let people = 0, requests = 0, views = 0;
+    for (const [id, c] of Object.entries(x.by_client || {})) { if (!inc.has(id)) continue; people++; requests += c.r; views += c.v; }
+    return { date: x.date, people, requests, views };
+  });
+  const last7 = days.slice(-7), active7 = clients.filter(c => c.last >= wk).length;
+  const req7 = sum(last7, x => x.requests), views7 = sum(last7, x => x.views);
+  const capped = d.clients.length < d.unique_clients;
+  const kpis = [
+    ['people, all time', clients.length, capped ? `of ${anN(d.unique_clients)} ever seen; only the ${anN(d.clients.length)} most recent are listed` : `${anN(d.unique_clients)} clients of every kind, you included`],
+    ['active in the last 7 days', active7, `${anN(clients.filter(c => c.last >= day).length)} in the last 24 h`],
+    ['new in the last 7 days', clients.filter(c => c.first >= wk).length, 'first seen this week'],
+    ['API requests, 7 days', req7, `${anN(sum(clients, c => c.requests))} all time · ${active7 ? (req7 / active7).toFixed(1) : '0'} per active person`],
+    ['page loads, 7 days', views7, `${anN(sum(clients, c => c.views))} all time`],
+    ['ran something, 7 days', clients.filter(c => c.last >= wk && c.requests > 0).length, 'of those active; the rest only looked'],
+  ];
+  $('anKpis').innerHTML = kpis.map(([l, v, s]) => `<div class="an-kpi"><div class="v">${anN(v)}</div><div class="l">${anEsc(l)}</div><div class="s">${anEsc(s)}</div></div>`).join('');
+  $('anRange').textContent = d.first_seen_unix ? 'since ' + new Date(d.first_seen_unix * 1000).toLocaleDateString(undefined, { dateStyle: 'medium' }) : '';
+  anColumns($('anDailyPeople'), days, 'people', 'people', 'people');
+  anColumns($('anDailyRequests'), days, 'requests', 'requests', 'requests');
+  anColumns($('anDailyViews'), days, 'views', 'people', 'page loads');
+  const endpoints = {};
+  for (const c of clients) for (const [k, v] of Object.entries(c.endpoints || {})) endpoints[k] = (endpoints[k] || 0) + v;
+  const epN = anBarList($('anEndpoints'), endpoints, 'requests');
+  $('anEpCount').textContent = epN ? epN + ' features, all time' : '';
+  const pgN = anBarList($('anPages'), d.per_page || {}, 'people', 8);
+  $('anPageCount').textContent = pgN ? anN(d.total_views) + ' loads, all time' : '';
+  anBarList($('anRefs'), d.referrers || {}, 'people', 8);
+  anBarList($('anAgents'), d.agents || {}, 'people', 8);
+  const rows = clients.slice(0, 150);
+  $('anClientCount').textContent = rows.length < clients.length ? `${anN(rows.length)} most recent of ${anN(clients.length)}` : `${anN(clients.length)}`;
+  $('anClients').innerHTML = '<thead><tr><th>client</th><th>kind</th><th>first seen</th><th>last seen</th><th class="num">requests</th><th class="num">loads</th><th>used</th></tr></thead><tbody>' + rows.map(c => {
+    const used = Object.entries(c.endpoints || {}).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k, v]) => `${anEsc(k)} ${anN(v)}`).join(' · ');
+    return `<tr class="${c.id === d.you ? 'me' : ''}"><td class="mono">${anEsc(c.id.slice(0, 8))}${c.id === d.you ? ' <span class="an-you">you</span>' : ''}</td><td>${anEsc(c.agent || '?')}</td><td>${anEsc(anWhen(c.first))}</td><td title="${anEsc(anWhen(c.last))}">${anEsc(anAgo(c.last, now))}</td><td class="num">${anN(c.requests)}</td><td class="num">${anN(c.views)}</td><td>${used || '<span style="color:var(--text-3)">only looked</span>'}</td></tr>`;
+  }).join('') + '</tbody>';
+  const p = d.persistence || {};
+  const durable = p.github
+    ? `Kept durably as a release asset in <code>${anEsc(p.github)}</code>: ` + (p.last_push_ok_unix ? `last pushed ${anEsc(anAgo(p.last_push_ok_unix, now))}` : 'not pushed yet') + (p.last_push_error ? ` · last push failed: <code>${anEsc(p.last_push_error)}</code>` : '') + (p.dirty ? ' · changes since then are pending' : '')
+    : 'No durable copy configured (<code>SVMSCOPE_STATS_GITHUB</code> is unset): the counters live in <code>' + anEsc(p.file || 'svmscope-stats.json') + '</code> and start over whenever the instance restarts.';
+  $('anMeta').innerHTML = [
+    `Counting since ${anEsc(anWhen(d.first_seen_unix))}; last event ${anEsc(anAgo(d.last_seen_unix, now))}; snapshot taken ${anEsc(anWhen(now))}.`,
+    `${anN(d.total_requests)} metered requests and ${anN(d.total_views)} page loads from ${anN(d.unique_clients)} clients of every kind.`,
+    durable,
+    'A client is a hashed IP address behind the proxy. Two people on one network are one client; one person on a phone and a laptop are two.',
+  ].join('<br>');
+}
+
+$('anLoad').addEventListener('click', loadAnalytics);
+$('anRefresh').addEventListener('click', loadAnalytics);
+$('anToken').addEventListener('keydown', e => { if (e.key === 'Enter') loadAnalytics(); });
+$('anExcludeMe').addEventListener('change', () => { if (anData) renderAnalytics(); });
+$('anHumans').addEventListener('change', () => { if (anData) renderAnalytics(); });
+showAnalytics();
+</script>
+</body>
+</html>

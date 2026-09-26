@@ -438,7 +438,8 @@ endpoint — the public mainnet RPC is heavily rate-limited.
 
 The server counts every work-doing request and every page load per
 anonymous client (a hash of the address, never the address). Set
-`SVMSCOPE_STATS_TOKEN` and open `/analytics` on the UI with that token to see
+`SVMSCOPE_STATS_TOKEN` and open the private analytics site ([`analytics/`](./analytics),
+deployed apart from the UI) with that token to see
 people per day, what they used, where they came from, and each client's
 activity; `GET /stats?token=…` is the same as JSON. The counters live in
 `SVMSCOPE_STATS_FILE` (default `svmscope-stats.json`) and, on a host whose
