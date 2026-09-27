@@ -287,6 +287,12 @@ pub fn init() {
                 if let Ok(mut s) = stats().lock() {
                     if remote.last_seen >= s.last_seen {
                         *s = remote;
+                        // The durable copy and memory agree as of now; the
+                        // health line should not say "never pushed" after a
+                        // restart just because this process has not pushed yet.
+                        if let Ok(mut p) = push_state().lock() {
+                            p.last_ok = now();
+                        }
                         eprintln!(
                             "stats: restored {} requests, {} views, {} clients from {}",
                             s.total,
