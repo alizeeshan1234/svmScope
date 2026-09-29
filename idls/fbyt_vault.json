@@ -1,0 +1,649 @@
+{
+  "address": "DNgg2FmwchUHYx2QiZ9pNJn1q5zypMprkSWFLUnNDigm",
+  "metadata": {
+    "name": "fbyt_vault",
+    "version": "0.0.1",
+    "spec": "0.1.0",
+    "description": "Hand-written IDL for the FBYT vault program, reverse-engineered from mainnet transactions (no IDL is published on chain). Field names are inferred."
+  },
+  "instructions": [
+    {
+      "name": "create_vault",
+      "discriminator": [
+        29,
+        237,
+        247,
+        208,
+        193,
+        82,
+        54,
+        135
+      ],
+      "accounts": [
+        {
+          "name": "config"
+        },
+        {
+          "name": "treasury",
+          "writable": true
+        },
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "manager_profile",
+          "writable": true
+        },
+        {
+          "name": "vault_pool",
+          "writable": true
+        },
+        {
+          "name": "vault_asset_ledger",
+          "writable": true
+        },
+        {
+          "name": "asset_registry"
+        },
+        {
+          "name": "price_update"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "system_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "min_raise",
+          "type": "u64"
+        },
+        {
+          "name": "max_raise",
+          "type": "u64"
+        },
+        {
+          "name": "min_investment",
+          "type": "u64"
+        },
+        {
+          "name": "fee_withdrawal_period",
+          "type": "u64"
+        },
+        {
+          "name": "lockup_seconds",
+          "type": "u64"
+        },
+        {
+          "name": "management_fee_bps",
+          "type": "u16"
+        },
+        {
+          "name": "performance_fee_bps",
+          "type": "u16"
+        },
+        {
+          "name": "vault_type",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "init_position",
+      "discriminator": [
+        46,
+        57,
+        4,
+        241,
+        88,
+        18,
+        154,
+        89
+      ],
+      "accounts": [
+        {
+          "name": "investor",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault_pool"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "position",
+          "writable": true
+        },
+        {
+          "name": "system_program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "invest",
+      "discriminator": [
+        147,
+        208,
+        90,
+        77,
+        202,
+        172,
+        95,
+        83
+      ],
+      "accounts": [
+        {
+          "name": "investor",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault_pool",
+          "writable": true
+        },
+        {
+          "name": "vault_asset_ledger"
+        },
+        {
+          "name": "position",
+          "writable": true
+        },
+        {
+          "name": "asset_registry"
+        },
+        {
+          "name": "investor_token_account",
+          "writable": true
+        },
+        {
+          "name": "vault_token_account",
+          "writable": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "price_update"
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "system_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "trade",
+      "discriminator": [
+        248,
+        198,
+        158,
+        145,
+        225,
+        117,
+        135,
+        200
+      ],
+      "accounts": [
+        {
+          "name": "config"
+        },
+        {
+          "name": "treasury",
+          "writable": true
+        },
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "input_mint"
+        },
+        {
+          "name": "vault_pool",
+          "writable": true
+        },
+        {
+          "name": "vault_asset_ledger",
+          "writable": true
+        },
+        {
+          "name": "wsol_mint"
+        },
+        {
+          "name": "input_token_program"
+        },
+        {
+          "name": "output_mint"
+        },
+        {
+          "name": "output_token_program"
+        },
+        {
+          "name": "vault_input_token_account",
+          "writable": true
+        },
+        {
+          "name": "vault_output_token_account",
+          "writable": true
+        },
+        {
+          "name": "input_asset_registry"
+        },
+        {
+          "name": "output_asset_registry"
+        },
+        {
+          "name": "input_price_update"
+        },
+        {
+          "name": "output_price_update"
+        },
+        {
+          "name": "jupiter_program"
+        },
+        {
+          "name": "system_program"
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "route_data",
+          "type": {
+            "vec": "u8"
+          }
+        }
+      ]
+    },
+    {
+      "name": "redeem",
+      "discriminator": [
+        24,
+        52,
+        139,
+        148,
+        82,
+        157,
+        134,
+        183
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "investor",
+          "signer": true
+        },
+        {
+          "name": "config"
+        },
+        {
+          "name": "vault_pool",
+          "writable": true
+        },
+        {
+          "name": "vault_asset_ledger",
+          "writable": true
+        },
+        {
+          "name": "position",
+          "writable": true
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "token_2022_program"
+        },
+        {
+          "name": "system_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "shares",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "VaultPool",
+      "discriminator": [
+        64,
+        55,
+        145,
+        17,
+        146,
+        105,
+        18,
+        195
+      ]
+    },
+    {
+      "name": "InvestorPosition",
+      "discriminator": [
+        246,
+        171,
+        125,
+        107,
+        25,
+        201,
+        36,
+        95
+      ]
+    },
+    {
+      "name": "VaultAssetLedger",
+      "discriminator": [
+        60,
+        94,
+        213,
+        134,
+        205,
+        170,
+        175,
+        68
+      ]
+    },
+    {
+      "name": "ManagerProfile",
+      "discriminator": [
+        16,
+        148,
+        170,
+        83,
+        71,
+        18,
+        27,
+        141
+      ]
+    },
+    {
+      "name": "ProtocolConfig",
+      "discriminator": [
+        151,
+        222,
+        40,
+        94,
+        157,
+        115,
+        214,
+        53
+      ]
+    },
+    {
+      "name": "AssetRegistry",
+      "discriminator": [
+        42,
+        185,
+        120,
+        24,
+        182,
+        8,
+        43,
+        146
+      ]
+    }
+  ],
+  "types": [
+    {
+      "name": "VaultPool",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "vault_index",
+            "type": "u64"
+          },
+          {
+            "name": "config",
+            "type": "pubkey"
+          },
+          {
+            "name": "manager",
+            "type": "pubkey"
+          },
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "asset_ledger",
+            "type": "pubkey"
+          },
+          {
+            "name": "status",
+            "type": "u8"
+          },
+          {
+            "name": "investor_count",
+            "type": "u64"
+          },
+          {
+            "name": "total_value_usd_micro",
+            "type": "u64"
+          },
+          {
+            "name": "total_shares",
+            "type": "u64"
+          },
+          {
+            "name": "min_raise_usd_micro",
+            "type": "u64"
+          },
+          {
+            "name": "max_raise",
+            "type": "u64"
+          },
+          {
+            "name": "min_investment_usd_micro",
+            "type": "u64"
+          },
+          {
+            "name": "fee_withdrawal_period",
+            "type": "u64"
+          },
+          {
+            "name": "lockup_seconds",
+            "type": "u64"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "last_deposit_at",
+            "type": "i64"
+          },
+          {
+            "name": "fee_last_collected_at",
+            "type": "i64"
+          },
+          {
+            "name": "activated_at",
+            "type": "i64"
+          },
+          {
+            "name": "management_fee_bps",
+            "type": "u16"
+          },
+          {
+            "name": "performance_fee_bps",
+            "type": "u16"
+          },
+          {
+            "name": "vault_type",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "InvestorPosition",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "investor",
+            "type": "pubkey"
+          },
+          {
+            "name": "config",
+            "type": "pubkey"
+          },
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "shares",
+            "type": "u64"
+          },
+          {
+            "name": "cost_basis_usd_micro",
+            "type": "u64"
+          },
+          {
+            "name": "deposited_at",
+            "type": "i64"
+          },
+          {
+            "name": "updated_at",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultAssetLedger",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "mints",
+            "type": {
+              "vec": "pubkey"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "ManagerProfile",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "manager",
+            "type": "pubkey"
+          },
+          {
+            "name": "config",
+            "type": "pubkey"
+          },
+          {
+            "name": "vault_count",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProtocolConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "treasury",
+            "type": "pubkey"
+          },
+          {
+            "name": "reserved",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AssetRegistry",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "config",
+            "type": "pubkey"
+          },
+          {
+            "name": "mint",
+            "type": "pubkey"
+          }
+        ]
+      }
+    }
+  ]
+}

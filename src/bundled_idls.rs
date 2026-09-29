@@ -28,6 +28,12 @@ const BUNDLED: &[(&str, &str)] = &[
         "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj",
         include_str!("../idls/raydium_launchpad.json"),
     ),
+    // FBYT vault program: no IDL on chain; this one was written by hand from
+    // mainnet transactions, so field names are inferred, not the program's own.
+    (
+        "DNgg2FmwchUHYx2QiZ9pNJn1q5zypMprkSWFLUnNDigm",
+        include_str!("../idls/fbyt_vault.json"),
+    ),
 ];
 
 static PARSED: LazyLock<HashMap<&'static str, Value>> = LazyLock::new(|| {
