@@ -305,7 +305,7 @@ impl Scope {
 
     /// Whether `address` was writable in a transaction record (json encoding):
     /// the only mentions that can have changed it.
-    fn tx_writes(tx: &serde_json::Value, address: &str) -> bool {
+    pub(crate) fn tx_writes(tx: &serde_json::Value, address: &str) -> bool {
         let msg = &tx["transaction"]["message"];
         let keys: Vec<&str> = msg["accountKeys"]
             .as_array()
@@ -4939,7 +4939,7 @@ fn replayed_transaction(
     out
 }
 
-fn diffs_of(
+pub(crate) fn diffs_of(
     before_of: &dyn Fn(&Address) -> Option<solana_account::Account>,
     after: &HashMap<Address, solana_account::Account>,
     addrs: &[String],

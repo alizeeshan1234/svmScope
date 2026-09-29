@@ -164,9 +164,16 @@ pub(crate) mod utils;
 #[cfg(test)]
 mod wire_format_tests;
 
+mod bundle;
+mod jito;
+
 pub use analyze::{
     AccountDiff, AccountOverview, Analysis, AnalysisAt, Explanation, FieldDiff, Overview,
     ProgramInfo, SigInfo, SimulationReport,
+};
+pub use bundle::{
+    Bundle, BundleInput, BundleReport, BundleStep, Diverged, Edge, Mode, Role, StepMutations,
+    StepReport, MAX_STEPS,
 };
 pub use check::{AccountCheck, Check, Cmp, Scenario};
 pub use compute::CuUsage;
@@ -181,6 +188,7 @@ pub use diffs::{BalanceChange, TokenChange};
 pub use error::{Error, Result};
 pub use fixture::{Fixture, FixtureEntry, FIXTURE_VERSION};
 pub use invariant::Invariant;
+pub use jito::{BundleMeta, Segment};
 pub use lift::{Blocked, LiftReport, LiftRun, RouterLift};
 pub use preflight::{compute_breakdown, AccountRole, PreflightIx, PreflightOverview};
 pub use program::{MethodBuilder, ProgramClient};

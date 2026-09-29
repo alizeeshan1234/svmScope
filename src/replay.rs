@@ -795,6 +795,14 @@ impl ReplayContext {
             .collect()
     }
 
+    /// One loaded data account as the context holds it, before any run.
+    pub(crate) fn loaded_data_of(&self, address: &Address) -> Option<Account> {
+        self.loaded.iter().find_map(|(a, l)| match l {
+            Loaded::Data(acc) if a == address => Some(acc.clone()),
+            _ => None,
+        })
+    }
+
     pub(crate) fn set_loaded_data(&mut self, address: Address, account: Option<Account>) {
         match account {
             Some(acc) => {
@@ -834,6 +842,19 @@ impl ReplayContext {
                 },
             })
             .collect()
+    }
+
+    pub(crate) fn absorb(&mut self, other: &ReplayContext) {
+        for (address, loaded) in &other.loaded {
+            if !self.has_loaded(address) {
+                self.loaded.push((*address, loaded.clone()));
+            }
+        }
+    }
+
+    /// Whether `address` is among the loaded accounts.
+    pub(crate) fn has_loaded(&self, address: &Address) -> bool {
+        self.loaded.iter().any(|(a, _)| a == address)
     }
 
     /// Flip runtime feature gates for subsequent runs (see [`FeatureToggle`]).
@@ -1916,7 +1937,7 @@ fn inner_of(meta: &litesvm::types::TransactionMetadata) -> InnerList {
         .collect()
 }
 
-fn to_replay_result(result: TransactionResult) -> ReplayResult {
+pub(crate) fn to_replay_result(result: TransactionResult) -> ReplayResult {
     match result {
         Ok(meta) => ReplayResult {
             success: true,
