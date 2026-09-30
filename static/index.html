@@ -839,6 +839,48 @@ input.derived { border-color: var(--green-border); color: var(--green); }
 .drow .arr, .compare .arrow { color: var(--text-3); }
 .drow .new { color: var(--green); font-weight: 500; word-break: break-all; }
 
+/* ---------- bundle replay ---------- */
+/* Looks like .trychip, but that class carries a global click handler that
+   belongs to the simulate page: it switches the cluster and loads a program. */
+.bn-chip { appearance: none; cursor: pointer; background: var(--accent-soft); border: 1px solid transparent; color: var(--accent-strong); padding: 5px var(--s-3); border-radius: var(--r-full); font-family: var(--font-sans); font-size: 12.5px; font-weight: 500; transition: border-color var(--t-fast); }
+.bn-chip:hover { border-color: var(--accent-border); }
+.bn-chip .dim { color: var(--text-3); font-weight: 400; }
+
+/* The shared .wform is a five-column grid; this form has two fields. */
+.bn-form { grid-template-columns: minmax(0, 1fr) auto; max-width: 760px; margin-left: auto; margin-right: auto; }
+
+.bn-lead { color: var(--text-2); font-size: 13.5px; line-height: 1.6; margin: 0 0 var(--s-3); max-width: 720px; }
+.bn-points { display: grid; gap: var(--s-2); margin: var(--s-4) auto 0; max-width: 620px; text-align: left; }
+.bn-point { display: flex; gap: 10px; align-items: flex-start; color: var(--text-2); font-size: 13px; line-height: 1.5; }
+.bn-point b { color: var(--text-1); font-weight: 600; }
+.bn-num { flex: 0 0 auto; width: 20px; height: 20px; border-radius: var(--r-full); background: var(--accent-soft); color: var(--accent-strong); font-size: 11.5px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
+.bn-verdict { display: inline-flex; align-items: center; gap: 7px; padding: 4px var(--s-3); border-radius: var(--r-full); font-size: 12.5px; font-weight: 500; }
+.bn-verdict.ok { background: rgba(53, 208, 127, .12); color: var(--green); }
+.bn-verdict.bad { background: rgba(255, 176, 32, .12); color: var(--amber); }
+.bn-meta { color: var(--text-3); font-size: 12.5px; margin-top: var(--s-2); }
+.bn-steps { width: 100%; border-collapse: collapse; margin-top: var(--s-3); }
+.bn-steps th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-3); font-weight: 500; padding: 0 10px 6px; }
+.bn-steps td { padding: 9px 10px; border-top: 1px solid var(--border); font-size: 13px; vertical-align: top; }
+.bn-steps tr.bn-row { cursor: pointer; }
+.bn-steps tr.bn-row:hover td { background: var(--bg-1); }
+.bn-steps tr.bn-row.on td { background: var(--bg-1); }
+.bn-detail td { background: var(--bg-0); color: var(--text-2); font-size: 12.5px; }
+.bn-detail h4 { margin: 0 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-3); font-weight: 500; }
+.bn-detail .col { display: inline-block; vertical-align: top; min-width: 240px; margin-right: var(--s-5); margin-bottom: var(--s-3); }
+.bn-hop { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.bn-hop:first-child { border-top: 0; }
+.bn-arrow { font-family: var(--font-mono); font-size: 12.5px; color: var(--accent-strong); background: var(--accent-soft); padding: 3px 9px; border-radius: var(--r-full); white-space: nowrap; }
+.bn-acct { font-family: var(--font-mono); font-size: 11.5px; color: var(--text-2); background: var(--bg-1); border: 1px solid var(--border); padding: 2px 7px; border-radius: var(--r-sm); }
+.bn-editrow { display: flex; gap: var(--s-3); flex-wrap: wrap; align-items: flex-end; }
+.bn-editrow .wfield { min-width: 180px; }
+.bn-editrow select, .bn-editrow input { width: 100%; }
+.bn-edits { display: flex; gap: var(--s-2); flex-wrap: wrap; margin-top: var(--s-3); }
+.bn-edit-pill { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; background: rgba(255, 176, 32, .12); color: var(--amber); padding: 4px 10px; border-radius: var(--r-full); font-family: var(--font-mono); }
+.bn-edit-pill button { appearance: none; background: none; border: 0; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 0; opacity: .7; }
+.bn-edit-pill button:hover { opacity: 1; }
+.bn-moved { color: var(--amber); font-size: 12px; }
+.bn-same { color: var(--text-3); font-size: 12px; }
+
 /* ---------- step debugger ---------- */
 .dbg-head { display: flex; align-items: center; gap: var(--s-3); flex-wrap: wrap; margin-bottom: var(--s-4); }
 .dbg-head .sig { font-family: var(--font-mono); font-size: 12px; color: var(--text-2); word-break: break-all; }
@@ -1523,15 +1565,27 @@ input.derived { border-color: var(--green-border); color: var(--green); }
   <section id="bundle" class="hidden">
     <div class="dbg-landing" id="bundleLanding">
       <h1>One transaction is never the whole story</h1>
-      <p>Transactions that depend on each other land together: a Jito bundle, a sandwich, an arbitrage that sets up in one transaction and closes in the next. Replay the whole ordered set on one machine, each transaction starting from the state the ones before it left behind, and every step checked against what the chain recorded. Then change one step and watch the change travel into the rest.</p>
-      <div class="wform">
-        <div class="wfield wide" style="flex:1 1 520px">
+      <p class="bn-lead">Some transactions only make sense together. A bot buys in one and sells in the next. A liquidator moves a price, then seizes the position. Open the second one on its own and you are looking at it starting from a world that never existed, because the first one already moved the pool.</p>
+      <p class="bn-lead">Paste the group. Every transaction is replayed in order on one machine, each starting from what the ones before it left behind, and every step is checked against what the chain actually recorded. Then change one step and watch the change travel into the rest.</p>
+      <div class="wform bn-form">
+        <div class="wfield">
           <label class="flabel" for="bundleTarget">Bundle id, signature, or list</label>
           <input id="bundleTarget" placeholder="a Jito bundle id, any signature that landed in one, or sig,sig,sig" spellcheck="false" autocomplete="off" />
         </div>
         <button class="btn" id="bundleGo"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg>Replay the sequence</button>
       </div>
-      <div class="empty">Every step is one historical replay, so a five-transaction bundle takes a little while the first time. The result is cached.</div>
+      <div class="examples">
+        <span class="lbl">Try one:</span>
+        <button class="bn-chip" data-bundle="71e899723de972d9e5b286ed1e1a6b77a8f60d6029324124c98eeca0fe100912">five transactions, one slot <span class="dim">· exact</span></button>
+        <button class="bn-chip" data-bundle="05a6d9981728cd177f642c8157877bdfa72668bec370bb18a011665cfb4af1e0">two transactions <span class="dim">· drifts at step 0</span></button>
+        <button class="bn-chip" data-bundle="5R7um1BrpxwCf2Jtd4VUwAn3De3WUjjkRX4VNxDxyLfT8wUkHKsVzBG77iFUvU64awKokDigGXkY1xpa9agaXhv7,2tWH7BvjoSyqSh1ZU2jjg7ufenn7jRGMUBYmJackWomBTMgwv6CXasxekfqrMDrxSQMpLhnJynVqpYyM4wJE8vYE">two transactions, different slots <span class="dim">· no bundle</span></button>
+      </div>
+      <div class="bn-points">
+        <div class="bn-point"><span class="bn-num">1</span><span><b>Any group works.</b> A Jito bundle id, one signature that landed inside a bundle and we find the rest, or your own comma-separated list in the order you want them run.</span></div>
+        <div class="bn-point"><span class="bn-num">2</span><span><b>Proven against the chain.</b> Every step is compared with what really happened, outcome and compute units, so you know the replay is real and not a guess.</span></div>
+        <div class="bn-point"><span class="bn-num">3</span><span><b>Then change something.</b> Edit a balance at any step and every later step is re-run on top of your change.</span></div>
+      </div>
+      <div class="empty" style="margin-top:var(--s-4)">Each step is one historical replay, so a bundle you are the first to open takes a few minutes. It keeps building even if you leave, and the same link is instant afterwards.</div>
       <div class="dbg-err hidden" id="bundleErr"></div>
     </div>
     <div class="grid" id="bundleMain">
@@ -1541,11 +1595,17 @@ input.derived { border-color: var(--green-border); color: var(--green); }
       </div>
       <div class="card full" id="bundleCascadeCard" hidden>
         <h2>The cascade <span class="count" id="bundleEdgeCount"></span></h2>
-        <p class="whatif-lead">An account one step changed that a later step also names. This is the wire a change travels along: edit the earlier step and every step on the far side of these lines can move.</p>
+        <p class="whatif-lead">An account that one step changed and a later step also uses. These are the wires a change travels along: edit the earlier step and any step on the far side of one of these lines can move.</p>
         <div id="bundleCascade"></div>
+      </div>
+      <div class="card full" id="bundleEditCard" hidden>
+        <h2>Change one step <span class="count" id="bundleEditCount"></span></h2>
+        <p class="whatif-lead">Set an account's balance at the step you choose. The step runs with your value, and every step after it runs on whatever that produced, so you see the change arrive downstream rather than having to imagine it.</p>
+        <div id="bundleEdit"></div>
       </div>
       <div class="card full" id="bundleStepCard" hidden>
         <h2>Step through <span class="count" id="bundleStepLabel"></span></h2>
+        <p class="whatif-lead">One transaction of the sequence, instruction by instruction, with every step before it already run.</p>
         <div id="bundleStep"></div>
       </div>
     </div>
@@ -5068,9 +5128,10 @@ window.addEventListener('popstate', e => {
 // An ordered set of dependent transactions replayed on one SVM: a Jito bundle,
 // or any list the reader pastes. The engine builds one world per step, runs
 // them in order, and reports every step against what the chain recorded.
-let bundleReport = null, bundleTargetCur = '', bundleMuts = {};
+let bundleReport = null, bundleBase = null, bundleTargetCur = '', bundleMuts = {}, bundleOpen = {};
 // Stop polling eventually; the engine still finishes, and the next visit is instant.
-const BUNDLE_GIVE_UP = 900;   // step index → { address, lamports }
+const BUNDLE_GIVE_UP = 900;
+const lamp = (n) => (n / 1e9).toFixed(6).replace(/0+$/, '').replace(/\.$/, '') + ' SOL';
 
 function bundleShowErr(msg) {
   const el = $('bundleErr');
@@ -5078,86 +5139,208 @@ function bundleShowErr(msg) {
   el.classList.remove('hidden'); el.textContent = msg;
 }
 
+function bundleNavOn() {
+  ['navAnalyze', 'navSim', 'navDebug', 'navProfile', 'navWatch'].forEach(id => $(id).classList.remove('on'));
+  $('navBundle').classList.add('on');
+}
+
 function showBundleLanding(push) {
   hideAllViews(); $('bundle').classList.remove('hidden');
   $('bundleMain').classList.add('hidden'); $('bundleLanding').classList.remove('hidden');
-  ['navAnalyze', 'navSim', 'navDebug', 'navProfile', 'navWatch'].forEach(id => $(id).classList.remove('on'));
-  $('navBundle').classList.add('on');
+  bundleNavOn();
   if (push !== false) history.pushState({ bundle: true }, '', '/bundles' + location.search);
 }
 
-// The cascade, grouped per step pair: fifty raw rows on a five-transaction
-// bundle says nothing, ten grouped rows say what carried where.
+// Every account a step could sensibly be asked about: the ones it changed
+// (we know their balance going in) and the ones it inherited from earlier
+// steps. Typing a base58 address from memory is not a thing anyone can do.
+function bundleAccountsOf(step) {
+  const out = new Map();
+  for (const d of step.diff) out.set(d.address, d.lamports_before);
+  for (const a of step.carried) if (!out.has(a)) out.set(a, null);
+  return out;
+}
+
+function bundleStepRow(s, base) {
+  const cuSame = s.chain_compute === null || s.chain_compute === undefined || s.chain_compute === s.result.compute_units;
+  const cu = cuSame
+    ? `${s.result.compute_units}`
+    : `${s.result.compute_units} <span class="amt neg">vs ${s.chain_compute} on chain</span>`;
+  const outcome = s.result.success
+    ? '<span class="amt pos">ok</span>'
+    : `<span class="amt neg">${esc(s.result.error_name || s.result.error || 'failed')}</span>`;
+  const flags = [];
+  if (!s.matches_chain) flags.push('<span class="amt neg">drift</span>');
+  if (bundleMuts[s.index]) flags.push('<span class="bn-moved">edited</span>');
+  // Against the unmutated run, when there is one to compare with.
+  if (base && base[s.index]) {
+    const b = base[s.index];
+    if (b.result.success !== s.result.success) flags.push('<span class="bn-moved">outcome flipped</span>');
+    else if (b.result.compute_units !== s.result.compute_units) {
+      const d = s.result.compute_units - b.result.compute_units;
+      flags.push(`<span class="bn-moved">${d > 0 ? '+' : ''}${d} CU</span>`);
+    } else if (JSON.stringify(b.diff) !== JSON.stringify(s.diff)) flags.push('<span class="bn-moved">different effect</span>');
+  }
+  return `<tr class="bn-row${bundleOpen[s.index] ? ' on' : ''}" data-brow="${s.index}">
+    <td>${s.index}</td>
+    <td><span class="mono">${short(s.signature)}</span></td>
+    <td>${outcome}</td>
+    <td>${s.chain_success ? 'ok' : 'failed'}</td>
+    <td>${cu}</td>
+    <td>${s.diff.length}</td>
+    <td>${s.carried.length}</td>
+    <td>${flags.join(' ')}</td>
+    <td><button class="btn ghost sm" data-bstep="${s.index}">step through</button></td>
+  </tr>` + (bundleOpen[s.index] ? bundleStepDetail(s) : '');
+}
+
+function bundleStepDetail(s) {
+  const changed = s.diff.length
+    ? s.diff.map(d => {
+        const delta = d.lamports_after - d.lamports_before;
+        const bal = delta ? ` ${delta > 0 ? '+' : ''}${lamp(delta)}` : '';
+        const fields = d.fields && d.fields.length ? ` · ${d.fields.slice(0, 2).map(f => esc(f.name)).join(', ')}` : (d.raw_data_changed ? ' · data' : '');
+        return `<div><span class="bn-acct">${short(d.address)}</span>${bal}${fields}</div>`;
+      }).join('')
+    : '<div class="empty">nothing</div>';
+  const carried = s.carried.length
+    ? s.carried.slice(0, 12).map(a => `<span class="bn-acct">${short(a)}</span>`).join(' ') +
+      (s.carried.length > 12 ? ` <span class="empty">+${s.carried.length - 12} more</span>` : '')
+    : '<span class="empty">nothing, this is where the sequence starts</span>';
+  const diverged = (s.diverged || []).length
+    ? `<div class="col"><h4>disagrees with the rebuilt world</h4>` + s.diverged.map(d => {
+        const what = d.lamports_differ && d.data_differs ? 'balance and bytes' : d.lamports_differ ? 'balance' : 'bytes';
+        return `<div><span class="bn-acct">${short(d.account)}</span> ${what}</div>`;
+      }).join('') + `</div>`
+    : '';
+  const why = s.matches_chain ? '' :
+    `<div class="col"><h4>why this step drifted</h4>
+       <div>replay: ${esc(s.result.error || 'succeeded')}</div>
+       <div>chain: ${esc(s.chain_error || 'succeeded')}</div>
+       <div class="empty" style="margin-top:4px">The chain and the replay disagree. On the free tier the state this step started from is reconstructed, so the difference is usually drift since its slot rather than a bug.</div>
+     </div>`;
+  return `<tr class="bn-detail"><td colspan="9">
+    <div class="col"><h4>what it changed</h4>${changed}</div>
+    <div class="col"><h4>what it inherited</h4>${carried}</div>
+    ${diverged}${why}
+    <div style="clear:both"></div>
+    <div class="empty">Transaction <span class="mono">${esc(s.signature)}</span></div>
+  </td></tr>`;
+}
+
 function bundleCascadeRows(edges) {
   const pairs = new Map();
   for (const e of edges) {
-    const key = e.from_step + '→' + e.to_step;
+    const key = e.from_step + '>' + e.to_step;
     if (!pairs.has(key)) pairs.set(key, { from: e.from_step, to: e.to_step, accounts: [], readonly: true });
     const p = pairs.get(key);
     p.accounts.push(e.account);
     if (e.role !== 'readonly') p.readonly = false;
   }
-  const rows = [...pairs.values()].sort((a, b) => a.from - b.from || a.to - b.to).map(p => {
-    const names = p.accounts.slice(0, 3).map(a => `<span class="mono">${short(a)}</span>`).join(', ');
-    const more = p.accounts.length > 3 ? ` +${p.accounts.length - 3} more` : '';
-    return `<tr><td>tx${p.from} → tx${p.to}</td><td>${p.accounts.length}</td><td>${names}${more}</td><td>${p.readonly ? 'read only' : 'writable'}</td></tr>`;
+  return [...pairs.values()].sort((a, b) => a.from - b.from || a.to - b.to).map(p => {
+    const names = p.accounts.slice(0, 4).map(a => `<span class="bn-acct">${short(a)}</span>`).join(' ');
+    const more = p.accounts.length > 4 ? ` <span class="empty">+${p.accounts.length - 4} more</span>` : '';
+    const role = p.readonly ? ' <span class="empty">read only</span>' : '';
+    return `<div class="bn-hop"><span class="bn-arrow">tx${p.from} → tx${p.to}</span>${names}${more}${role}</div>`;
   }).join('');
-  return `<div style="overflow-x:auto"><table class="fields"><thead><tr><th>hop</th><th>accounts</th><th>which</th><th>role</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function bundleEditPanel(r) {
+  const steps = r.steps.map(s => `<option value="${s.index}">step ${s.index} · ${short(s.signature)}</option>`).join('');
+  const pills = Object.entries(bundleMuts).map(([k, m]) =>
+    `<span class="bn-edit-pill">step ${k} · ${short(m.address)} → ${m.lamports}<button data-bdrop="${k}" title="remove">✕</button></span>`).join('');
+  return `<div class="bn-editrow">
+      <div class="wfield"><label class="flabel" for="bmStep">which step</label><select id="bmStep" class="cf-select">${steps}</select></div>
+      <div class="wfield wide" style="flex:1 1 320px"><label class="flabel" for="bmAddr">whose balance</label><select id="bmAddr" class="cf-select"></select></div>
+      <div class="wfield"><label class="flabel" for="bmLam">set to (lamports)</label><input id="bmLam" placeholder="0" spellcheck="false" autocomplete="off" /></div>
+      <button class="btn" id="bmGo">Re-run from there</button>
+      ${Object.keys(bundleMuts).length ? '<button class="btn ghost" id="bmClear">Clear all edits</button>' : ''}
+    </div>
+    <div class="empty" id="bmHint"></div>
+    ${pills ? `<div class="bn-edits">${pills}</div>` : ''}`;
+}
+
+// Fill the account picker from whichever step is selected.
+function bundleFillAccounts() {
+  const r = bundleReport; if (!r) return;
+  const idx = Number($('bmStep').value);
+  // From the unedited run, always. Once an edit makes a step fail it touches
+  // nothing, and a picker built from that would leave you unable to change the
+  // very edit you just made.
+  const step = (bundleBase && bundleBase[idx]) || r.steps[idx];
+  if (!step) return;
+  const accounts = bundleAccountsOf(step);
+  const opts = [...accounts.entries()].map(([a, bal]) =>
+    `<option value="${esc(a)}" data-bal="${bal === null ? '' : bal}">${short(a, 10)}${bal === null ? '' : ' · ' + lamp(bal)}</option>`).join('');
+  $('bmAddr').innerHTML = opts || '<option value="">this step touched nothing</option>';
+  bundleHint();
+}
+
+function bundleHint() {
+  const sel = $('bmAddr').selectedOptions[0];
+  const bal = sel && sel.dataset.bal;
+  $('bmHint').textContent = bal
+    ? `That account holds ${bal} lamports going into this step. Set it lower to starve the step, higher to fund it.`
+    : 'This account was inherited from an earlier step, so its balance is whatever that step left.';
 }
 
 function renderBundle(r) {
   bundleReport = r;
+  const edited = Object.keys(bundleMuts).length > 0;
+  if (!edited) bundleBase = r.steps.slice();
+  const base = edited && bundleBase ? bundleBase : null;
+
   const meta = r.meta;
   const head = meta
-    ? `bundle <span class="mono">${short(meta.id)}</span> · slot ${meta.slot} · ${meta.signatures.length} transactions · tip ${meta.tip_lamports} lamports`
-    : `${r.steps.length} transactions · no Jito bundle`;
+    ? `Jito bundle <span class="mono">${short(meta.id, 10)}</span> · slot ${meta.slot} · ${meta.signatures.length} transactions · tip ${meta.tip_lamports} lamports`
+    : `${r.steps.length} transactions · a list you gave, not a Jito bundle`;
   const mode = r.mode === 'consecutive'
-    ? 'One slot, replayed back to back. Nothing is rebuilt between steps, so this replay is exact where a single historical replay only approximates.'
-    : 'Different slots. What earlier steps wrote is carried forward and everything else is rebuilt at each step\'s own slot; accounts where the two disagree are flagged below.';
-  const banner = r.exact
-    ? `<span class="amt pos">every step matches the chain</span>`
-    : `<span class="amt neg">drift starts at step ${r.first_drift}</span>`;
-
-  const rows = r.steps.map(s => {
-    const cu = s.chain_compute === null || s.chain_compute === undefined
-      ? `${s.result.compute_units}`
-      : (s.chain_compute === s.result.compute_units
-          ? `${s.result.compute_units}`
-          : `${s.result.compute_units} <span class="amt neg">vs ${s.chain_compute}</span>`);
-    const outcome = s.result.success ? '<span class="amt pos">ok</span>' : `<span class="amt neg">${esc(s.result.error_name || s.result.error || 'failed')}</span>`;
-    const chain = s.chain_success ? 'ok' : 'failed';
-    const flag = s.matches_chain ? '' : '<span class="amt neg">drift</span>';
-    const mutated = bundleMuts[s.index] ? '<span class="amt neg">edited</span>' : '';
-    const div = (s.diverged || []).length ? `<div class="post-bal">${s.diverged.length} account(s) disagree with the rebuilt world</div>` : '';
-    return `<tr><td>${s.index}</td><td><a href="/tx/${encodeURIComponent(s.signature)}" data-sig="${esc(s.signature)}" class="mono">${short(s.signature)}</a>${div}</td>` +
-      `<td>${outcome}</td><td>${chain}</td><td>${cu}</td><td>${s.diff.length}</td><td>${s.carried.length}</td><td>${flag} ${mutated}</td>` +
-      `<td><button class="btn ghost sm" data-bstep="${s.index}">step through</button></td></tr>`;
-  }).join('');
+    ? 'All in one slot, back to back. Nothing could have touched these accounts in between, so replaying them in order is exact rather than an approximation.'
+    : 'These are in different slots. What earlier steps wrote is carried forward, everything else is rebuilt at each step\'s own slot, and any account where those two answers disagree is flagged below instead of being quietly picked for you.';
+  const verdict = r.exact
+    ? `<span class="bn-verdict ok">${icon('check')}every step matches the chain</span>`
+    : `<span class="bn-verdict bad">${icon('alert')}drift starts at step ${r.first_drift}</span>`;
 
   $('bundleState').textContent = `${r.steps.length} steps`;
   $('bundleSummary').innerHTML =
-    `<div class="empty">${head}</div><div class="empty">${mode}</div><div class="empty">${banner}</div>` +
-    `<div style="overflow-x:auto"><table class="fields"><thead><tr><th>step</th><th>transaction</th><th>replay</th><th>chain</th><th>compute</th><th>changed</th><th>inherited</th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` +
-    `<div class="wform" style="margin-top:12px">
-       <div class="wfield"><label class="flabel" for="bmStep">Edit a step: which one</label><input id="bmStep" placeholder="0" spellcheck="false" autocomplete="off" /></div>
-       <div class="wfield wide"><label class="flabel" for="bmAddr">whose balance</label><input id="bmAddr" placeholder="account address" spellcheck="false" autocomplete="off" /></div>
-       <div class="wfield"><label class="flabel" for="bmLam">set to (lamports)</label><input id="bmLam" placeholder="0" spellcheck="false" autocomplete="off" /></div>
-       <button class="btn" id="bmGo">Re-run the sequence</button>
-       ${Object.keys(bundleMuts).length ? '<button class="btn ghost" id="bmClear">Clear edits</button>' : ''}
-     </div>`;
+    `<div class="bn-meta">${head}</div>
+     <div style="margin:var(--s-3) 0">${verdict}${edited ? ' <span class="bn-verdict bad">with your edits applied</span>' : ''}</div>
+     <p class="bn-lead">${mode}</p>
+     <table class="bn-steps"><thead><tr>
+        <th>step</th><th>transaction</th><th>replay</th><th>chain</th><th>compute</th><th>changed</th><th>inherited</th><th></th><th></th>
+     </tr></thead><tbody>${r.steps.map(s => bundleStepRow(s, base)).join('')}</tbody></table>
+     <div class="empty" style="margin-top:var(--s-3)">Click any step to see what it changed and what it inherited. <b>Changed</b> is how many accounts that transaction wrote. <b>Inherited</b> is how many of its accounts came from the steps before it rather than from the chain.</div>`;
 
   const edges = r.edges || [];
   $('bundleCascadeCard').hidden = edges.length === 0;
   $('bundleEdgeCount').textContent = edges.length ? `${edges.length} links` : '';
   if (edges.length) $('bundleCascade').innerHTML = bundleCascadeRows(edges);
 
-  $('bundleSummary').querySelectorAll('[data-bstep]').forEach(b => {
-    b.addEventListener('click', () => bundleTrace(Number(b.dataset.bstep)));
+  $('bundleEditCard').hidden = false;
+  $('bundleEditCount').textContent = edited ? `${Object.keys(bundleMuts).length} active` : '';
+  $('bundleEdit').innerHTML = bundleEditPanel(r);
+  bundleFillAccounts();
+
+  // Row expansion, step-through, and the edit controls.
+  $('bundleSummary').querySelectorAll('[data-brow]').forEach(tr => {
+    tr.addEventListener('click', ev => {
+      if (ev.target.closest('[data-bstep]')) return;
+      const i = Number(tr.dataset.brow);
+      bundleOpen[i] = !bundleOpen[i];
+      renderBundle(bundleReport);
+    });
   });
-  const go = $('bmGo');
-  if (go) go.addEventListener('click', bundleApplyMutation);
+  $('bundleSummary').querySelectorAll('[data-bstep]').forEach(b => {
+    b.addEventListener('click', ev => { ev.stopPropagation(); bundleTrace(Number(b.dataset.bstep)); });
+  });
+  $('bmStep').addEventListener('change', bundleFillAccounts);
+  $('bmAddr').addEventListener('change', bundleHint);
+  $('bmGo').addEventListener('click', bundleApplyMutation);
   const clear = $('bmClear');
   if (clear) clear.addEventListener('click', () => { bundleMuts = {}; bundleRun(); });
+  $('bundleEdit').querySelectorAll('[data-bdrop]').forEach(b => {
+    b.addEventListener('click', () => { delete bundleMuts[b.dataset.bdrop]; bundleRun(); });
+  });
 }
 
 // The request body both POST routes take: the target plus every edit made so
@@ -5179,13 +5362,13 @@ async function bundleRun() {
   bundleShowErr('');
   hideAllViews(); $('bundle').classList.remove('hidden');
   $('bundleLanding').classList.add('hidden'); $('bundleMain').classList.remove('hidden');
-  ['navAnalyze', 'navSim', 'navDebug', 'navProfile', 'navWatch'].forEach(id => $(id).classList.remove('on'));
-  $('navBundle').classList.add('on');
-  $('bundleState').textContent = 'building one world per step…';
-  $('bundleSummary').innerHTML = '<div class="empty">Each step is a historical replay. The first run of a bundle takes a while; after that it is cached.</div>';
+  bundleNavOn();
+  const edited = Object.keys(bundleMuts).length > 0;
+  $('bundleState').textContent = edited ? 're-running with your edit…' : 'building one world per step…';
+  $('bundleSummary').innerHTML = '<div class="empty">Each step is a historical replay. The first run of a bundle takes a few minutes; after that it is cached. You can leave and come back, the engine keeps building.</div>';
   $('bundleStepCard').hidden = true;
   $('bundleCascadeCard').hidden = true;
-  const edited = Object.keys(bundleMuts).length > 0;
+  $('bundleEditCard').hidden = true;
   const started = Date.now();
   const elapsed = () => Math.round((Date.now() - started) / 1000);
   try {
@@ -5200,7 +5383,7 @@ async function bundleRun() {
         ? await api('/bundle', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(bundleBody()) })
         : await api('/bundle/' + encodeURIComponent(bundleTargetCur) + clusterQ());
       if (res.status === 202) {
-        if (elapsed() > BUNDLE_GIVE_UP) throw new Error(`still building after ${elapsed()}s — try the link again in a minute, the engine keeps the work`);
+        if (elapsed() > BUNDLE_GIVE_UP) throw new Error(`still building after ${elapsed()}s — open the same link again in a minute, the engine keeps the work`);
         $('bundleState').textContent = `building one world per step… ${elapsed()}s`;
         await new Promise(r => setTimeout(r, 4000));
         continue;
@@ -5233,9 +5416,9 @@ async function bundleTrace(step) {
     // writes straight into the debugger panel's elements, which belong to a
     // different view. The trace itself is the same shape.
     const tr = JSON.parse(text);
-    const head = `<div class="empty">${esc(tr.signature || '')}</div>` +
-      `<div class="empty">${tr.result.success ? '<span class="amt pos">succeeded</span>' : `<span class="amt neg">${esc(tr.result.error_name || tr.result.error || 'failed')}</span>`}` +
-      ` · ${tr.result.compute_units} compute units · ${tr.steps.length} instructions, CPIs included</div>`;
+    const head = `<div class="empty mono">${esc(tr.signature || '')}</div>` +
+      `<div style="margin:var(--s-2) 0">${tr.result.success ? '<span class="bn-verdict ok">succeeded</span>' : `<span class="bn-verdict bad">${esc(tr.result.error_name || tr.result.error || 'failed')}</span>`}` +
+      ` <span class="empty">${tr.result.compute_units} compute units · ${tr.steps.length} instructions, CPIs included</span></div>`;
     const rows = tr.steps.map(st => {
       const indent = '&nbsp;'.repeat((st.depth - 1) * 4);
       const label = esc(st.name || 'instruction');
@@ -5245,20 +5428,17 @@ async function bundleTrace(step) {
       return `<tr><td class="mono">${indent}${esc(st.path)}</td><td>${label}</td><td>${esc(prog)}</td><td>${cu}</td><td>${bad}</td></tr>`;
     }).join('');
     $('bundleStep').innerHTML = head +
-      `<div style="overflow-x:auto"><table class="fields"><thead><tr><th>step</th><th>instruction</th><th>program</th><th>compute</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      `<table class="bn-steps"><thead><tr><th>step</th><th>instruction</th><th>program</th><th>compute</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
   } catch (e) {
     $('bundleStep').innerHTML = `<div class="dbg-err">${esc(String(e.message || e))}</div>`;
   }
 }
 
 function bundleApplyMutation() {
-  const step = Number(($('bmStep').value || '').trim());
+  const step = Number($('bmStep').value);
   const address = ($('bmAddr').value || '').trim();
   const lamports = ($('bmLam').value || '').trim();
-  if (!Number.isInteger(step) || step < 0 || !bundleReport || step >= bundleReport.steps.length) {
-    return bundleShowErr(`step must be a number between 0 and ${bundleReport ? bundleReport.steps.length - 1 : 0}`);
-  }
-  if (!address) return bundleShowErr('give the account whose balance to change');
+  if (!address) return bundleShowErr('pick the account whose balance to change');
   if (!/^\d+$/.test(lamports)) return bundleShowErr('lamports must be a whole number');
   bundleShowErr('');
   bundleMuts[step] = { address, lamports: Number(lamports) };
@@ -5266,7 +5446,7 @@ function bundleApplyMutation() {
 }
 
 function showBundle(target, push) {
-  if (target !== bundleTargetCur) bundleMuts = {};
+  if (target !== bundleTargetCur) { bundleMuts = {}; bundleBase = null; bundleOpen = {}; }
   bundleTargetCur = target;
   if (push !== false) history.pushState({ bundle: target }, '', '/bundles/' + encodeURIComponent(target) + location.search);
   bundleRun();
@@ -5282,6 +5462,9 @@ $('bundleGo').addEventListener('click', () => {
   showBundle(t);
 });
 $('bundleTarget').addEventListener('keydown', e => { if (e.key === 'Enter') $('bundleGo').click(); });
+document.querySelectorAll('[data-bundle]').forEach(b => {
+  b.addEventListener('click', () => { $('bundleTarget').value = b.dataset.bundle; showBundle(b.dataset.bundle); });
+});
 
 if (location.pathname === '/bundles' || location.pathname === '/bundles/') {
   history.replaceState({ bundle: true }, '', location.pathname + location.search);
