@@ -1030,6 +1030,44 @@ async fn bundle_post_handler(
     .map_err(lib_err)
 }
 
+/// POST /bundle/accounts — every account one step can be asked about, decoded,
+/// as that step sees them once the steps before it have run. What an editor
+/// needs before anyone changes a value: current contents, field names, offsets.
+async fn bundle_accounts_handler(
+    Json(req): Json<BundleRequest>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::response::IntoResponse;
+    let step = req.step.ok_or((
+        StatusCode::BAD_REQUEST,
+        "`step` is required: whose accounts to describe".to_string(),
+    ))?;
+    let (url, archive) = endpoints_for(
+        req.cluster.as_deref(),
+        req.rpc.as_deref(),
+        req.archive.as_deref(),
+        req.relay.as_deref(),
+    )?;
+    let key = bundle_key(&url, archive.as_deref(), &req);
+    let (_input, step_muts) = bundle_parts(req)?;
+    let Some(built) = built_get(&key) else {
+        return Ok(bundle_building());
+    };
+    tokio::task::spawn_blocking(
+        move || -> Result<Vec<svmscope::AccountInfo>, svmscope::Error> {
+            built.accounts_at(step, &step_muts)
+        },
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?
+    .map(|a| Json(a).into_response())
+    .map_err(lib_err)
+}
+
 /// The key a bundle is stored under, the same one the read route uses, so a
 /// reader who opened the baseline has already paid for every edit that follows.
 fn bundle_key(url: &Rpc, archive: Option<&str>, req: &BundleRequest) -> String {
@@ -2967,6 +3005,7 @@ async fn api_index() -> Json<serde_json::Value> {
             "GET  /trace/{signature}":    "The same trace with no mutations, cacheable.",
             "GET  /bundle/{id_or_sig}":   "Bundle replay: a Jito bundle id, a signature inside one, or a comma-separated list, replayed in order on one SVM and compared with the chain step by step. Cacheable.",
             "POST /bundle":               "{ bundle | signatures[], mutations[{ step, mutations[] }] } — the same report with per-step what-if mutations; an edit at one step cascades into every step after it. Answers 202 until the sequence has been built by a GET; after that an edit costs milliseconds, because the per-step worlds are already in memory.",
+            "POST /bundle/accounts":      "{ bundle | signatures[], step, mutations[] } — every account that step can be asked about, decoded as the step sees them: current values, field names and offsets, for building an editor. Answers 202 until the sequence has been built by a GET.",
             "POST /bundle/trace":         "{ bundle | signatures[], step, mutations[{ step, mutations[] }] } — step debugger for one step of a bundle, with every step before it already run. Answers 202 until the sequence has been built by a GET.",
             "POST /profile":              "{ signature, mutations[]?, time_travel?, features?, symbols[{program, elf_b64}]? } — compute profiler: every BPF instruction attributed to functions, syscalls and call stacks per program frame; symbols name a program's functions from its .debug file.",
             "GET  /profile/{signature}":  "The as-it-happened compute profile, no symbols, cacheable.",
@@ -3275,6 +3314,7 @@ async fn main() {
         .route("/replay_report", post(replay_report_handler))
         .route("/bundle", post(bundle_post_handler))
         .route("/bundle/trace", post(bundle_trace_handler))
+        .route("/bundle/accounts", post(bundle_accounts_handler))
         .route("/bundle/{target}", get(bundle_get_handler))
         .route("/trace", post(trace_handler))
         .route("/trace/{signature}", get(trace_get_handler))

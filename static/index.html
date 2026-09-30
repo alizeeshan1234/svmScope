@@ -840,6 +840,9 @@ input.derived { border-color: var(--green-border); color: var(--green); }
 .drow .new { color: var(--green); font-weight: 500; word-break: break-all; }
 
 /* ---------- bundle replay ---------- */
+.bn-ix { display: flex; gap: var(--s-2); align-items: center; flex-wrap: wrap; margin-top: var(--s-3); }
+#bundleAccts { margin-top: var(--s-3); }
+
 #bundleSearch { grid-column: 1 / -1; }
 
 /* Looks like .trychip, but that class carries a global click handler that
@@ -1608,7 +1611,7 @@ input.derived { border-color: var(--green-border); color: var(--green); }
       </div>
       <div class="card full" id="bundleEditCard" hidden>
         <h2>Change one step <span class="count" id="bundleEditCount"></span></h2>
-        <p class="whatif-lead">Change an account, or the instructions themselves, at the step you choose: a balance, a named field of a decoded account, raw bytes at an offset, or drop an instruction and replace its data. The step runs with your change, and every step after it runs on whatever that produced, so you watch the change arrive downstream rather than having to imagine it. Edits stack, on one step or several.</p>
+        <p class="whatif-lead">Pick a step and open any account it touches. Every field it has is listed with the value that step actually sees, once the steps before it have run. Type over the one you want different and apply. The step runs with your value and every step after it runs on whatever that produced, so you watch the change arrive downstream rather than having to imagine it. Edits stack, on one step or several.</p>
         <div id="bundleEdit"></div>
       </div>
       <div class="card full" id="bundleStepCard" hidden>
@@ -5263,83 +5266,143 @@ function bundleCascadeRows(edges) {
   }).join('');
 }
 
+// The editor is the one the simulate page uses: a card per account, opened to
+// show every decoded field with its current value, and you type over the value
+// you want changed. Typing a number beats picking a mutation kind and spelling
+// out a byte offset.
+let bundleAccounts = [];
+
 function bundleEditPanel(r) {
   const steps = r.steps.map(s => `<option value="${s.index}">step ${s.index} · ${short(s.signature)}</option>`).join('');
   const pills = bundleMuts.map((m, i) =>
     `<span class="bn-edit-pill">step ${m.step} · ${esc(m.label)}<button data-bdrop="${i}" title="remove">✕</button></span>`).join('');
   return `<div class="bn-editrow">
       <div class="wfield"><label class="flabel" for="bmStep">which step</label><select id="bmStep" class="cf-select">${steps}</select></div>
-      <div class="wfield"><label class="flabel" for="bmKind">change what</label><select id="bmKind" class="cf-select">
-        <option value="lamports">an account's balance</option>
-        <option value="field">a named field of an account</option>
-        <option value="data">raw bytes of an account</option>
-        <option value="skipix">drop an instruction</option>
-        <option value="ixdata">replace an instruction's data</option>
-      </select></div>
-      <div class="wfield wide" style="flex:1 1 280px" id="bmAddrWrap"><label class="flabel" for="bmAddr">which account</label><select id="bmAddr" class="cf-select"></select></div>
-      <div class="wfield" id="bmAWrap"><label class="flabel" for="bmA" id="bmALabel">to</label><input id="bmA" spellcheck="false" autocomplete="off" /></div>
-      <div class="wfield" id="bmBWrap" hidden><label class="flabel" for="bmB" id="bmBLabel">value</label><input id="bmB" spellcheck="false" autocomplete="off" /></div>
       <button class="btn" id="bmGo">Apply and re-run</button>
       ${bundleMuts.length ? '<button class="btn ghost" id="bmClear">Clear all edits</button>' : ''}
+      <span class="count" id="bmDirty"></span>
     </div>
-    <datalist id="bmFields"></datalist>
-    <div class="empty" id="bmHint"></div>
+    <div id="bundleAccts"><div class="empty">loading this step's accounts…</div></div>
+    <div class="bn-ix">
+      <span class="empty">Or change the instructions themselves:</span>
+      <input id="bmIx" class="cf-select" style="width:110px" placeholder="instruction #" spellcheck="false" />
+      <input id="bmIxHex" class="cf-select" style="width:200px" placeholder="new data, hex — empty to drop it" spellcheck="false" />
+      <button class="btn ghost sm" id="bmIxGo">Stage</button>
+    </div>
     ${pills ? `<div class="bn-edits">${pills}</div>` : ''}`;
 }
 
-// Each kind needs different inputs. Rather than five forms, one form that
-// relabels itself, so the shape of what you are about to change stays visible.
-function bundleKindShape() {
-  const kind = $('bmKind').value;
-  const shapes = {
-    lamports: { addr: true, a: 'new balance, in lamports', b: null,
-                hint: 'Set it low to starve the step, high to fund it.' },
-    field:    { addr: true, a: 'field name', b: 'new value',
-                hint: 'A named field of the decoded account, for instance amount on a token account. The fields this step changed are offered as you type.' },
-    data:     { addr: true, a: 'byte offset', b: 'bytes, hex',
-                hint: 'Writes raw bytes at an offset. For layouts the engine cannot decode.' },
-    skipix:   { addr: false, a: 'instruction index', b: null,
-                hint: 'Removes one top-level instruction from this step before it runs.' },
-    ixdata:   { addr: false, a: 'instruction index', b: 'new data, hex',
-                hint: "Replaces one instruction's data wholesale." },
-  };
-  const shape = shapes[kind];
-  $('bmAddrWrap').hidden = !shape.addr;
-  $('bmALabel').textContent = shape.a;
-  $('bmBWrap').hidden = !shape.b;
-  if (shape.b) $('bmBLabel').textContent = shape.b;
-  $('bmA').setAttribute('list', kind === 'field' ? 'bmFields' : '');
-  $('bmHint').textContent = shape.hint;
-  if (shape.addr) bundleFillAccounts();
+// The accounts this step sees, once the steps before it have run.
+async function bundleLoadAccounts() {
+  const step = Number($('bmStep').value);
+  const box = $('bundleAccts');
+  box.innerHTML = '<div class="empty">loading this step\'s accounts…</div>';
+  try {
+    const res = await api('/bundle/accounts', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(bundleBody({ step })),
+    });
+    if (res.status === 202) { box.innerHTML = '<div class="empty">the sequence is still being built</div>'; return; }
+    const text = await res.text();
+    if (!res.ok) throw new Error(text || ('engine said ' + res.status));
+    bundleAccounts = JSON.parse(text).filter(a => !a.executable);
+    box.innerHTML = bundleAccounts.length
+      ? bundleAccounts.map(buildCard).join('')
+      : '<div class="empty">this step holds no editable accounts</div>';
+    bundleWireCards();
+  } catch (e) {
+    box.innerHTML = `<div class="dbg-err">${esc(String(e.message || e))}</div>`;
+  }
 }
 
-// Fill the account picker from whichever step is selected.
-function bundleFillAccounts() {
-  const r = bundleReport; if (!r) return;
-  const idx = Number($('bmStep').value);
-  // From the unedited run, always. Once an edit makes a step fail it touches
-  // nothing, and a picker built from that would leave you unable to change the
-  // very edit you just made.
-  const step = (bundleBase && bundleBase[idx]) || r.steps[idx];
-  if (!step) return;
-  const accounts = bundleAccountsOf(step);
-  const opts = [...accounts.entries()].map(([a, bal]) =>
-    `<option value="${esc(a)}" data-bal="${bal === null ? '' : bal}">${short(a, 10)}${bal === null ? '' : ' · ' + lamp(bal)}</option>`).join('');
-  $('bmAddr').innerHTML = opts || '<option value="">this step touched nothing</option>';
-  bundleFillFields();
+function bundleWireCards() {
+  $('bundleAccts').querySelectorAll('.acct-card').forEach(card => {
+    const head = card.querySelector('.acct-head'), body = card.querySelector('.acct-body');
+    head.addEventListener('click', e => {
+      if (e.target.closest('.addr-pill')) return;
+      card.classList.toggle('open'); body.classList.toggle('hidden');
+    });
+    card.querySelectorAll('input.f-in, .raw-off, .raw-hex').forEach(inp => inp.addEventListener('input', () => {
+      if (inp.classList.contains('f-in')) inp.classList.toggle('dirty', inp.value.trim() !== inp.dataset.cur);
+      bundleDirty();
+    }));
+  });
+  bundleDirty();
 }
 
-// The fields this step changed on the chosen account, offered as you type.
-// Only the changed ones are known here, which is exactly the useful set: they
-// are the numbers the transaction moved.
-function bundleFillFields() {
-  const idx = Number($('bmStep').value);
-  const step = (bundleBase && bundleBase[idx]) || (bundleReport && bundleReport.steps[idx]);
-  const addr = $('bmAddr').value;
-  const entry = step && step.diff.find(d => d.address === addr);
-  const names = entry && entry.fields ? entry.fields : [];
-  const list = $('bmFields');
-  if (list) list.innerHTML = names.map(f => `<option value="${esc(f.name)}">${esc(f.ty || '')} · now ${esc(f.after)}</option>`).join('');
+function bundleDirty() {
+  let total = 0;
+  $('bundleAccts').querySelectorAll('.acct-card').forEach(card => {
+    const df = card.querySelectorAll('input.f-in.dirty').length;
+    const ro = card.querySelector('.raw-off'), rh = card.querySelector('.raw-hex');
+    const rawSet = (ro && ro.value.trim() !== '') || (rh && rh.value.trim() !== '');
+    const has = df > 0 || rawSet;
+    card.classList.toggle('has-edits', has);
+    const dot = card.querySelector('.edit-dot');
+    if (dot) dot.classList.toggle('hidden', !has);
+    if (has) total += df + (rawSet ? 1 : 0);
+  });
+  const el = $('bmDirty');
+  if (el) el.textContent = total ? `${total} not yet applied` : '';
+}
+
+// Everything typed over on this step, as mutations the engine takes.
+function bundleCollectEdits() {
+  const out = [];
+  $('bundleAccts').querySelectorAll('.acct-card').forEach(card => {
+    const address = card.dataset.address;
+    const a = bundleAccounts.find(x => x.address === address);
+    card.querySelectorAll('input.f-in').forEach(inp => {
+      const v = inp.value.trim();
+      if (v === inp.dataset.cur) return;
+      if (inp.dataset.kind === 'lamports') {
+        if (!/^\d+$/.test(v)) throw new Error(`${short(address)}: lamports must be a whole number`);
+        out.push({ mut: { kind: 'lamports', address, lamports: Number(v) }, label: `${short(address)} lamports → ${fmt(v)}` });
+      } else {
+        const f = a.decoded.fields[Number(inp.dataset.fi)];
+        // Through the field's own name, so the engine re-encodes it to the
+        // layout rather than trusting an offset typed by hand.
+        out.push({ mut: { kind: 'field', address, field: f.name, value: /^-?\d+$/.test(v) ? Number(v) : v },
+                   label: `${short(address)}.${f.name} → ${v}` });
+      }
+    });
+    const off = card.querySelector('.raw-off'), hx = card.querySelector('.raw-hex');
+    if (off && hx && (off.value.trim() !== '' || hx.value.trim() !== '')) {
+      const o = Number(off.value);
+      const h = hx.value.trim().replace(/^0x/i, '').replace(/[\s_]/g, '');
+      if (!Number.isInteger(o) || o < 0) throw new Error(`${short(address)}: raw offset must be a whole number`);
+      if (!/^([0-9a-fA-F]{2})+$/.test(h)) throw new Error(`${short(address)}: raw bytes must be hex, two characters per byte`);
+      out.push({ mut: { kind: 'data', address, offset: o, bytes_hex: h }, label: `${short(address)} @${o} ← 0x${h.slice(0, 12)}` });
+    }
+  });
+  return out;
+}
+
+function bundleApplyMutation() {
+  const step = Number($('bmStep').value);
+  let edits;
+  try { edits = bundleCollectEdits(); } catch (e) { return bundleShowErr(String(e.message || e)); }
+  if (!edits.length) return bundleShowErr('nothing typed over yet — open an account and change a value');
+  bundleShowErr('');
+  for (const e of edits) bundleMuts.push({ step, mut: e.mut, label: e.label });
+  bundleRun();
+}
+
+// Instruction-level edits have no account to hang off, so they get their own row.
+function bundleStageIx() {
+  const step = Number($('bmStep').value);
+  const idx = ($('bmIx').value || '').trim();
+  const hex = ($('bmIxHex').value || '').trim().replace(/^0x/i, '').replace(/[\s_]/g, '');
+  if (!/^\d+$/.test(idx)) return bundleShowErr('give the instruction number');
+  bundleShowErr('');
+  if (!hex) {
+    bundleMuts.push({ step, mut: { kind: 'skipix', index: Number(idx) }, label: `drop instruction ${idx}` });
+  } else {
+    if (!/^([0-9a-fA-F]{2})+$/.test(hex)) return bundleShowErr('data must be hex, two characters per byte');
+    bundleMuts.push({ step, mut: { kind: 'ixdata', index: Number(idx), bytes_hex: hex },
+                      label: `instruction ${idx} data → 0x${hex.slice(0, 12)}` });
+  }
+  bundleRun();
 }
 
 function renderBundle(r) {
@@ -5394,7 +5457,7 @@ function renderBundle(r) {
   $('bundleEditCard').hidden = false;
   $('bundleEditCount').textContent = edited ? `${bundleMuts.length} active` : '';
   $('bundleEdit').innerHTML = bundleEditPanel(r);
-  bundleKindShape();
+  bundleLoadAccounts();
 
   // Row expansion, step-through, and the edit controls.
   $('bundleSummary').querySelectorAll('[data-brow]').forEach(tr => {
@@ -5408,10 +5471,9 @@ function renderBundle(r) {
   $('bundleSummary').querySelectorAll('[data-bstep]').forEach(b => {
     b.addEventListener('click', ev => { ev.stopPropagation(); bundleTrace(Number(b.dataset.bstep)); });
   });
-  $('bmStep').addEventListener('change', bundleKindShape);
-  $('bmKind').addEventListener('change', bundleKindShape);
-  $('bmAddr').addEventListener('change', bundleFillFields);
+  $('bmStep').addEventListener('change', bundleLoadAccounts);
   $('bmGo').addEventListener('click', bundleApplyMutation);
+  $('bmIxGo').addEventListener('click', bundleStageIx);
   const clear = $('bmClear');
   if (clear) clear.addEventListener('click', () => { bundleMuts = []; bundleRun(); });
   $('bundleEdit').querySelectorAll('[data-bdrop]').forEach(b => {
@@ -5511,50 +5573,6 @@ async function bundleTrace(step) {
   } catch (e) {
     $('bundleStep').innerHTML = `<div class="dbg-err">${esc(String(e.message || e))}</div>`;
   }
-}
-
-function bundleApplyMutation() {
-  const step = Number($('bmStep').value);
-  const kind = $('bmKind').value;
-  const address = ($('bmAddr').value || '').trim();
-  const a = ($('bmA').value || '').trim();
-  const b = ($('bmB').value || '').trim();
-  const needsAccount = kind === 'lamports' || kind === 'field' || kind === 'data';
-  if (needsAccount && !address) return bundleShowErr('pick the account to change');
-
-  let mut = null, label = '';
-  if (kind === 'lamports') {
-    if (!/^\d+$/.test(a)) return bundleShowErr('a balance is a whole number of lamports');
-    mut = { kind: 'lamports', address, lamports: Number(a) };
-    label = `${short(address)} balance → ${a}`;
-  } else if (kind === 'field') {
-    if (!a) return bundleShowErr('name the field to change');
-    if (!b) return bundleShowErr('give the field a value');
-    // Numbers stay numbers; anything else goes as a string, which is how the
-    // engine takes a pubkey or a value too large for a JavaScript number.
-    mut = { kind: 'field', address, field: a, value: /^-?\d+$/.test(b) ? Number(b) : b };
-    label = `${short(address)}.${a} → ${b}`;
-  } else if (kind === 'data') {
-    if (!/^\d+$/.test(a)) return bundleShowErr('the offset is a whole number of bytes');
-    const hex = b.replace(/^0x/i, '').replace(/[\s_]/g, '');
-    if (!hex || !/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2) return bundleShowErr('bytes must be hex, two characters per byte');
-    mut = { kind: 'data', address, offset: Number(a), bytes_hex: hex };
-    label = `${short(address)} @${a} ← 0x${hex.slice(0, 12)}${hex.length > 12 ? '…' : ''}`;
-  } else if (kind === 'skipix') {
-    if (!/^\d+$/.test(a)) return bundleShowErr('the instruction index is a whole number');
-    mut = { kind: 'skipix', index: Number(a) };
-    label = `drop instruction ${a}`;
-  } else if (kind === 'ixdata') {
-    if (!/^\d+$/.test(a)) return bundleShowErr('the instruction index is a whole number');
-    const hex = b.replace(/^0x/i, '').replace(/[\s_]/g, '');
-    if (!hex || !/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2) return bundleShowErr('data must be hex, two characters per byte');
-    mut = { kind: 'ixdata', index: Number(a), bytes_hex: hex };
-    label = `instruction ${a} data → 0x${hex.slice(0, 12)}${hex.length > 12 ? '…' : ''}`;
-  }
-  if (!mut) return bundleShowErr('pick what to change');
-  bundleShowErr('');
-  bundleMuts.push({ step, mut, label });
-  bundleRun();
 }
 
 function showBundle(target, push) {

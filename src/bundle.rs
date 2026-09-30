@@ -3,6 +3,7 @@
 //! at any step. See docs/BUNDLE_PLAN.md.
 
 use crate::analyze::AccountDiff;
+use crate::decode::AccountInfo;
 use crate::error::{Error, Result};
 use crate::jito::{BundleMeta, JitoClient, Segment};
 use crate::replay::{to_replay_result, Mutation, Prepared, ReplayContext, ReplayResult};
@@ -430,6 +431,41 @@ impl Bundle {
         let mut replay = self.replays[step].clone();
         replay.ctx = ctx;
         replay.trace(muts_for(mutations, step))
+    }
+
+    /// Every account this step can be asked about, as the step itself sees
+    /// them: the bytes the cascade produced, not whatever the chain holds
+    /// now. This is what an editor needs to show current values and offsets
+    /// before anyone changes one.
+    ///
+    /// The step's own accounts only, so a five-step bundle does not hand back
+    /// five times the world, and no programs: their bytes are the binary.
+    pub fn accounts_at(&self, step: usize, mutations: &StepMutations) -> Result<Vec<AccountInfo>> {
+        self.check_size()?;
+        if step >= self.steps.len() {
+            return Err(Error::InvalidSpec(format!(
+                "step {step} does not exist; this bundle has {} steps",
+                self.steps.len()
+            )));
+        }
+        let (start, entry, _) = self.resume_at(step, mutations);
+        let (snapshots, _) = self.drive(start, entry, step, mutations, false)?;
+        let ctx = &snapshots
+            .last()
+            .expect("drive returns at least the entry state")
+            .ctx;
+        let named: Vec<(String, Account)> = self.steps[step]
+            .keys
+            .iter()
+            .filter_map(|key| {
+                let address = Address::from_str(key).ok()?;
+                Some((key.clone(), ctx.loaded_data_of(&address)?))
+            })
+            .collect();
+        Ok(crate::decode::describe_accounts_offline(
+            &named,
+            ctx.idl_map(),
+        ))
     }
 
     fn check_size(&self) -> Result<()> {

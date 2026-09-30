@@ -487,6 +487,39 @@ pub(crate) fn infer_layout(data: &[u8]) -> Option<DecodedAccount> {
     })
 }
 
+/// Describe accounts from bytes the caller already holds, without a network
+/// call of any kind: built-in layouts first, then the IDLs the replay already
+/// preloaded. A bundle's worlds carry those IDLs, and asking the chain again
+/// for one would mean a fetch per account per step.
+pub(crate) fn describe_accounts_offline(
+    accounts: &[(String, solana_account::Account)],
+    idls: &std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<AccountInfo> {
+    let mut out = Vec::new();
+    for (address, acc) in accounts {
+        let owner = acc.owner.to_string();
+        let decoded = if acc.executable {
+            None
+        } else {
+            decode(&owner, &acc.data)
+                .or_else(|| {
+                    idls.get(&owner)
+                        .and_then(|idl| crate::idl::decode_with_idl(idl, &acc.data))
+                })
+                .or_else(|| infer_layout(&acc.data))
+        };
+        out.push(AccountInfo {
+            address: address.clone(),
+            owner,
+            lamports: acc.lamports,
+            executable: acc.executable,
+            data_len: acc.data.len(),
+            decoded,
+        });
+    }
+    out
+}
+
 /// Fetch each account's on-chain state and decode any recognized layouts.
 ///
 /// Parallel to `account_keys`; accounts that don't exist are skipped.
