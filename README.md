@@ -528,7 +528,7 @@ alerted. Entries are keyed by program and authority, so nobody can squat a
 program id, and an entry with no dependencies can be closed with
 `unregister`:
 
-```
+```sh
 cd programs/dependency_registry && yarn install
 ANCHOR_PROVIDER_URL=https://api.devnet.solana.com ANCHOR_WALLET=~/.config/solana/id.json \
   yarn ts-node scripts/register-devnet.ts <your program id> <alert url> <dependency id>...

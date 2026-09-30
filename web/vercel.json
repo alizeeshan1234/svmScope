@@ -21,6 +21,14 @@
     {
       "source": "/watch",
       "destination": "/"
+    },
+    {
+      "source": "/bundles",
+      "destination": "/"
+    },
+    {
+      "source": "/bundles/:target*",
+      "destination": "/"
     }
   ],
   "headers": [
