@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let signature = args
         .get(1)
-        .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]\n       svmscope replay <transaction-signature> [--at <slot>] [--now] [--json]\n       svmscope bundle <bundle-id|signature|sig,sig,...> [--step <n>] [--mutate <step>:<addr>:<lamports>] [--json]\n       svmscope freeze <transaction-signature> [-o fixture.json]\n       svmscope test <scenarios.json>\n       svmscope report <scenarios.json> [-o report.html]\n       svmscope idl <program-address>\n       svmscope upgrade <fixture.json>\n\n       any command also takes --cluster <mainnet|devnet|testnet|localnet> or --rpc <url>")?;
+        .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]\n       svmscope replay <transaction-signature> [--at <slot>] [--now] [--json]\n       svmscope bundle <bundle-id|signature|sig,sig,...> [--step <n>] [--mutate <step>:<addr>:<lamports>] [--mutations <file.json>] [--json]\n       svmscope freeze <transaction-signature> [-o fixture.json]\n       svmscope test <scenarios.json>\n       svmscope report <scenarios.json> [-o report.html]\n       svmscope idl <program-address>\n       svmscope upgrade <fixture.json>\n\n       any command also takes --cluster <mainnet|devnet|testnet|localnet> or --rpc <url>")?;
 
     // Cluster/RPC selection: --cluster <mainnet|devnet|testnet|localnet> or --rpc <url>.
     let flag = |name: &str| {
@@ -135,7 +135,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // cascades into the steps after it; `--step <n>` steps through one step of
     // the sequence instruction by instruction instead of reporting all of them.
     if signature == "bundle" {
-        let usage = "usage: svmscope bundle <bundle-id|signature|sig,sig,...> [--step <n>] [--mutate <step>:<addr>:<lamports>] [--json]";
+        let usage = "usage: svmscope bundle <bundle-id|signature|sig,sig,...> [--step <n>] [--mutate <step>:<addr>:<lamports>] [--mutations <file.json>] [--json]";
         let target = args.get(2).ok_or(usage)?;
         // A Jito bundle id is a 32-byte hash printed as 64 hex characters. A
         // signature is 64 bytes in base58, 86 to 88 characters, and base58 has
@@ -188,6 +188,41 @@ fn main() -> Result<(), Box<dyn Error>> {
                 i += 2;
             } else {
                 i += 1;
+            }
+        }
+
+        // The full mutation set, in the shape the HTTP API takes, because a
+        // shell argument is the wrong place to spell out a byte patch or an
+        // instruction rewrite: `[{"step":0,"mutations":[{"kind":"field",...}]}]`.
+        if let Some(path) = flag("--mutations") {
+            #[derive(serde::Deserialize)]
+            struct StepMutationsFile {
+                step: usize,
+                #[serde(default)]
+                mutations: Vec<svmscope::spec::MutationInput>,
+            }
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
+            let entries: Vec<StepMutationsFile> = serde_json::from_str(&text)
+                .map_err(|e| format!("{path} is not a list of {{step, mutations}}: {e}"))?;
+            for entry in entries {
+                if entry.step > last_step {
+                    return Err(format!(
+                        "step {} does not exist; this bundle has {} steps (0 to {last_step})",
+                        entry.step,
+                        bundle.steps.len()
+                    )
+                    .into());
+                }
+                let muts: Vec<Mutation> = entry
+                    .mutations
+                    .into_iter()
+                    .map(svmscope::spec::MutationInput::into_mutation)
+                    .collect::<Result<_, _>>()?;
+                match step_muts.iter_mut().find(|(s, _)| *s == entry.step) {
+                    Some((_, list)) => list.extend(muts),
+                    None => step_muts.push((entry.step, muts)),
+                }
             }
         }
 
