@@ -122,7 +122,14 @@ impl JitoClient {
             .send()
             .map_err(|e| api_error("get", e))?;
 
-        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        // 404 is "no such bundle". 400 is the explorer rejecting the id or
+        // signature as malformed, which for our purposes is the same answer:
+        // there is no bundle here. Passing its raw complaint up would put
+        // "unexpected rpc response: 400 Bad Request" in front of someone who
+        // simply typed something that was never a signature.
+        if resp.status() == reqwest::StatusCode::NOT_FOUND
+            || resp.status() == reqwest::StatusCode::BAD_REQUEST
+        {
             return Ok(None);
         };
 

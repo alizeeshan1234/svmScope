@@ -19,6 +19,10 @@ use std::str::FromStr;
 /// list, not a block: past this, one request turns into minutes of CPU.
 pub const MAX_STEPS: usize = 16;
 
+/// Base58's alphabet: no 0, O, I or l, which is what keeps a signature
+/// distinguishable from a hex bundle id.
+const BASE58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
 /// Mutations to apply, per step index. A step with no entry runs untouched.
 pub type StepMutations = Vec<(usize, Vec<Mutation>)>;
 
@@ -193,9 +197,22 @@ impl Scope {
                 (meta.signatures.clone(), Some(meta))
             }
             BundleInput::Signature { signature } => {
+                // Say "that is not a signature" rather than "that signature is
+                // not in a bundle", which would be a confusing thing to read
+                // about a word someone typed by mistake. Solana signatures are
+                // 64 bytes in base58, which lands between 86 and 88 characters.
+                if !(86..=88).contains(&signature.len())
+                    || !signature.chars().all(|c| BASE58.contains(c))
+                {
+                    return Err(Error::InvalidSpec(format!(
+                        "{signature} is neither a Jito bundle id (64 hex characters) \
+                         nor a transaction signature"
+                    )));
+                }
                 let id = client.bundle_of_signature(&signature)?.ok_or_else(|| {
                     Error::InvalidSpec(format!(
-                        "{signature} is not in a Jito bundle; use the signatures input"
+                        "{signature} is not in a Jito bundle; paste the transactions \
+                         you want replayed as a comma-separated list instead"
                     ))
                 })?;
                 let meta = client
@@ -740,6 +757,21 @@ mod tests {
 
         // Tracing a step that does not exist is a clear error, not a panic.
         assert!(bundle.trace(5, &Vec::new()).is_err());
+    }
+
+    /// A word someone typed is not a signature, and should be told so plainly
+    /// rather than being reported as a signature that is not in any bundle.
+    #[test]
+    fn a_word_is_neither_a_bundle_id_nor_a_signature() {
+        let out = scope().bundle(BundleInput::Signature {
+            signature: "notarealthing".to_string(),
+        });
+        let err = match out {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a word must not resolve to a bundle"),
+        };
+        assert!(err.contains("neither a Jito bundle id"), "{err}");
+        // No network call was needed to know that.
     }
 
     /// A step whose message puts `address` among the writable accounts, or
