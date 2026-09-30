@@ -5068,7 +5068,9 @@ window.addEventListener('popstate', e => {
 // An ordered set of dependent transactions replayed on one SVM: a Jito bundle,
 // or any list the reader pastes. The engine builds one world per step, runs
 // them in order, and reports every step against what the chain recorded.
-let bundleReport = null, bundleTargetCur = '', bundleMuts = {};   // step index → { address, lamports }
+let bundleReport = null, bundleTargetCur = '', bundleMuts = {};
+// Stop polling eventually; the engine still finishes, and the next visit is instant.
+const BUNDLE_GIVE_UP = 900;   // step index → { address, lamports }
 
 function bundleShowErr(msg) {
   const el = $('bundleErr');
@@ -5184,14 +5186,29 @@ async function bundleRun() {
   $('bundleStepCard').hidden = true;
   $('bundleCascadeCard').hidden = true;
   const edited = Object.keys(bundleMuts).length > 0;
+  const started = Date.now();
+  const elapsed = () => Math.round((Date.now() - started) / 1000);
   try {
-    // No edits: the cacheable GET, so a share link opens instantly. With edits
-    // it has to be the POST.
-    const res = edited
-      ? await api('/bundle', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(bundleBody()) })
-      : await api('/bundle/' + encodeURIComponent(bundleTargetCur) + clusterQ());
-    const text = await res.text();
-    if (!res.ok) throw new Error(text || ('engine said ' + res.status));
+    let text = null;
+    // Building a bundle is one historical replay per step, which runs to
+    // minutes on the hosted engine. The read route answers 202 while it works
+    // and keeps working whoever is listening, so poll it rather than holding a
+    // connection open long enough for a browser or a proxy to give up.
+    // A mutated run has no such route yet and still waits on the one request.
+    for (;;) {
+      const res = edited
+        ? await api('/bundle', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(bundleBody()) })
+        : await api('/bundle/' + encodeURIComponent(bundleTargetCur) + clusterQ());
+      if (res.status === 202) {
+        if (elapsed() > BUNDLE_GIVE_UP) throw new Error(`still building after ${elapsed()}s — try the link again in a minute, the engine keeps the work`);
+        $('bundleState').textContent = `building one world per step… ${elapsed()}s`;
+        await new Promise(r => setTimeout(r, 4000));
+        continue;
+      }
+      text = await res.text();
+      if (!res.ok) throw new Error(text || ('engine said ' + res.status));
+      break;
+    }
     renderBundle(JSON.parse(text));
   } catch (e) {
     $('bundleState').textContent = '';

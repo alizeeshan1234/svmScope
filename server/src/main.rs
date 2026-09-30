@@ -819,49 +819,118 @@ fn bundle_parts(req: BundleRequest) -> Result<(BundleInput, StepMutations), (Sta
     Ok((input, step_muts))
 }
 
+/// A bundle build in progress, shared by everyone waiting on the same one.
+type BundleJob = tokio::sync::watch::Receiver<Option<Result<(), String>>>;
+
+/// The builds running right now, by cache key. A build outlives the request
+/// that started it: one step of a bundle is a full historical replay, and on
+/// the hosted engine that is minutes, so a browser that gives up must not
+/// throw the work away and leave the next visitor to pay for it again.
+static BUNDLE_JOBS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, BundleJob>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// How long a request waits on a build before telling the caller to come back.
+/// Short enough to sit well inside any proxy's idle timeout.
+const BUNDLE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// GET /bundle/{id_or_signature} — the baseline report, cacheable, for share
 /// links. A landed bundle's replay does not change, so this is the one every
 /// reader gets before touching anything.
+///
+/// Answers `202` while the build is still running. A bundle is one historical
+/// replay per step, which on the hosted engine runs to minutes, and holding a
+/// connection open that long loses to browsers, proxies and phones going to
+/// sleep. The caller polls this same URL; the work carries on regardless of
+/// who is still listening.
 async fn bundle_get_handler(
     Path(target): Path<String>,
     Query(q): Query<BundleQuery>,
-) -> Result<Json<std::sync::Arc<serde_json::Value>>, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::response::IntoResponse;
     let (url, archive) = endpoints_for(q.cluster.as_deref(), None, None, None)?;
     let key = format!("bundle|{url}|{}|{target}", archive.as_deref().unwrap_or(""));
     if let Some(hit) = at_cache_get(&key) {
-        return Ok(Json(hit));
+        return Ok(Json(hit).into_response());
     }
-    // Building a bundle is one historical replay per step, so it is the most
-    // expensive thing the engine does. Hold the same gate the other heavy
-    // replays hold, and re-check the cache after waiting: a reader who opened
-    // the same share link a second earlier may have just finished it.
-    let _permit = AT_GATE.acquire().await.map_err(|_| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "the engine is shutting down".to_string(),
-        )
-    })?;
-    if let Some(hit) = at_cache_get(&key) {
-        return Ok(Json(hit));
-    }
-    let input = bundle_input_of(&target);
-    let out =
-        tokio::task::spawn_blocking(move || -> Result<svmscope::BundleReport, svmscope::Error> {
-            scope_for(url, archive).bundle(input)?.run(&Vec::new())
-        })
-        .await
-        .map_err(|e| {
+
+    // Join the build already running for this bundle, or start one.
+    let mut rx = {
+        let mut jobs = BUNDLE_JOBS.lock().map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("task error: {e}"),
+                "job table poisoned".to_string(),
             )
         })?;
-    match out {
-        Ok(report) => match serde_json::to_value(&report) {
-            Ok(value) => Ok(Json(at_cache_put(key, value))),
-            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("encode: {e}"))),
+        match jobs.get(&key) {
+            Some(rx) => rx.clone(),
+            None => {
+                let (tx, rx) = tokio::sync::watch::channel(None);
+                jobs.insert(key.clone(), rx.clone());
+                let input = bundle_input_of(&target);
+                let job_key = key.clone();
+                tokio::spawn(async move {
+                    // The same gate every other heavy replay holds.
+                    let outcome = match AT_GATE.acquire().await {
+                        Ok(_permit) => tokio::task::spawn_blocking(
+                            move || -> Result<svmscope::BundleReport, svmscope::Error> {
+                                scope_for(url, archive).bundle(input)?.run(&Vec::new())
+                            },
+                        )
+                        .await
+                        .map_err(|e| format!("task error: {e}"))
+                        .and_then(|r| r.map_err(|e| e.to_string())),
+                        Err(_) => Err("the engine is shutting down".to_string()),
+                    };
+                    let result = match outcome {
+                        Ok(report) => match serde_json::to_value(&report) {
+                            Ok(value) => {
+                                at_cache_put(job_key.clone(), value);
+                                Ok(())
+                            }
+                            Err(e) => Err(format!("encode: {e}")),
+                        },
+                        Err(e) => Err(e),
+                    };
+                    let _ = tx.send(Some(result));
+                    if let Ok(mut jobs) = BUNDLE_JOBS.lock() {
+                        jobs.remove(&job_key);
+                    }
+                });
+                rx
+            }
+        }
+    };
+
+    // Wait a little first: a small bundle, or one someone else had nearly
+    // finished, comes back on this request without the caller polling at all.
+    let waited = tokio::time::timeout(BUNDLE_WAIT, rx.wait_for(|v| v.is_some()))
+        .await
+        .map(|r| r.map(|v| v.clone()));
+    match waited {
+        Ok(Ok(v)) => match v {
+            Some(Ok(())) => match at_cache_get(&key) {
+                Some(hit) => Ok(Json(hit).into_response()),
+                None => Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "the report expired before it could be served".to_string(),
+                )),
+            },
+            Some(Err(e)) => Err((StatusCode::BAD_REQUEST, e)),
+            None => Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the build reported nothing".to_string(),
+            )),
         },
-        Err(e) => Err(lib_err(e)),
+        // Still running, or the builder vanished. Both mean "ask again".
+        _ => Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "building",
+                "detail": "one historical replay per step; poll this URL until it returns the report",
+            })),
+        )
+            .into_response()),
     }
 }
 
