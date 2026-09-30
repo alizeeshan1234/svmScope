@@ -276,7 +276,15 @@ impl Scope {
 
         // The whole `Replay` per step, not just its context: a trace needs the
         // fidelity and provenance that a bare context has already lost.
-        let mut replays = Vec::with_capacity(steps.len());
+        //
+        // One at a time, which is not an oversight. Fetching three steps'
+        // worlds at once was measured against the public endpoint and came out
+        // 27% *slower* — 32s against 25s on the pinned five-step bundle, over
+        // repeated runs. The endpoint rate-limits, and concurrent fetches also
+        // race to download the same program binaries before the shared cache
+        // has any of them. Both costs land on the wall clock. An endpoint with
+        // real quota would likely reverse this; measure before changing it.
+        let mut replays: Vec<Replay> = Vec::with_capacity(steps.len());
         for step in &steps {
             replays.push(self.replay_at(&step.signature, step.slot)?);
         }
