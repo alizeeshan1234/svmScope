@@ -7,14 +7,17 @@ use std::env;
 use std::error::Error;
 
 use std::io::Write;
-use svmscope::{spec, Mutation, Replay, ReplayResult, ScenarioOutcome, Scope, Trace};
+use svmscope::{
+    spec, BundleInput, BundleReport, Diverged, Edge, Mode, Mutation, Replay, ReplayResult, Role,
+    ScenarioOutcome, Scope, StepMutations, Trace,
+};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
 
     let signature = args
         .get(1)
-        .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]\n       svmscope replay <transaction-signature> [--at <slot>] [--now] [--json]\n       svmscope freeze <transaction-signature> [-o fixture.json]\n       svmscope test <scenarios.json>\n       svmscope report <scenarios.json> [-o report.html]\n       svmscope idl <program-address>\n       svmscope upgrade <fixture.json>\n\n       any command also takes --cluster <mainnet|devnet|testnet|localnet> or --rpc <url>")?;
+        .ok_or("usage: svmscope <transaction-signature> [--json] [--mutate <addr>:<lamports>]\n       svmscope replay <transaction-signature> [--at <slot>] [--now] [--json]\n       svmscope bundle <bundle-id|signature|sig,sig,...> [--step <n>] [--mutate <step>:<addr>:<lamports>] [--json]\n       svmscope freeze <transaction-signature> [-o fixture.json]\n       svmscope test <scenarios.json>\n       svmscope report <scenarios.json> [-o report.html]\n       svmscope idl <program-address>\n       svmscope upgrade <fixture.json>\n\n       any command also takes --cluster <mainnet|devnet|testnet|localnet> or --rpc <url>")?;
 
     // Cluster/RPC selection: --cluster <mainnet|devnet|testnet|localnet> or --rpc <url>.
     let flag = |name: &str| {
@@ -121,6 +124,101 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("{}", serde_json::to_string_pretty(&trace)?);
         } else {
             print_trace(&trace);
+        }
+        return Ok(());
+    }
+
+    // Bundle replay: `svmscope bundle <bundle-id|signature|sig,sig,...>` replays
+    // an ordered set of dependent transactions on one SVM, each starting from
+    // what the steps before it left behind, and compares every step against the
+    // chain. `--mutate <step>:<addr>:<lamports>` edits one step and the change
+    // cascades into the steps after it; `--step <n>` steps through one step of
+    // the sequence instruction by instruction instead of reporting all of them.
+    if signature == "bundle" {
+        let usage = "usage: svmscope bundle <bundle-id|signature|sig,sig,...> [--step <n>] [--mutate <step>:<addr>:<lamports>] [--json]";
+        let target = args.get(2).ok_or(usage)?;
+        // A Jito bundle id is a 32-byte hash printed as 64 hex characters. A
+        // signature is 64 bytes in base58, 86 to 88 characters, and base58 has
+        // no 0 or O, so a 64-character hex string is never a signature.
+        let input = if target.contains(',') {
+            BundleInput::Signatures {
+                signatures: target
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect(),
+            }
+        } else if target.len() == 64 && target.chars().all(|c| c.is_ascii_hexdigit()) {
+            BundleInput::BundleId { id: target.clone() }
+        } else {
+            BundleInput::Signature {
+                signature: target.clone(),
+            }
+        };
+        let bundle = scope.bundle(input)?;
+        let last_step = bundle.steps.len() - 1;
+
+        // `--mutate <step>:<address>:<lamports>`, repeatable. Two edits to one
+        // step join that step's list instead of replacing it.
+        let mut step_muts: StepMutations = Vec::new();
+        let mut i = 3;
+        while i < args.len() {
+            if args[i] == "--mutate" {
+                let spec_str = args
+                    .get(i + 1)
+                    .ok_or("--mutate needs <step>:<address>:<lamports>")?;
+                let parts: Vec<&str> = spec_str.splitn(3, ':').collect();
+                if parts.len() != 3 {
+                    return Err("mutation must look like <step>:<address>:<lamports>".into());
+                }
+                let step: usize = parts[0].parse().map_err(|_| "step must be a number")?;
+                let value: u64 = parts[2].parse().map_err(|_| "lamports must be a number")?;
+                if step > last_step {
+                    return Err(format!(
+                        "step {step} does not exist; this bundle has {} steps (0 to {last_step})",
+                        bundle.steps.len()
+                    )
+                    .into());
+                }
+                match step_muts.iter_mut().find(|(s, _)| *s == step) {
+                    Some((_, list)) => list.push(Mutation::lamports(parts[1], value)),
+                    None => step_muts.push((step, vec![Mutation::lamports(parts[1], value)])),
+                }
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+
+        let json = args.iter().any(|a| a == "--json");
+
+        // `--step <n>`: the debugger's view of one step, with every step before
+        // it already run.
+        if let Some(n) = flag("--step") {
+            let step: usize = n.parse().map_err(|_| "--step needs a number")?;
+            if step > last_step {
+                return Err(format!(
+                    "step {step} does not exist; this bundle has {} steps (0 to {last_step})",
+                    bundle.steps.len()
+                )
+                .into());
+            }
+            let trace = bundle.trace(step, &step_muts)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&trace)?);
+            } else {
+                println!("step {step} of {}", bundle.steps.len());
+                print_trace(&trace);
+            }
+            return Ok(());
+        }
+
+        let report = bundle.run(&step_muts)?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            print_bundle(&report);
         }
         return Ok(());
     }
@@ -614,6 +712,110 @@ fn print_replay(label: &str, r: &ReplayResult) {
     }
     for log in &r.logs {
         println!("  {log}");
+    }
+}
+
+/// Render a bundle report for the terminal: the header, one line per step, then
+/// the cascade the steps actually formed.
+fn print_bundle(report: &BundleReport) {
+    let short = |s: &str| {
+        if s.len() > 12 {
+            format!("{}…{}", &s[..6], &s[s.len() - 4..])
+        } else {
+            s.to_string()
+        }
+    };
+    match &report.meta {
+        Some(meta) => println!(
+            "bundle {}  slot {}  {} transactions  tip {} lamports",
+            short(&meta.id),
+            meta.slot,
+            meta.signatures.len(),
+            meta.tip_lamports
+        ),
+        None => println!("{} transactions", report.steps.len()),
+    }
+    println!(
+        "{}",
+        match report.mode {
+            Mode::Consecutive => "consecutive: one slot, replayed back to back",
+            Mode::CrossSlot =>
+                "cross-slot: state carried forward, each step rebuilt at its own slot",
+        }
+    );
+    match report.first_drift {
+        None => println!("all {} steps match the chain", report.steps.len()),
+        Some(k) => println!("drift starts at step {k}"),
+    }
+
+    println!("\n  step  outcome  compute (chain)        changed  inherited");
+    for s in &report.steps {
+        let chain_cu = match s.chain_compute {
+            Some(cu) if Some(s.result.compute_units) == s.chain_compute => cu.to_string(),
+            Some(cu) => format!("{cu} differs"),
+            None => "-".to_string(),
+        };
+        // Pad the whole cell, not the number inside the brackets.
+        let compute = format!("{} ({chain_cu})", s.result.compute_units);
+        println!(
+            "  {:<5} {:<8} {:<22} {:<8} {}",
+            s.index,
+            if s.result.success { "ok" } else { "failed" },
+            compute,
+            s.diff.len(),
+            s.carried.len()
+        );
+        if !s.matches_chain {
+            println!(
+                "          replay: {}",
+                s.result.error.as_deref().unwrap_or("success")
+            );
+            println!(
+                "          chain:  {}",
+                s.chain_error.as_deref().unwrap_or("success")
+            );
+        }
+    }
+
+    if !report.edges.is_empty() {
+        println!("\n-- cascade --");
+        let mut by_pair: std::collections::BTreeMap<(usize, usize), Vec<&Edge>> =
+            std::collections::BTreeMap::new();
+        for e in &report.edges {
+            by_pair.entry((e.from_step, e.to_step)).or_default().push(e);
+        }
+        for ((from, to), list) in &by_pair {
+            let names: Vec<String> = list.iter().take(2).map(|e| short(&e.account)).collect();
+            println!(
+                "  tx{} → tx{}  {} accounts  {}{}",
+                from,
+                to,
+                list.len(),
+                names.join(", "),
+                if list.iter().all(|e| e.role == Role::Readonly) {
+                    "  (read only)"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+
+    let diverged: Vec<(usize, &Diverged)> = report
+        .steps
+        .iter()
+        .flat_map(|s| s.diverged.iter().map(move |d| (s.index, d)))
+        .collect();
+    if !diverged.is_empty() {
+        println!("\n-- diverged from the rebuilt world --");
+        for (step, d) in diverged {
+            let what = match (d.lamports_differ, d.data_differs) {
+                (true, true) => "balance and bytes",
+                (true, false) => "balance",
+                _ => "bytes",
+            };
+            println!("  step {step}  {}  {what}", short(&d.account));
+        }
     }
 }
 

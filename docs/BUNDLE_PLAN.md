@@ -226,10 +226,18 @@ svmscope, in this order
 - Cap steps (say 16) and total instructions for traces (the debugger caps at 64/tx).
 - CrossSlot divergence compares bytes and lamports; report which.
 
-## 5b. Measured, 2026-09-30 (stages 1–3 done)
+## 5b. Measured, 2026-09-30 (3.1 through 3.6 done)
 
-`src/jito.rs`, the builder and the sequential run are written and tested;
-the CLI, server and UI (3.4–3.6) are not started.
+Everything in section 3 is written: `src/jito.rs`, the builder, the
+sequential run, `Bundle::trace`, the baseline cache, `svmscope bundle`, the
+three server routes and the bundle page.
+
+Two things changed from the plan as written. The CLI takes one positional
+argument and reads the input variant from its shape: a comma means a list,
+64 hex characters means a bundle id, anything else is a signature. And the
+page lives at `/bundles`, not `/bundle`, because the API owns
+`/bundle/{target}` the way `/trace/{signature}` is owned while its page is
+`/debug`.
 
 Replaying one slot back to back is *more* faithful than replaying one
 transaction historically, and by a wide margin. On the pinned

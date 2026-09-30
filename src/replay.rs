@@ -2478,6 +2478,20 @@ impl ReplayContext {
         ctx
     }
 
+    /// The same world running a different landed transaction. The signature
+    /// travels with the transaction: a bundle carries one step's world into
+    /// the next, and without this every step after the first would report
+    /// itself under step zero's signature.
+    pub(crate) fn with_transaction_named(
+        &self,
+        tx: VersionedTransaction,
+        signature: String,
+    ) -> ReplayContext {
+        let mut ctx = self.with_transaction(tx);
+        ctx.signature = signature;
+        ctx
+    }
+
     /// The transaction with `mutations` applied to its instruction data, for
     /// callers that drive the SVM themselves (the profiler).
     pub(crate) fn tx_for(&self, mutations: &[Mutation]) -> Result<VersionedTransaction> {

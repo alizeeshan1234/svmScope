@@ -1068,6 +1068,7 @@ input.derived { border-color: var(--green-border); color: var(--green); }
         <button class="navtab" id="navDebug"><svg class="ic" aria-hidden="true"><use href="#i-bug"/></svg>Debugger</button>
         <button class="navtab" id="navProfile" title="Where the compute went: a flamegraph of every instruction the transaction executed"><svg class="ic" aria-hidden="true"><use href="#i-flame"/></svg>Profile</button>
         <button class="navtab" id="navWatch" title="When a program you depend on is upgraded, your recent transactions are replayed against the new binary"><svg class="ic" aria-hidden="true"><use href="#i-eye"/></svg>Watch</button>
+        <button class="navtab" id="navBundle" title="A Jito bundle, or any ordered list of transactions, replayed in order on one SVM — change one step and watch the change cascade into the rest"><svg class="ic" aria-hidden="true"><use href="#i-branch"/></svg>Bundle</button>
       </nav>
       <div class="search">
         <select id="cluster" class="cluster" title="Cluster / RPC">
@@ -1515,6 +1516,37 @@ input.derived { border-color: var(--green-border); color: var(--green); }
         <h2>Reports <span class="count" id="watchRepCount"></span></h2>
         <p class="whatif-lead">Every redeploy the watcher caught, the check it ran, and whether the alert was delivered.</p>
         <div id="watchReports" class="rows"><div class="empty">loading…</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="bundle" class="hidden">
+    <div class="dbg-landing" id="bundleLanding">
+      <h1>One transaction is never the whole story</h1>
+      <p>Transactions that depend on each other land together: a Jito bundle, a sandwich, an arbitrage that sets up in one transaction and closes in the next. Replay the whole ordered set on one machine, each transaction starting from the state the ones before it left behind, and every step checked against what the chain recorded. Then change one step and watch the change travel into the rest.</p>
+      <div class="wform">
+        <div class="wfield wide" style="flex:1 1 520px">
+          <label class="flabel" for="bundleTarget">Bundle id, signature, or list</label>
+          <input id="bundleTarget" placeholder="a Jito bundle id, any signature that landed in one, or sig,sig,sig" spellcheck="false" autocomplete="off" />
+        </div>
+        <button class="btn" id="bundleGo"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg>Replay the sequence</button>
+      </div>
+      <div class="empty">Every step is one historical replay, so a five-transaction bundle takes a little while the first time. The result is cached.</div>
+      <div class="dbg-err hidden" id="bundleErr"></div>
+    </div>
+    <div class="grid" id="bundleMain">
+      <div class="card full" id="bundleSummaryCard">
+        <h2>The sequence <span class="count" id="bundleState"></span></h2>
+        <div id="bundleSummary"></div>
+      </div>
+      <div class="card full" id="bundleCascadeCard" hidden>
+        <h2>The cascade <span class="count" id="bundleEdgeCount"></span></h2>
+        <p class="whatif-lead">An account one step changed that a later step also names. This is the wire a change travels along: edit the earlier step and every step on the far side of these lines can move.</p>
+        <div id="bundleCascade"></div>
+      </div>
+      <div class="card full" id="bundleStepCard" hidden>
+        <h2>Step through <span class="count" id="bundleStepLabel"></span></h2>
+        <div id="bundleStep"></div>
       </div>
     </div>
   </section>
@@ -3233,7 +3265,7 @@ function runInput() {
 // transactions to pick from.
 async function showAddress(address) {
   hideAllViews();
-  ['navSim', 'navDebug', 'navProfile', 'navWatch'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on'); $('watch').classList.add('hidden');
+  ['navSim', 'navDebug', 'navProfile', 'navWatch', 'navBundle'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on'); $('watch').classList.add('hidden');
   $('go').disabled = true;
   $('out').classList.add('hidden'); $('hero').classList.add('hidden'); $('txlist').classList.add('hidden');
   const st = $('status'); st.className = 'status'; st.classList.remove('hidden');
@@ -3330,7 +3362,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 async function analyze() {
   hideAllViews();
-  ['navSim', 'navDebug', 'navProfile', 'navWatch'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on'); $('watch').classList.add('hidden');
+  ['navSim', 'navDebug', 'navProfile', 'navWatch', 'navBundle'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on'); $('watch').classList.add('hidden');
   const sig = $('sig').value.trim(); if (!sig) return;
   currentSig = sig; mutations = []; onchainAnalysis = null;
   $('go').disabled = true; $('txlist').classList.add('hidden'); $('out').classList.add('hidden'); $('hero').classList.add('hidden');
@@ -4589,7 +4621,7 @@ $('dbgReset').addEventListener('click', () => {
 });
 
 function hideAllViews() {
-  ['hero', 'status', 'txlist', 'out', 'sim', 'debug', 'profile', 'watch'].forEach(id => $(id).classList.add('hidden'));
+  ['hero', 'status', 'txlist', 'out', 'sim', 'debug', 'profile', 'watch', 'bundle'].forEach(id => $(id).classList.add('hidden'));
 }
 
 async function showDebug(sig, push) {
@@ -5014,7 +5046,8 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'f' && trace && trace.failed_step != null) { e.preventDefault(); selectStep(trace.failed_step); }
 });
 window.addEventListener('popstate', e => {
-  if (e.state && e.state.debug) showDebug(e.state.debug, false);
+  if (e.state && e.state.bundle) { if (e.state.bundle === true) showBundleLanding(false); else showBundle(e.state.bundle, false); }
+  else if (e.state && e.state.debug) showDebug(e.state.debug, false);
   else if (e.state && e.state.flame) showProfile(e.state.flame, false);
   else if (e.state && e.state.watch) showWatch(false);
   else if (e.state && e.state.tx) {
@@ -5028,9 +5061,220 @@ window.addEventListener('popstate', e => {
     // Back past the first analysis: the landing, with the analysis kept in
     // memory so Forward is instant.
     hideAllViews(); $('hero').classList.remove('hidden');
-    ['navSim', 'navDebug', 'navProfile', 'navWatch'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on'); $('watch').classList.add('hidden');
+    ['navSim', 'navDebug', 'navProfile', 'navWatch', 'navBundle'].forEach(id => $(id).classList.remove('on')); $('navAnalyze').classList.add('on'); $('watch').classList.add('hidden');
   }
 });
+// ---------------- bundle replay ----------------
+// An ordered set of dependent transactions replayed on one SVM: a Jito bundle,
+// or any list the reader pastes. The engine builds one world per step, runs
+// them in order, and reports every step against what the chain recorded.
+let bundleReport = null, bundleTargetCur = '', bundleMuts = {};   // step index → { address, lamports }
+
+function bundleShowErr(msg) {
+  const el = $('bundleErr');
+  if (!msg) { el.classList.add('hidden'); el.textContent = ''; return; }
+  el.classList.remove('hidden'); el.textContent = msg;
+}
+
+function showBundleLanding(push) {
+  hideAllViews(); $('bundle').classList.remove('hidden');
+  $('bundleMain').classList.add('hidden'); $('bundleLanding').classList.remove('hidden');
+  ['navAnalyze', 'navSim', 'navDebug', 'navProfile', 'navWatch'].forEach(id => $(id).classList.remove('on'));
+  $('navBundle').classList.add('on');
+  if (push !== false) history.pushState({ bundle: true }, '', '/bundles' + location.search);
+}
+
+// The cascade, grouped per step pair: fifty raw rows on a five-transaction
+// bundle says nothing, ten grouped rows say what carried where.
+function bundleCascadeRows(edges) {
+  const pairs = new Map();
+  for (const e of edges) {
+    const key = e.from_step + '→' + e.to_step;
+    if (!pairs.has(key)) pairs.set(key, { from: e.from_step, to: e.to_step, accounts: [], readonly: true });
+    const p = pairs.get(key);
+    p.accounts.push(e.account);
+    if (e.role !== 'readonly') p.readonly = false;
+  }
+  const rows = [...pairs.values()].sort((a, b) => a.from - b.from || a.to - b.to).map(p => {
+    const names = p.accounts.slice(0, 3).map(a => `<span class="mono">${short(a)}</span>`).join(', ');
+    const more = p.accounts.length > 3 ? ` +${p.accounts.length - 3} more` : '';
+    return `<tr><td>tx${p.from} → tx${p.to}</td><td>${p.accounts.length}</td><td>${names}${more}</td><td>${p.readonly ? 'read only' : 'writable'}</td></tr>`;
+  }).join('');
+  return `<div style="overflow-x:auto"><table class="fields"><thead><tr><th>hop</th><th>accounts</th><th>which</th><th>role</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function renderBundle(r) {
+  bundleReport = r;
+  const meta = r.meta;
+  const head = meta
+    ? `bundle <span class="mono">${short(meta.id)}</span> · slot ${meta.slot} · ${meta.signatures.length} transactions · tip ${meta.tip_lamports} lamports`
+    : `${r.steps.length} transactions · no Jito bundle`;
+  const mode = r.mode === 'consecutive'
+    ? 'One slot, replayed back to back. Nothing is rebuilt between steps, so this replay is exact where a single historical replay only approximates.'
+    : 'Different slots. What earlier steps wrote is carried forward and everything else is rebuilt at each step\'s own slot; accounts where the two disagree are flagged below.';
+  const banner = r.exact
+    ? `<span class="amt pos">every step matches the chain</span>`
+    : `<span class="amt neg">drift starts at step ${r.first_drift}</span>`;
+
+  const rows = r.steps.map(s => {
+    const cu = s.chain_compute === null || s.chain_compute === undefined
+      ? `${s.result.compute_units}`
+      : (s.chain_compute === s.result.compute_units
+          ? `${s.result.compute_units}`
+          : `${s.result.compute_units} <span class="amt neg">vs ${s.chain_compute}</span>`);
+    const outcome = s.result.success ? '<span class="amt pos">ok</span>' : `<span class="amt neg">${esc(s.result.error_name || s.result.error || 'failed')}</span>`;
+    const chain = s.chain_success ? 'ok' : 'failed';
+    const flag = s.matches_chain ? '' : '<span class="amt neg">drift</span>';
+    const mutated = bundleMuts[s.index] ? '<span class="amt neg">edited</span>' : '';
+    const div = (s.diverged || []).length ? `<div class="post-bal">${s.diverged.length} account(s) disagree with the rebuilt world</div>` : '';
+    return `<tr><td>${s.index}</td><td><a href="/tx/${encodeURIComponent(s.signature)}" data-sig="${esc(s.signature)}" class="mono">${short(s.signature)}</a>${div}</td>` +
+      `<td>${outcome}</td><td>${chain}</td><td>${cu}</td><td>${s.diff.length}</td><td>${s.carried.length}</td><td>${flag} ${mutated}</td>` +
+      `<td><button class="btn ghost sm" data-bstep="${s.index}">step through</button></td></tr>`;
+  }).join('');
+
+  $('bundleState').textContent = `${r.steps.length} steps`;
+  $('bundleSummary').innerHTML =
+    `<div class="empty">${head}</div><div class="empty">${mode}</div><div class="empty">${banner}</div>` +
+    `<div style="overflow-x:auto"><table class="fields"><thead><tr><th>step</th><th>transaction</th><th>replay</th><th>chain</th><th>compute</th><th>changed</th><th>inherited</th><th></th><th></th></tr></thead><tbody>${rows}</tbody></table></div>` +
+    `<div class="wform" style="margin-top:12px">
+       <div class="wfield"><label class="flabel" for="bmStep">Edit a step: which one</label><input id="bmStep" placeholder="0" spellcheck="false" autocomplete="off" /></div>
+       <div class="wfield wide"><label class="flabel" for="bmAddr">whose balance</label><input id="bmAddr" placeholder="account address" spellcheck="false" autocomplete="off" /></div>
+       <div class="wfield"><label class="flabel" for="bmLam">set to (lamports)</label><input id="bmLam" placeholder="0" spellcheck="false" autocomplete="off" /></div>
+       <button class="btn" id="bmGo">Re-run the sequence</button>
+       ${Object.keys(bundleMuts).length ? '<button class="btn ghost" id="bmClear">Clear edits</button>' : ''}
+     </div>`;
+
+  const edges = r.edges || [];
+  $('bundleCascadeCard').hidden = edges.length === 0;
+  $('bundleEdgeCount').textContent = edges.length ? `${edges.length} links` : '';
+  if (edges.length) $('bundleCascade').innerHTML = bundleCascadeRows(edges);
+
+  $('bundleSummary').querySelectorAll('[data-bstep]').forEach(b => {
+    b.addEventListener('click', () => bundleTrace(Number(b.dataset.bstep)));
+  });
+  const go = $('bmGo');
+  if (go) go.addEventListener('click', bundleApplyMutation);
+  const clear = $('bmClear');
+  if (clear) clear.addEventListener('click', () => { bundleMuts = {}; bundleRun(); });
+}
+
+// The request body both POST routes take: the target plus every edit made so
+// far, grouped the way the engine wants them.
+function bundleBody(extra) {
+  const mutations = Object.entries(bundleMuts).map(([step, m]) => ({
+    step: Number(step),
+    mutations: [{ kind: 'lamports', address: m.address, lamports: m.lamports }],
+  }));
+  // Same cluster / custom-RPC / relay selection every other request carries.
+  const body = Object.assign({ mutations }, clusterParams());
+  if (bundleTargetCur.includes(',')) body.signatures = bundleTargetCur.split(',').map(x => x.trim()).filter(Boolean);
+  else body.bundle = bundleTargetCur;
+  return Object.assign(body, extra || {});
+}
+
+async function bundleRun() {
+  if (!bundleTargetCur) return;
+  bundleShowErr('');
+  hideAllViews(); $('bundle').classList.remove('hidden');
+  $('bundleLanding').classList.add('hidden'); $('bundleMain').classList.remove('hidden');
+  ['navAnalyze', 'navSim', 'navDebug', 'navProfile', 'navWatch'].forEach(id => $(id).classList.remove('on'));
+  $('navBundle').classList.add('on');
+  $('bundleState').textContent = 'building one world per step…';
+  $('bundleSummary').innerHTML = '<div class="empty">Each step is a historical replay. The first run of a bundle takes a while; after that it is cached.</div>';
+  $('bundleStepCard').hidden = true;
+  $('bundleCascadeCard').hidden = true;
+  const edited = Object.keys(bundleMuts).length > 0;
+  try {
+    // No edits: the cacheable GET, so a share link opens instantly. With edits
+    // it has to be the POST.
+    const res = edited
+      ? await api('/bundle', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(bundleBody()) })
+      : await api('/bundle/' + encodeURIComponent(bundleTargetCur) + clusterQ());
+    const text = await res.text();
+    if (!res.ok) throw new Error(text || ('engine said ' + res.status));
+    renderBundle(JSON.parse(text));
+  } catch (e) {
+    $('bundleState').textContent = '';
+    $('bundleSummary').innerHTML = '';
+    $('bundleLanding').classList.remove('hidden');
+    bundleShowErr(String(e.message || e));
+  }
+}
+
+async function bundleTrace(step) {
+  $('bundleStepCard').hidden = false;
+  $('bundleStepLabel').textContent = `step ${step}`;
+  $('bundleStep').innerHTML = '<div class="empty">running every step before this one, then tracing this one…</div>';
+  try {
+    const res = await api('/bundle/trace', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(bundleBody({ step })),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(text || ('engine said ' + res.status));
+    // Rendered here rather than through the debugger's own renderer: that one
+    // writes straight into the debugger panel's elements, which belong to a
+    // different view. The trace itself is the same shape.
+    const tr = JSON.parse(text);
+    const head = `<div class="empty">${esc(tr.signature || '')}</div>` +
+      `<div class="empty">${tr.result.success ? '<span class="amt pos">succeeded</span>' : `<span class="amt neg">${esc(tr.result.error_name || tr.result.error || 'failed')}</span>`}` +
+      ` · ${tr.result.compute_units} compute units · ${tr.steps.length} instructions, CPIs included</div>`;
+    const rows = tr.steps.map(st => {
+      const indent = '&nbsp;'.repeat((st.depth - 1) * 4);
+      const label = esc(st.name || 'instruction');
+      const prog = PROGRAMS[st.program] ? PROGRAMS[st.program][0] : short(st.program);
+      const cu = st.cu_consumed === null || st.cu_consumed === undefined ? '' : `${st.cu_consumed} CU`;
+      const bad = st.error ? `<span class="amt neg">${esc(st.error.raw)}</span>` : '';
+      return `<tr><td class="mono">${indent}${esc(st.path)}</td><td>${label}</td><td>${esc(prog)}</td><td>${cu}</td><td>${bad}</td></tr>`;
+    }).join('');
+    $('bundleStep').innerHTML = head +
+      `<div style="overflow-x:auto"><table class="fields"><thead><tr><th>step</th><th>instruction</th><th>program</th><th>compute</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  } catch (e) {
+    $('bundleStep').innerHTML = `<div class="dbg-err">${esc(String(e.message || e))}</div>`;
+  }
+}
+
+function bundleApplyMutation() {
+  const step = Number(($('bmStep').value || '').trim());
+  const address = ($('bmAddr').value || '').trim();
+  const lamports = ($('bmLam').value || '').trim();
+  if (!Number.isInteger(step) || step < 0 || !bundleReport || step >= bundleReport.steps.length) {
+    return bundleShowErr(`step must be a number between 0 and ${bundleReport ? bundleReport.steps.length - 1 : 0}`);
+  }
+  if (!address) return bundleShowErr('give the account whose balance to change');
+  if (!/^\d+$/.test(lamports)) return bundleShowErr('lamports must be a whole number');
+  bundleShowErr('');
+  bundleMuts[step] = { address, lamports: Number(lamports) };
+  bundleRun();
+}
+
+function showBundle(target, push) {
+  if (target !== bundleTargetCur) bundleMuts = {};
+  bundleTargetCur = target;
+  if (push !== false) history.pushState({ bundle: target }, '', '/bundles/' + encodeURIComponent(target) + location.search);
+  bundleRun();
+}
+
+$('navBundle').addEventListener('click', () => {
+  if (bundleReport && bundleTargetCur) showBundle(bundleTargetCur);
+  else showBundleLanding();
+});
+$('bundleGo').addEventListener('click', () => {
+  const t = ($('bundleTarget').value || '').trim();
+  if (!t) return bundleShowErr('paste a bundle id, a signature, or a list of signatures');
+  showBundle(t);
+});
+$('bundleTarget').addEventListener('keydown', e => { if (e.key === 'Enter') $('bundleGo').click(); });
+
+if (location.pathname === '/bundles' || location.pathname === '/bundles/') {
+  history.replaceState({ bundle: true }, '', location.pathname + location.search);
+  showBundleLanding(false);
+}
+if (location.pathname.startsWith('/bundles/')) {
+  const t = decodeURIComponent(location.pathname.slice('/bundles/'.length)).replace(/\/$/, '');
+  if (t) { $('bundleTarget').value = t; history.replaceState({ bundle: t }, '', location.pathname + location.search); showBundle(t, false); }
+}
+
 // ---------------- compute profiler ----------------
 let prof = null, profFrame = 0, profZoom = [], profSymbols = {};   // program → { elf_b64: .debug, so_b64?: .so of the same build }
 let profSigCur = '', profContainer = 'dbgProfile';                  // which signature, and which panel draws it
@@ -5203,7 +5447,7 @@ function showProfLanding() {
   $('profile').classList.remove('hidden');
   $('profLanding').classList.remove('hidden');
   $('profMain').classList.add('hidden');
-  ['navDebug', 'navAnalyze', 'navSim', 'navWatch'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on');
+  ['navDebug', 'navAnalyze', 'navSim', 'navWatch', 'navBundle'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on');
   $('profInput').focus();
 }
 async function showProfile(sig, push) {
@@ -5212,7 +5456,7 @@ async function showProfile(sig, push) {
   $('profile').classList.remove('hidden');
   $('profLanding').classList.remove('hidden');
   $('profMain').classList.add('hidden');
-  ['navDebug', 'navAnalyze', 'navSim', 'navWatch'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on');
+  ['navDebug', 'navAnalyze', 'navSim', 'navWatch', 'navBundle'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on');
   $('profInput').value = sig; $('sig').value = sig;
   $('profErr').classList.add('hidden');
   $('profProgress').classList.remove('hidden');
@@ -5252,7 +5496,7 @@ async function showProfile(sig, push) {
 // ---- Dependency watch ----------------------------------------------------
 function showWatch(push) {
   hideAllViews(); $('watch').classList.remove('hidden');
-  ['navDebug', 'navAnalyze', 'navSim', 'navProfile'].forEach(id => $(id).classList.remove('on')); $('navWatch').classList.add('on');
+  ['navDebug', 'navAnalyze', 'navSim', 'navProfile', 'navBundle'].forEach(id => $(id).classList.remove('on')); $('navWatch').classList.add('on');
   if (push !== false) history.pushState({ watch: true }, '', '/watch' + location.search);
   loadWatch();
 }
@@ -5400,7 +5644,7 @@ $('watchRun').addEventListener('click', async () => {
 });
 
 $('navProfile').addEventListener('click', () => {
-  if (prof && profSigCur && profContainer === 'profView') { hideAllViews(); $('profile').classList.remove('hidden'); $('profLanding').classList.add('hidden'); $('profMain').classList.remove('hidden'); ['navDebug', 'navAnalyze', 'navSim', 'navWatch'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on'); history.pushState({ flame: profSigCur }, '', '/flame/' + encodeURIComponent(profSigCur) + location.search); }
+  if (prof && profSigCur && profContainer === 'profView') { hideAllViews(); $('profile').classList.remove('hidden'); $('profLanding').classList.add('hidden'); $('profMain').classList.remove('hidden'); ['navDebug', 'navAnalyze', 'navSim', 'navWatch', 'navBundle'].forEach(id => $(id).classList.remove('on')); $('navProfile').classList.add('on'); history.pushState({ flame: profSigCur }, '', '/flame/' + encodeURIComponent(profSigCur) + location.search); }
   else showProfLanding();
 });
 $('profStart').addEventListener('click', () => {

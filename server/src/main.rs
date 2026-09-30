@@ -25,6 +25,7 @@ use serde_json::json;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use svmscope::spec::{MutationInput, SuiteRequest};
 use svmscope::{Analysis, Mutation, ReplayResult, ScenarioOutcome, Scope, TimeTravel};
+use svmscope::{BundleInput, StepMutations};
 
 const DEFAULT_RPC: &str = "https://api.mainnet-beta.solana.com";
 
@@ -721,6 +722,204 @@ struct TraceRequest {
     /// first, current state if that diverges from the on-chain outcome.
     #[serde(default)]
     tier: Option<String>,
+}
+
+/// One step's mutations in a `/bundle` request body.
+#[derive(serde::Deserialize)]
+struct StepMutationInput {
+    step: usize,
+    #[serde(default)]
+    mutations: Vec<MutationInput>,
+}
+
+/// POST /bundle and POST /bundle/trace. `bundle` is a Jito bundle id, a
+/// signature inside one, or a comma-separated list; `signatures` is the same
+/// list given as an array. Exactly one of the two.
+#[derive(serde::Deserialize)]
+struct BundleRequest {
+    #[serde(default)]
+    bundle: Option<String>,
+    #[serde(default)]
+    signatures: Vec<String>,
+    #[serde(default)]
+    mutations: Vec<StepMutationInput>,
+    /// Trace this step instead of reporting every step (POST /bundle/trace).
+    #[serde(default)]
+    step: Option<usize>,
+    #[serde(default)]
+    cluster: Option<String>,
+    #[serde(default)]
+    rpc: Option<String>,
+    #[serde(default)]
+    relay: Option<String>,
+    #[serde(default)]
+    archive: Option<String>,
+}
+
+/// `mainnet` or `devnet`, as the other GET handlers take it.
+#[derive(serde::Deserialize)]
+struct BundleQuery {
+    cluster: Option<String>,
+}
+
+/// A target string to a bundle input: a comma-separated list is a list, 64 hex
+/// characters is a bundle id, anything else is one signature inside a bundle.
+/// A bundle id is a 32-byte hash printed as hex; a signature is 64 bytes in
+/// base58, and base58 has no 0 or O, so the two can never be confused.
+fn bundle_input_of(target: &str) -> BundleInput {
+    if target.contains(',') {
+        BundleInput::Signatures {
+            signatures: target
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect(),
+        }
+    } else if target.len() == 64 && target.chars().all(|c| c.is_ascii_hexdigit()) {
+        BundleInput::BundleId {
+            id: target.to_string(),
+        }
+    } else {
+        BundleInput::Signature {
+            signature: target.to_string(),
+        }
+    }
+}
+
+/// The input a request body names, and its per-step mutations.
+fn bundle_parts(req: BundleRequest) -> Result<(BundleInput, StepMutations), (StatusCode, String)> {
+    let input = match (&req.bundle, req.signatures.is_empty()) {
+        (Some(target), true) => bundle_input_of(target),
+        (None, false) => BundleInput::Signatures {
+            signatures: req.signatures,
+        },
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "provide exactly one of `bundle` or `signatures`".into(),
+            ))
+        }
+    };
+    let total: usize = req.mutations.iter().map(|m| m.mutations.len()).sum();
+    cap(total, MAX_MUTATIONS_PER_REQUEST, "mutations")?;
+    let mut step_muts: StepMutations = Vec::new();
+    for entry in req.mutations {
+        let muts: Vec<Mutation> = entry
+            .mutations
+            .into_iter()
+            .map(MutationInput::into_mutation)
+            .collect::<Result<_, _>>()
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        match step_muts.iter_mut().find(|(s, _)| *s == entry.step) {
+            Some((_, list)) => list.extend(muts),
+            None => step_muts.push((entry.step, muts)),
+        }
+    }
+    Ok((input, step_muts))
+}
+
+/// GET /bundle/{id_or_signature} — the baseline report, cacheable, for share
+/// links. A landed bundle's replay does not change, so this is the one every
+/// reader gets before touching anything.
+async fn bundle_get_handler(
+    Path(target): Path<String>,
+    Query(q): Query<BundleQuery>,
+) -> Result<Json<std::sync::Arc<serde_json::Value>>, (StatusCode, String)> {
+    let (url, archive) = endpoints_for(q.cluster.as_deref(), None, None, None)?;
+    let key = format!("bundle|{url}|{}|{target}", archive.as_deref().unwrap_or(""));
+    if let Some(hit) = at_cache_get(&key) {
+        return Ok(Json(hit));
+    }
+    // Building a bundle is one historical replay per step, so it is the most
+    // expensive thing the engine does. Hold the same gate the other heavy
+    // replays hold, and re-check the cache after waiting: a reader who opened
+    // the same share link a second earlier may have just finished it.
+    let _permit = AT_GATE.acquire().await.map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the engine is shutting down".to_string(),
+        )
+    })?;
+    if let Some(hit) = at_cache_get(&key) {
+        return Ok(Json(hit));
+    }
+    let input = bundle_input_of(&target);
+    let out =
+        tokio::task::spawn_blocking(move || -> Result<svmscope::BundleReport, svmscope::Error> {
+            scope_for(url, archive).bundle(input)?.run(&Vec::new())
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("task error: {e}"),
+            )
+        })?;
+    match out {
+        Ok(report) => match serde_json::to_value(&report) {
+            Ok(value) => Ok(Json(at_cache_put(key, value))),
+            Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("encode: {e}"))),
+        },
+        Err(e) => Err(lib_err(e)),
+    }
+}
+
+/// POST /bundle — the report with per-step mutations applied.
+async fn bundle_post_handler(
+    Json(req): Json<BundleRequest>,
+) -> Result<Json<svmscope::BundleReport>, (StatusCode, String)> {
+    let (url, archive) = endpoints_for(
+        req.cluster.as_deref(),
+        req.rpc.as_deref(),
+        req.archive.as_deref(),
+        req.relay.as_deref(),
+    )?;
+    let (input, step_muts) = bundle_parts(req)?;
+    tokio::task::spawn_blocking(move || -> Result<svmscope::BundleReport, svmscope::Error> {
+        scope_for(url, archive).bundle(input)?.run(&step_muts)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?
+    .map(Json)
+    .map_err(lib_err)
+}
+
+/// POST /bundle/trace — one step of the sequence, instruction by instruction,
+/// with every step before it already run. The panels the debugger draws.
+async fn bundle_trace_handler(
+    Json(req): Json<BundleRequest>,
+) -> Result<Json<svmscope::Trace>, (StatusCode, String)> {
+    let step = req.step.ok_or((
+        StatusCode::BAD_REQUEST,
+        "`step` is required: which step to trace".to_string(),
+    ))?;
+    let (url, archive) = endpoints_for(
+        req.cluster.as_deref(),
+        req.rpc.as_deref(),
+        req.archive.as_deref(),
+        req.relay.as_deref(),
+    )?;
+    let (input, step_muts) = bundle_parts(req)?;
+    tokio::task::spawn_blocking(move || -> Result<svmscope::Trace, svmscope::Error> {
+        scope_for(url, archive)
+            .bundle(input)?
+            .trace(step, &step_muts)
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?
+    .map(Json)
+    .map_err(lib_err)
 }
 
 /// Serve the static frontend page.
@@ -2599,6 +2798,9 @@ async fn api_index() -> Json<serde_json::Value> {
             "POST /preflight":            "{ transaction, mutations[] } — simulate an UNSIGNED transaction against current state before sending.",
             "POST /trace":                "{ signature | transaction, mutations[], time_travel?, features? } — step debugger: every instruction and CPI with decoded args, per-step account diffs, and the failing step.",
             "GET  /trace/{signature}":    "The same trace with no mutations, cacheable.",
+            "GET  /bundle/{id_or_sig}":   "Bundle replay: a Jito bundle id, a signature inside one, or a comma-separated list, replayed in order on one SVM and compared with the chain step by step. Cacheable.",
+            "POST /bundle":               "{ bundle | signatures[], mutations[{ step, mutations[] }] } — the same report with per-step what-if mutations; an edit at one step cascades into every step after it.",
+            "POST /bundle/trace":         "{ bundle | signatures[], step, mutations[{ step, mutations[] }] } — step debugger for one step of a bundle, with every step before it already run.",
             "POST /profile":              "{ signature, mutations[]?, time_travel?, features?, symbols[{program, elf_b64}]? } — compute profiler: every BPF instruction attributed to functions, syscalls and call stacks per program frame; symbols name a program's functions from its .debug file.",
             "GET  /profile/{signature}":  "The as-it-happened compute profile, no symbols, cacheable.",
             "GET  /freeze/{signature}":   "Capture a self-contained fixture for deterministic, offline replay.",
@@ -2717,6 +2919,8 @@ fn endpoint_label(path: &str) -> Option<&'static str> {
         Some("freeze")
     } else if path.starts_with("/profile") {
         Some("profile")
+    } else if path.starts_with("/bundle") {
+        Some("bundle")
     } else if path.starts_with("/trace") {
         Some("trace")
     } else if path.starts_with("/account") {
@@ -2902,6 +3106,9 @@ async fn main() {
         .route("/preflight", post(preflight_handler))
         .route("/preflight_report", post(preflight_report_handler))
         .route("/replay_report", post(replay_report_handler))
+        .route("/bundle", post(bundle_post_handler))
+        .route("/bundle/trace", post(bundle_trace_handler))
+        .route("/bundle/{target}", get(bundle_get_handler))
         .route("/trace", post(trace_handler))
         .route("/trace/{signature}", get(trace_get_handler))
         .route(
@@ -2916,6 +3123,10 @@ async fn main() {
         .route("/address/{address}", get(index))
         .route("/flame/{signature}", get(index))
         .route("/watch", get(index))
+        // The bundle page. The API owns `/bundle/{target}`, the way the
+        // trace route owns `/trace/{signature}` while its page is `/debug`.
+        .route("/bundles", get(index))
+        .route("/bundles/{target}", get(index))
         .route("/hit", post(hit_handler))
         .route("/instructions/{program}", get(instructions_handler))
         .route("/idl_instructions", post(idl_instructions_handler))

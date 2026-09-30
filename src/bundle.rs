@@ -6,7 +6,8 @@ use crate::analyze::AccountDiff;
 use crate::error::{Error, Result};
 use crate::jito::{BundleMeta, JitoClient, Segment};
 use crate::replay::{to_replay_result, Mutation, Prepared, ReplayContext, ReplayResult};
-use crate::scope::{diffs_of, OnchainRecord, Scope};
+use crate::scope::{diffs_of, OnchainRecord, Replay, Scope};
+use crate::trace::Trace;
 use crate::utils::resolve_account_keys;
 use serde::{Deserialize, Serialize};
 use solana_account::Account;
@@ -166,9 +167,15 @@ pub struct Bundle {
     pub segments: Vec<Segment>,
     /// The merged pre-bundle world step 0 starts from.
     pub(crate) world: ReplayContext,
-    /// One world per step at its own slot; cross-slot mode rebuilds from
-    /// these, and per-step traces borrow them.
-    pub(crate) worlds: Vec<ReplayContext>,
+    /// One replay per step, built at that step's own slot. Cross-slot mode
+    /// rebuilds from these worlds, and a trace clones the replay itself so it
+    /// keeps the step's fidelity certificate.
+    pub(crate) replays: Vec<Replay>,
+    /// The unmutated run, filled in the first time it happens, so an edit at
+    /// step k replays from k rather than from zero. Interior mutability
+    /// because `run` and `trace` take `&self`: a bundle is a fetched world the
+    /// caller runs many times.
+    baseline: std::cell::RefCell<Option<Baseline>>,
 }
 
 impl Scope {
@@ -203,14 +210,18 @@ impl Scope {
                         unique.push(sig);
                     }
                 }
-                if unique.is_empty() {
-                    return Err(Error::InvalidSpec(
-                        "a bundle needs at least one signature".into(),
-                    ));
-                }
                 (unique, None)
             }
         };
+
+        // Every input can land here empty: a hand-made list of nothing, or a
+        // bundle id whose metadata carries no signatures at all. Guard once,
+        // before anything indexes step zero.
+        if signatures.is_empty() {
+            return Err(Error::InvalidSpec(
+                "a bundle needs at least one signature".into(),
+            ));
+        }
 
         let segments = client.segments(&signatures)?;
 
@@ -245,14 +256,16 @@ impl Scope {
             Mode::CrossSlot
         };
 
-        let mut worlds = Vec::with_capacity(steps.len());
+        // The whole `Replay` per step, not just its context: a trace needs the
+        // fidelity and provenance that a bare context has already lost.
+        let mut replays = Vec::with_capacity(steps.len());
         for step in &steps {
-            worlds.push(self.replay_at(&step.signature, step.slot)?.ctx);
+            replays.push(self.replay_at(&step.signature, step.slot)?);
         }
 
-        let mut world = worlds[0].clone();
-        for w in &worlds[1..] {
-            world.absorb(w);
+        let mut world = replays[0].ctx.clone();
+        for r in &replays[1..] {
+            world.absorb(&r.ctx);
         }
 
         Ok(Bundle {
@@ -261,7 +274,8 @@ impl Scope {
             steps,
             segments,
             world,
-            worlds,
+            replays,
+            baseline: std::cell::RefCell::new(None),
         })
     }
 }
@@ -307,6 +321,23 @@ fn edges_of(steps: &[BundleStep], reports: &[StepReport]) -> Vec<Edge> {
     edges
 }
 
+/// The state a step begins from: its world, everything the steps before it
+/// wrote, and any divergence found while cascading into it.
+#[derive(Clone)]
+struct Snapshot {
+    ctx: ReplayContext,
+    carried: HashMap<Address, Account>,
+    pending: Vec<Diverged>,
+}
+
+/// The unmutated run, kept so that editing step k replays from k instead of
+/// from zero. The worlds are already in memory; re-deriving them is pure work.
+struct Baseline {
+    /// The state entering every step, plus one past the last.
+    snapshots: Vec<Snapshot>,
+    reports: Vec<StepReport>,
+}
+
 impl Bundle {
     /// Replay every step in order on one SVM, each starting from what the
     /// steps before it left behind, and compare each against the chain.
@@ -315,53 +346,148 @@ impl Bundle {
     /// exactly as it landed. A mutation applies to the *cascaded* world, so
     /// editing a balance at step 0 is visible to every later step.
     pub fn run(&self, mutations: &StepMutations) -> Result<BundleReport> {
+        self.check_size()?;
+        let n = self.steps.len();
+        let (start, entry, prefix) = self.resume_at(n, mutations);
+        // Only the unmutated run from the top is worth keeping: it is the one
+        // every later edit resumes from.
+        let keep = mutations.is_empty() && start == 0;
+        let (snapshots, fresh) = self.drive(start, entry, n, mutations, keep)?;
+
+        let mut steps = prefix;
+        steps.extend(fresh);
+        if keep {
+            *self.baseline.borrow_mut() = Some(Baseline {
+                snapshots,
+                reports: steps.clone(),
+            });
+        }
+
+        let exact = steps.iter().all(|s| s.matches_chain);
+        let first_drift = steps.iter().position(|s| !s.matches_chain);
+        let edges = edges_of(&self.steps, &steps);
+
+        Ok(BundleReport {
+            mode: self.mode,
+            meta: self.meta.clone(),
+            exact,
+            first_drift,
+            steps,
+            edges,
+        })
+    }
+
+    /// Step through one step of the sequence instruction by instruction, with
+    /// every step before it already run. This is what the debugger's panels
+    /// consume: the same trace a single transaction gives, except the world it
+    /// starts from is the one the bundle built.
+    pub fn trace(&self, step: usize, mutations: &StepMutations) -> Result<Trace> {
+        self.check_size()?;
+        if step >= self.steps.len() {
+            return Err(Error::InvalidSpec(format!(
+                "step {step} does not exist; this bundle has {} steps",
+                self.steps.len()
+            )));
+        }
+        let (start, entry, _) = self.resume_at(step, mutations);
+        let (snapshots, _) = self.drive(start, entry, step, mutations, false)?;
+        // `drive` always returns the state entering the step it stopped at.
+        let ctx = snapshots
+            .last()
+            .expect("drive returns at least the entry state")
+            .ctx
+            .clone();
+        // The step's own replay carries its fidelity and provenance; only the
+        // world it runs against is replaced by the cascaded one.
+        let mut replay = self.replays[step].clone();
+        replay.ctx = ctx;
+        replay.trace(muts_for(mutations, step))
+    }
+
+    fn check_size(&self) -> Result<()> {
         if self.steps.len() > MAX_STEPS {
             return Err(Error::InvalidSpec(format!(
                 "{} steps; a bundle replays up to {MAX_STEPS}",
                 self.steps.len()
             )));
         }
+        Ok(())
+    }
 
-        let muts_for = |index: usize| -> &[Mutation] {
-            mutations
-                .iter()
-                .find(|(i, _)| *i == index)
-                .map(|(_, m)| m.as_slice())
-                .unwrap_or_default()
-        };
+    /// The pre-bundle state, before any step has run.
+    fn entry(&self) -> Snapshot {
+        Snapshot {
+            ctx: self.world.clone(),
+            carried: HashMap::new(),
+            pending: Vec::new(),
+        }
+    }
 
-        // The world the current step runs in: step 0's is the merged
-        // pre-bundle state, and every later one is the previous step's
-        // post-state carried forward.
-        let mut ctx = self.world.clone();
-        // Everything any earlier step wrote, newest value winning. This is
-        // the cascade itself, and cross-slot mode overwrites only these.
-        let mut carried: HashMap<Address, Account> = HashMap::new();
-        let mut steps: Vec<StepReport> = Vec::with_capacity(self.steps.len());
-        // Divergences are found while cascading *into* a step, so they wait
-        // here until that step's report is built.
-        let mut pending_diverged: Vec<Diverged> = Vec::new();
+    /// Where a run heading for `upto` can pick up: the earliest mutated step,
+    /// if the baseline has already been computed, and otherwise the beginning.
+    fn resume_at(
+        &self,
+        upto: usize,
+        mutations: &StepMutations,
+    ) -> (usize, Snapshot, Vec<StepReport>) {
+        let first_mutated = mutations
+            .iter()
+            .map(|(i, _)| *i)
+            .min()
+            .unwrap_or(usize::MAX);
+        if let Some(b) = self.baseline.borrow().as_ref() {
+            let start = first_mutated
+                .min(upto)
+                .min(b.snapshots.len().saturating_sub(1));
+            return (
+                start,
+                b.snapshots[start].clone(),
+                b.reports[..start.min(b.reports.len())].to_vec(),
+            );
+        }
+        (0, self.entry(), Vec::new())
+    }
 
-        for (k, step) in self.steps.iter().enumerate() {
-            let Prepared { mut svm, tx, .. } = ctx.prepare(muts_for(k), false)?;
+    /// Replay steps `start..upto` beginning from `entry`, and return the state
+    /// entering each step it stopped at along with one report per step run.
+    /// `keep` decides whether the intermediate states are collected: the
+    /// baseline wants them all, a one-off mutated run wants none.
+    fn drive(
+        &self,
+        start: usize,
+        entry: Snapshot,
+        upto: usize,
+        mutations: &StepMutations,
+        keep: bool,
+    ) -> Result<(Vec<Snapshot>, Vec<StepReport>)> {
+        let mut snapshots: Vec<Snapshot> = Vec::new();
+        let mut reports: Vec<StepReport> = Vec::with_capacity(upto.saturating_sub(start));
+        let mut state = entry;
+
+        for k in start..upto {
+            if keep {
+                snapshots.push(state.clone());
+            }
+            let step = &self.steps[k];
+            let Prepared { mut svm, tx, .. } = state.ctx.prepare(muts_for(mutations, k), false)?;
             // After `prepare`, not before: the world the transaction actually
             // starts from includes this step's mutations, and measuring from
             // the unmutated load would report the edit as the step's effect.
-            let pre = ctx.loaded_state_of(&svm);
+            let pre = state.ctx.loaded_state_of(&svm);
             let result = to_replay_result(svm.send_transaction(tx));
-            let post = ctx.loaded_state_of(&svm);
+            let post = state.ctx.loaded_state_of(&svm);
 
             let diff = diffs_of(
                 &|address| pre.get(address).cloned(),
                 &post,
                 &step.keys,
-                ctx.idl_map(),
+                state.ctx.idl_map(),
             );
 
             let carried_here: Vec<String> = step
                 .keys
                 .iter()
-                .filter(|key| Address::from_str(key).is_ok_and(|a| carried.contains_key(&a)))
+                .filter(|key| Address::from_str(key).is_ok_and(|a| state.carried.contains_key(&a)))
                 .cloned()
                 .collect();
 
@@ -370,7 +496,7 @@ impl Bundle {
             // both are kept in the report for the reader to compare.
             let matches_chain = result.success == step.record.success;
 
-            steps.push(StepReport {
+            reports.push(StepReport {
                 index: k,
                 signature: step.signature.clone(),
                 result,
@@ -380,22 +506,28 @@ impl Bundle {
                 chain_error: step.record.error.clone(),
                 chain_compute: step.record.compute_units,
                 carried: carried_here,
-                diverged: std::mem::take(&mut pending_diverged),
+                diverged: std::mem::take(&mut state.pending),
             });
 
             // Everything this step wrote joins the cascade.
             for (address, account) in &post {
-                carried.insert(*address, account.clone());
+                state.carried.insert(*address, account.clone());
             }
 
             if k + 1 >= self.steps.len() {
                 break;
             }
+
+            let mut pending: Vec<Diverged> = Vec::new();
             let mut next = match self.mode {
                 // One slot: the previous step's post-state *is* the next
                 // step's pre-state, so carry the whole world forward.
                 Mode::Consecutive => {
-                    let mut next = ctx.with_transaction(self.worlds[k + 1].transaction().clone());
+                    let next_ctx = &self.replays[k + 1].ctx;
+                    let mut next = state.ctx.with_transaction_named(
+                        next_ctx.transaction().clone(),
+                        next_ctx.signature().to_string(),
+                    );
                     for (address, account) in &post {
                         next.set_loaded_data(*address, Some(account.clone()));
                     }
@@ -404,11 +536,11 @@ impl Bundle {
                 // Different slots: the next step's own world is the better
                 // answer for everything except what earlier steps wrote.
                 Mode::CrossSlot => {
-                    let rebuilt = &self.worlds[k + 1];
+                    let rebuilt = &self.replays[k + 1].ctx;
                     let mut next = rebuilt.clone();
-                    for (address, account) in &carried {
+                    for (address, account) in &state.carried {
                         if let Some(existing) = rebuilt.loaded_data_of(address) {
-                            pending_diverged.extend(diverged_of(address, account, &existing));
+                            pending.extend(diverged_of(address, account, &existing));
                         }
                         next.set_loaded_data(*address, Some(account.clone()));
                     }
@@ -432,23 +564,26 @@ impl Bundle {
                     }
                 }
             }
-            ctx = next;
+
+            state = Snapshot {
+                ctx: next,
+                carried: state.carried,
+                pending,
+            };
         }
 
-        let exact = steps.iter().all(|s| s.matches_chain);
-        let first_drift = steps.iter().position(|s| !s.matches_chain);
-
-        let edges = edges_of(&self.steps, &steps);
-
-        Ok(BundleReport {
-            mode: self.mode,
-            meta: self.meta.clone(),
-            exact,
-            first_drift,
-            steps,
-            edges,
-        })
+        snapshots.push(state);
+        Ok((snapshots, reports))
     }
+}
+
+/// The mutations attached to one step, or nothing.
+fn muts_for(mutations: &StepMutations, index: usize) -> &[Mutation] {
+    mutations
+        .iter()
+        .find(|(i, _)| *i == index)
+        .map(|(_, m)| m.as_slice())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -565,6 +700,46 @@ mod tests {
                 after.index
             );
         }
+
+        // Editing only the last step must leave every earlier step's report
+        // byte for byte identical: that is what makes resuming from the cached
+        // baseline sound rather than merely faster.
+        let late = bundle
+            .run(&vec![(
+                4,
+                vec![Mutation::Lamports {
+                    address: bundle.steps[4].keys[0].clone(),
+                    value: 0,
+                }],
+            )])
+            .unwrap();
+        for (before, after) in baseline.steps.iter().zip(&late.steps).take(4) {
+            assert_eq!(
+                serde_json::to_string(before).unwrap(),
+                serde_json::to_string(after).unwrap(),
+                "step {} changed although the edit was at step 4",
+                before.index
+            );
+        }
+        assert!(!late.steps[4].result.success);
+        assert_eq!(late.first_drift, Some(4));
+
+        // A trace of the last step sees the world the four steps before it
+        // built, and reaches the same outcome the run did.
+        let trace = bundle.trace(4, &Vec::new()).unwrap();
+        assert_eq!(trace.result.success, baseline.steps[4].result.success);
+        assert_eq!(
+            trace.result.compute_units,
+            baseline.steps[4].result.compute_units
+        );
+        assert!(
+            !trace.steps.is_empty(),
+            "a trace lists the instructions it ran"
+        );
+        assert_eq!(trace.signature, bundle.steps[4].signature);
+
+        // Tracing a step that does not exist is a clear error, not a panic.
+        assert!(bundle.trace(5, &Vec::new()).is_err());
     }
 
     /// A step whose message puts `address` among the writable accounts, or
@@ -721,14 +896,14 @@ mod tests {
         assert_eq!(bundle.segments.len(), 1);
         assert_eq!(bundle.segments[0].bundle_id.as_deref(), Some(MULTI_ID));
         assert_eq!(bundle.meta.as_ref().map(|m| m.id.as_str()), Some(MULTI_ID));
-        assert_eq!(bundle.worlds.len(), 2);
+        assert_eq!(bundle.replays.len(), 2);
         // Builtins and accounts that do not exist are never loaded, so the
         // check is against what step 1's own world holds: none of it may be
         // lost in the merge.
         let mut checked = 0;
         for key in &bundle.steps[1].keys {
             let address = solana_address::Address::from_str(key).unwrap();
-            if bundle.worlds[1].has_loaded(&address) {
+            if bundle.replays[1].ctx.has_loaded(&address) {
                 assert!(
                     bundle.world.has_loaded(&address),
                     "{key} missing from merged world"
@@ -747,7 +922,7 @@ mod tests {
         // the compute units drift in either direction for reasons that have
         // nothing to do with the merge.
         let report = bundle.run(&Vec::new()).unwrap();
-        let Prepared { mut svm, tx, .. } = bundle.worlds[0].prepare(&[], false).unwrap();
+        let Prepared { mut svm, tx, .. } = bundle.replays[0].ctx.prepare(&[], false).unwrap();
         let alone = crate::replay::to_replay_result(svm.send_transaction(tx));
         assert_eq!(
             report.steps[0].result.success, alone.success,
