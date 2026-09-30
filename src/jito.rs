@@ -54,7 +54,11 @@ impl From<BundleEntry> for BundleMeta {
     }
 }
 
-/// The most transactions Jito lands in one bundle.
+/// The most transactions Jito lands in one bundle. Nothing in the engine
+/// enforces this — the explorer is the authority on what actually landed, and
+/// a cap of our own would only reject a bundle if Jito ever raised the limit.
+/// It is here as the fact the segment tests assert against.
+#[cfg(test)]
 pub(crate) const MAX_BUNDLE_TXS: usize = 5;
 
 /// A run of consecutive signatures from one bundle, or one signature that
