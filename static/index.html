@@ -840,6 +840,8 @@ input.derived { border-color: var(--green-border); color: var(--green); }
 .drow .new { color: var(--green); font-weight: 500; word-break: break-all; }
 
 /* ---------- bundle replay ---------- */
+#bundleSearch { grid-column: 1 / -1; }
+
 /* Looks like .trychip, but that class carries a global click handler that
    belongs to the simulate page: it switches the cluster and loads a program. */
 .bn-chip { appearance: none; cursor: pointer; background: var(--accent-soft); border: 1px solid transparent; color: var(--accent-strong); padding: 5px var(--s-3); border-radius: var(--r-full); font-family: var(--font-sans); font-size: 12.5px; font-weight: 500; transition: border-color var(--t-fast); }
@@ -1589,6 +1591,12 @@ input.derived { border-color: var(--green-border); color: var(--green); }
       <div class="dbg-err hidden" id="bundleErr"></div>
     </div>
     <div class="grid" id="bundleMain">
+      <form class="page-search full" id="bundleSearch" autocomplete="off">
+        <span class="hs-icon" aria-hidden="true"><svg class="ic lg"><use href="#i-search"/></svg></span>
+        <input id="bundleSig2" placeholder="another bundle id, signature, or comma-separated list" spellcheck="false" autocomplete="off" />
+        <button class="btn" type="submit">Replay</button>
+        <button class="btn ghost" type="button" id="bundleBack" title="Back to the examples">Examples</button>
+      </form>
       <div class="card full" id="bundleSummaryCard">
         <h2>The sequence <span class="count" id="bundleState"></span></h2>
         <div id="bundleSummary"></div>
@@ -5447,6 +5455,8 @@ function bundleApplyMutation() {
 
 function showBundle(target, push) {
   if (target !== bundleTargetCur) { bundleMuts = {}; bundleBase = null; bundleOpen = {}; }
+  $('bundleSig2').value = target;
+  $('bundleTarget').value = target;
   bundleTargetCur = target;
   if (push !== false) history.pushState({ bundle: target }, '', '/bundles/' + encodeURIComponent(target) + location.search);
   bundleRun();
@@ -5462,6 +5472,14 @@ $('bundleGo').addEventListener('click', () => {
   showBundle(t);
 });
 $('bundleTarget').addEventListener('keydown', e => { if (e.key === 'Enter') $('bundleGo').click(); });
+// The results view hides the landing, so it carries its own search bar: a
+// reader who wants a second bundle should not have to go back or reload.
+$('bundleSearch').addEventListener('submit', e => {
+  e.preventDefault();
+  const t = ($('bundleSig2').value || '').trim();
+  if (t) showBundle(t);
+});
+$('bundleBack').addEventListener('click', () => { $('bundleSig2').value = ''; showBundleLanding(); });
 document.querySelectorAll('[data-bundle]').forEach(b => {
   b.addEventListener('click', () => { $('bundleTarget').value = b.dataset.bundle; showBundle(b.dataset.bundle); });
 });
