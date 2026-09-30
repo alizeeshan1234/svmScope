@@ -819,6 +819,56 @@ fn bundle_parts(req: BundleRequest) -> Result<(BundleInput, StepMutations), (Sta
     Ok((input, step_muts))
 }
 
+/// Bundles already built, by cache key. The expensive half of an edit is the
+/// per-step worlds, and those do not change when a balance does: keeping the
+/// built bundle turns a mutation from "fetch everything again" into a replay
+/// that costs milliseconds. Bounded hard, because each one holds every account
+/// and program binary its steps touched.
+/// A held bundle: its cache key, when it was last wanted, and the bundle.
+type HeldBundle = (String, std::time::Instant, std::sync::Arc<svmscope::Bundle>);
+
+static BUILT: std::sync::LazyLock<std::sync::Mutex<Vec<HeldBundle>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// How many built bundles to hold, and for how long. A five-step bundle can
+/// carry several megabytes of program binaries, so this is deliberately small.
+const BUILT_MAX: usize = 3;
+const BUILT_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+fn built_get(key: &str) -> Option<std::sync::Arc<svmscope::Bundle>> {
+    let mut held = BUILT.lock().ok()?;
+    held.retain(|(_, at, _)| at.elapsed() < BUILT_TTL);
+    let hit = held.iter().position(|(k, _, _)| k == key)?;
+    // Touch it so the least recently wanted is the one evicted.
+    held[hit].1 = std::time::Instant::now();
+    Some(std::sync::Arc::clone(&held[hit].2))
+}
+
+fn built_put(key: String, bundle: std::sync::Arc<svmscope::Bundle>) {
+    if let Ok(mut held) = BUILT.lock() {
+        held.retain(|(k, at, _)| k != &key && at.elapsed() < BUILT_TTL);
+        held.push((key, std::time::Instant::now(), bundle));
+        while held.len() > BUILT_MAX {
+            held.remove(0);
+        }
+    }
+}
+
+/// The built bundle for `key`, from the store or freshly fetched.
+fn bundle_for(
+    key: &str,
+    input: BundleInput,
+    url: Rpc,
+    archive: Option<String>,
+) -> Result<std::sync::Arc<svmscope::Bundle>, svmscope::Error> {
+    if let Some(hit) = built_get(key) {
+        return Ok(hit);
+    }
+    let built = std::sync::Arc::new(scope_for(url, archive).bundle(input)?);
+    built_put(key.to_string(), std::sync::Arc::clone(&built));
+    Ok(built)
+}
+
 /// A bundle build in progress, shared by everyone waiting on the same one.
 type BundleJob = tokio::sync::watch::Receiver<Option<Result<(), String>>>;
 
@@ -869,12 +919,13 @@ async fn bundle_get_handler(
                 jobs.insert(key.clone(), rx.clone());
                 let input = bundle_input_of(&target);
                 let job_key = key.clone();
+                let job_key2 = key.clone();
                 tokio::spawn(async move {
                     // The same gate every other heavy replay holds.
                     let outcome = match AT_GATE.acquire().await {
                         Ok(_permit) => tokio::task::spawn_blocking(
                             move || -> Result<svmscope::BundleReport, svmscope::Error> {
-                                scope_for(url, archive).bundle(input)?.run(&Vec::new())
+                                bundle_for(&job_key2, input, url, archive)?.run(&Vec::new())
                             },
                         )
                         .await
@@ -937,16 +988,21 @@ async fn bundle_get_handler(
 /// POST /bundle — the report with per-step mutations applied.
 async fn bundle_post_handler(
     Json(req): Json<BundleRequest>,
-) -> Result<Json<svmscope::BundleReport>, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::response::IntoResponse;
     let (url, archive) = endpoints_for(
         req.cluster.as_deref(),
         req.rpc.as_deref(),
         req.archive.as_deref(),
         req.relay.as_deref(),
     )?;
-    let (input, step_muts) = bundle_parts(req)?;
+    let key = bundle_key(&url, archive.as_deref(), &req);
+    let (_input, step_muts) = bundle_parts(req)?;
+    let Some(built) = built_get(&key) else {
+        return Ok(bundle_building());
+    };
     tokio::task::spawn_blocking(move || -> Result<svmscope::BundleReport, svmscope::Error> {
-        scope_for(url, archive).bundle(input)?.run(&step_muts)
+        built.run(&step_muts)
     })
     .await
     .map_err(|e| {
@@ -955,15 +1011,40 @@ async fn bundle_post_handler(
             format!("task error: {e}"),
         )
     })?
-    .map(Json)
+    .map(|r| Json(r).into_response())
     .map_err(lib_err)
+}
+
+/// The key a bundle is stored under, the same one the read route uses, so a
+/// reader who opened the baseline has already paid for every edit that follows.
+fn bundle_key(url: &Rpc, archive: Option<&str>, req: &BundleRequest) -> String {
+    let target = match (&req.bundle, req.signatures.is_empty()) {
+        (Some(t), true) => t.clone(),
+        _ => req.signatures.join(","),
+    };
+    format!("bundle|{url}|{}|{target}", archive.unwrap_or(""))
+}
+
+/// The "come back in a moment" answer the write routes share. An edit is
+/// cheap, but only once the per-step worlds exist.
+fn bundle_building() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "status": "building",
+            "detail": "open the sequence first; its worlds are still being built",
+        })),
+    )
+        .into_response()
 }
 
 /// POST /bundle/trace — one step of the sequence, instruction by instruction,
 /// with every step before it already run. The panels the debugger draws.
 async fn bundle_trace_handler(
     Json(req): Json<BundleRequest>,
-) -> Result<Json<svmscope::Trace>, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::response::IntoResponse;
     let step = req.step.ok_or((
         StatusCode::BAD_REQUEST,
         "`step` is required: which step to trace".to_string(),
@@ -974,11 +1055,13 @@ async fn bundle_trace_handler(
         req.archive.as_deref(),
         req.relay.as_deref(),
     )?;
-    let (input, step_muts) = bundle_parts(req)?;
+    let key = bundle_key(&url, archive.as_deref(), &req);
+    let (_input, step_muts) = bundle_parts(req)?;
+    let Some(built) = built_get(&key) else {
+        return Ok(bundle_building());
+    };
     tokio::task::spawn_blocking(move || -> Result<svmscope::Trace, svmscope::Error> {
-        scope_for(url, archive)
-            .bundle(input)?
-            .trace(step, &step_muts)
+        built.trace(step, &step_muts)
     })
     .await
     .map_err(|e| {
@@ -987,7 +1070,7 @@ async fn bundle_trace_handler(
             format!("task error: {e}"),
         )
     })?
-    .map(Json)
+    .map(|t| Json(t).into_response())
     .map_err(lib_err)
 }
 
@@ -2868,8 +2951,8 @@ async fn api_index() -> Json<serde_json::Value> {
             "POST /trace":                "{ signature | transaction, mutations[], time_travel?, features? } — step debugger: every instruction and CPI with decoded args, per-step account diffs, and the failing step.",
             "GET  /trace/{signature}":    "The same trace with no mutations, cacheable.",
             "GET  /bundle/{id_or_sig}":   "Bundle replay: a Jito bundle id, a signature inside one, or a comma-separated list, replayed in order on one SVM and compared with the chain step by step. Cacheable.",
-            "POST /bundle":               "{ bundle | signatures[], mutations[{ step, mutations[] }] } — the same report with per-step what-if mutations; an edit at one step cascades into every step after it.",
-            "POST /bundle/trace":         "{ bundle | signatures[], step, mutations[{ step, mutations[] }] } — step debugger for one step of a bundle, with every step before it already run.",
+            "POST /bundle":               "{ bundle | signatures[], mutations[{ step, mutations[] }] } — the same report with per-step what-if mutations; an edit at one step cascades into every step after it. Answers 202 until the sequence has been built by a GET; after that an edit costs milliseconds, because the per-step worlds are already in memory.",
+            "POST /bundle/trace":         "{ bundle | signatures[], step, mutations[{ step, mutations[] }] } — step debugger for one step of a bundle, with every step before it already run. Answers 202 until the sequence has been built by a GET.",
             "POST /profile":              "{ signature, mutations[]?, time_travel?, features?, symbols[{program, elf_b64}]? } — compute profiler: every BPF instruction attributed to functions, syscalls and call stacks per program frame; symbols name a program's functions from its .debug file.",
             "GET  /profile/{signature}":  "The as-it-happened compute profile, no symbols, cacheable.",
             "GET  /freeze/{signature}":   "Capture a self-contained fixture for deterministic, offline replay.",

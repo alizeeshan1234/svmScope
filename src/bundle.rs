@@ -178,8 +178,9 @@ pub struct Bundle {
     /// The unmutated run, filled in the first time it happens, so an edit at
     /// step k replays from k rather than from zero. Interior mutability
     /// because `run` and `trace` take `&self`: a bundle is a fetched world the
-    /// caller runs many times.
-    baseline: std::cell::RefCell<Option<Baseline>>,
+    /// caller runs many times. A mutex rather than a cell because the server
+    /// keeps built bundles and serves edits to them from any thread.
+    baseline: std::sync::Mutex<Option<Baseline>>,
 }
 
 impl Scope {
@@ -292,7 +293,7 @@ impl Scope {
             segments,
             world,
             replays,
-            baseline: std::cell::RefCell::new(None),
+            baseline: std::sync::Mutex::new(None),
         })
     }
 }
@@ -374,10 +375,12 @@ impl Bundle {
         let mut steps = prefix;
         steps.extend(fresh);
         if keep {
-            *self.baseline.borrow_mut() = Some(Baseline {
-                snapshots,
-                reports: steps.clone(),
-            });
+            if let Ok(mut slot) = self.baseline.lock() {
+                *slot = Some(Baseline {
+                    snapshots,
+                    reports: steps.clone(),
+                });
+            }
         }
 
         let exact = steps.iter().all(|s| s.matches_chain);
@@ -452,15 +455,17 @@ impl Bundle {
             .map(|(i, _)| *i)
             .min()
             .unwrap_or(usize::MAX);
-        if let Some(b) = self.baseline.borrow().as_ref() {
-            let start = first_mutated
-                .min(upto)
-                .min(b.snapshots.len().saturating_sub(1));
-            return (
-                start,
-                b.snapshots[start].clone(),
-                b.reports[..start.min(b.reports.len())].to_vec(),
-            );
+        if let Ok(guard) = self.baseline.lock() {
+            if let Some(b) = guard.as_ref() {
+                let start = first_mutated
+                    .min(upto)
+                    .min(b.snapshots.len().saturating_sub(1));
+                return (
+                    start,
+                    b.snapshots[start].clone(),
+                    b.reports[..start.min(b.reports.len())].to_vec(),
+                );
+            }
         }
         (0, self.entry(), Vec::new())
     }
@@ -965,5 +970,16 @@ mod tests {
             "the merge moved step 0's compute"
         );
         assert_eq!(report.steps[0].result.error, alone.error);
+    }
+}
+
+#[cfg(test)]
+mod thread_safety {
+    /// The server keeps built bundles and serves edits to them from whichever
+    /// thread the request lands on, so this has to hold.
+    #[test]
+    fn a_built_bundle_can_be_shared_between_threads() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<super::Bundle>();
     }
 }
