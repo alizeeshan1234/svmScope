@@ -4,6 +4,39 @@ All notable changes to svmscope are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Bundle replay.** A Jito bundle id, any signature that landed inside one, or
+  your own ordered list of signatures, replayed in sequence on one SVM, each
+  transaction starting from the state the ones before it left behind.
+  `Scope::bundle` builds it, `Bundle::run` replays it and checks every step
+  against what the chain recorded, and `Bundle::trace(step, ..)` steps through
+  one transaction with all its predecessors already applied. `Bundle::accounts_at`
+  describes a step's accounts as that step sees them, decoded, for editors.
+  Mutations attach to a step, so editing one re-runs every step after it on the
+  result. The report names the accounts that carry state between steps, and in
+  cross-slot mode flags accounts where the carried value disagrees with the world
+  rebuilt at the later step's own slot.
+- **`svmscope bundle`** on the command line, with `--step`, `--mutate` and
+  `--mutations <file.json>`.
+- **Three HTTP routes**: `GET /bundle/{id_or_signature}` (cacheable, answers 202
+  while building), `POST /bundle` for a run with per-step mutations, and
+  `POST /bundle/trace`. Plus `POST /bundle/accounts` for a step's decoded
+  accounts. A build outlives the request that started it, and the built sequence
+  is held so an edit costs milliseconds rather than a full rebuild.
+- **A bundle page** on the site at `/bundles`, with the account editor the
+  simulate page uses: open any account a step touches and type over any field.
+
+### Notes
+
+- Replaying one slot back to back is exact in a way a single historical replay is
+  not: nothing is reconstructed between steps, so compute units match the chain to
+  the unit. A bundle is exact about as often as its first transaction is.
+- Fetching step worlds concurrently was measured and rejected: against a
+  rate-limiting endpoint it ran 27% slower than sequentially.
+
 ## [0.6.0] — 2026-09-09
 
 ### Added

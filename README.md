@@ -295,6 +295,10 @@ assert!(outcomes.iter().all(|outcome| outcome.pass));
 
 **4. Profile the compute.** `replay.profile(&[])` traces every BPF instruction the transaction executes — every program frame, every CPI — and attributes them to functions, syscalls and call stacks: a flamegraph of where the compute units went. Nothing else on Solana shows this. Mainnet programs are stripped, so their functions read as `function_<pc>` with exact boundaries and shape; pass the `.debug` file `cargo build-sbf --debug` writes next to your own `.so` and every function gets its Rust name.
 
+**5. Replay a whole bundle, not one transaction.** Some transactions only make sense together: a bot buys in one and sells in the next, a liquidator moves a price and then seizes the position. `scope.bundle(input)?.run(&[])` takes a Jito bundle id, any signature that landed inside one, or your own ordered list, and replays every transaction in sequence on one SVM, each starting from what the ones before it left behind. Every step is checked against what the chain recorded, the accounts that carry state between steps are reported as edges, and `Bundle::trace(step, ..)` steps through any one of them with all its predecessors already run. Edit a step and every step after it re-runs on the result.
+
+Replaying one slot back to back is *more* faithful than replaying one transaction historically. On a pinned five-transaction bundle every step matched the chain's outcome and its exact compute units; a single historical replay matches compute exactly about a third of the time. Nothing is reconstructed between steps of one slot, which is the whole reason.
+
 Errors are typed and self-explanatory: a typo'd mutation address is a hard `Error::MutationTargetMissing`, never a fake "revert" your test happily accepts; an unknown field name errors *listing the available fields*.
 
 Run the [examples](./examples) against any transaction:
@@ -325,6 +329,11 @@ cargo run -- upgrade fixture.json                 # re-capture an old fixture as
 cargo run -- debug <SIGNATURE>                    # step debugger: every instruction and CPI, state diffs, failing step
 cargo run -- profile <SIGNATURE>                  # compute profiler: instructions per function, per frame, per syscall
 cargo run -- profile <SIGNATURE> --symbols <PROGRAM>=target/deploy/my_program.debug   # …with Rust function names
+cargo run -- bundle <BUNDLE-ID>                   # replay a Jito bundle in order, every step checked against the chain
+cargo run -- bundle <SIG>,<SIG>,<SIG>             # …or your own ordered list
+cargo run -- bundle <BUNDLE-ID> --step 2          # step through one transaction of the sequence
+cargo run -- bundle <BUNDLE-ID> --mutate 0:<ADDR>:0            # edit a step; every later step re-runs on the result
+cargo run -- bundle <BUNDLE-ID> --mutations edits.json         # …any mutation, in the shape the HTTP API takes
 ```
 
 Every command takes `--cluster <mainnet|devnet|testnet|localnet>` or `--rpc <url>`.
