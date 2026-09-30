@@ -830,9 +830,23 @@ type HeldBundle = (String, std::time::Instant, std::sync::Arc<svmscope::Bundle>)
 static BUILT: std::sync::LazyLock<std::sync::Mutex<Vec<HeldBundle>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
-/// How many built bundles to hold, and for how long. A five-step bundle can
-/// carry several megabytes of program binaries, so this is deliberately small.
-const BUILT_MAX: usize = 3;
+/// How many built bundles to hold, and for how long.
+///
+/// One, by default, and that is not timidity: a built bundle holds every
+/// account and every program binary each of its steps touched, which for a
+/// five-step arbitrage bundle runs to tens of megabytes. Holding three of
+/// those killed the hosted engine outright — the container was reaped twice
+/// within ten minutes of shipping it, on a box with 512 MB. Keeping the most
+/// recent sequence is what makes editing it instant, and the reader is only
+/// ever looking at one sequence at a time. `SVMSCOPE_BUNDLE_CACHE` raises it
+/// where there is memory to spare.
+fn built_max() -> usize {
+    std::env::var("SVMSCOPE_BUNDLE_CACHE")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1)
+}
 const BUILT_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 fn built_get(key: &str) -> Option<std::sync::Arc<svmscope::Bundle>> {
@@ -848,7 +862,8 @@ fn built_put(key: String, bundle: std::sync::Arc<svmscope::Bundle>) {
     if let Ok(mut held) = BUILT.lock() {
         held.retain(|(k, at, _)| k != &key && at.elapsed() < BUILT_TTL);
         held.push((key, std::time::Instant::now(), bundle));
-        while held.len() > BUILT_MAX {
+        let max = built_max();
+        while held.len() > max {
             held.remove(0);
         }
     }
