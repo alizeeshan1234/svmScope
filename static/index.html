@@ -1608,7 +1608,7 @@ input.derived { border-color: var(--green-border); color: var(--green); }
       </div>
       <div class="card full" id="bundleEditCard" hidden>
         <h2>Change one step <span class="count" id="bundleEditCount"></span></h2>
-        <p class="whatif-lead">Set an account's balance at the step you choose. The step runs with your value, and every step after it runs on whatever that produced, so you see the change arrive downstream rather than having to imagine it.</p>
+        <p class="whatif-lead">Change an account, or the instructions themselves, at the step you choose: a balance, a named field of a decoded account, raw bytes at an offset, or drop an instruction and replace its data. The step runs with your change, and every step after it runs on whatever that produced, so you watch the change arrive downstream rather than having to imagine it. Edits stack, on one step or several.</p>
         <div id="bundleEdit"></div>
       </div>
       <div class="card full" id="bundleStepCard" hidden>
@@ -5136,7 +5136,7 @@ window.addEventListener('popstate', e => {
 // An ordered set of dependent transactions replayed on one SVM: a Jito bundle,
 // or any list the reader pastes. The engine builds one world per step, runs
 // them in order, and reports every step against what the chain recorded.
-let bundleReport = null, bundleBase = null, bundleTargetCur = '', bundleMuts = {}, bundleOpen = {};
+let bundleReport = null, bundleBase = null, bundleTargetCur = '', bundleMuts = [], bundleOpen = {};
 // Stop polling eventually; the engine still finishes, and the next visit is instant.
 const BUNDLE_GIVE_UP = 900;
 const lamp = (n) => (n / 1e9).toFixed(6).replace(/0+$/, '').replace(/\.$/, '') + ' SOL';
@@ -5179,7 +5179,7 @@ function bundleStepRow(s, base) {
     : `<span class="amt neg">${esc(s.result.error_name || s.result.error || 'failed')}</span>`;
   const flags = [];
   if (!s.matches_chain) flags.push('<span class="amt neg">drift</span>');
-  if (bundleMuts[s.index]) flags.push('<span class="bn-moved">edited</span>');
+  if (bundleMuts.some(m => m.step === s.index)) flags.push('<span class="bn-moved">edited</span>');
   // Against the unmutated run, when there is one to compare with.
   if (base && base[s.index]) {
     const b = base[s.index];
@@ -5255,17 +5255,52 @@ function bundleCascadeRows(edges) {
 
 function bundleEditPanel(r) {
   const steps = r.steps.map(s => `<option value="${s.index}">step ${s.index} · ${short(s.signature)}</option>`).join('');
-  const pills = Object.entries(bundleMuts).map(([k, m]) =>
-    `<span class="bn-edit-pill">step ${k} · ${short(m.address)} → ${m.lamports}<button data-bdrop="${k}" title="remove">✕</button></span>`).join('');
+  const pills = bundleMuts.map((m, i) =>
+    `<span class="bn-edit-pill">step ${m.step} · ${esc(m.label)}<button data-bdrop="${i}" title="remove">✕</button></span>`).join('');
   return `<div class="bn-editrow">
       <div class="wfield"><label class="flabel" for="bmStep">which step</label><select id="bmStep" class="cf-select">${steps}</select></div>
-      <div class="wfield wide" style="flex:1 1 320px"><label class="flabel" for="bmAddr">whose balance</label><select id="bmAddr" class="cf-select"></select></div>
-      <div class="wfield"><label class="flabel" for="bmLam">set to (lamports)</label><input id="bmLam" placeholder="0" spellcheck="false" autocomplete="off" /></div>
-      <button class="btn" id="bmGo">Re-run from there</button>
-      ${Object.keys(bundleMuts).length ? '<button class="btn ghost" id="bmClear">Clear all edits</button>' : ''}
+      <div class="wfield"><label class="flabel" for="bmKind">change what</label><select id="bmKind" class="cf-select">
+        <option value="lamports">an account's balance</option>
+        <option value="field">a named field of an account</option>
+        <option value="data">raw bytes of an account</option>
+        <option value="skipix">drop an instruction</option>
+        <option value="ixdata">replace an instruction's data</option>
+      </select></div>
+      <div class="wfield wide" style="flex:1 1 280px" id="bmAddrWrap"><label class="flabel" for="bmAddr">which account</label><select id="bmAddr" class="cf-select"></select></div>
+      <div class="wfield" id="bmAWrap"><label class="flabel" for="bmA" id="bmALabel">to</label><input id="bmA" spellcheck="false" autocomplete="off" /></div>
+      <div class="wfield" id="bmBWrap" hidden><label class="flabel" for="bmB" id="bmBLabel">value</label><input id="bmB" spellcheck="false" autocomplete="off" /></div>
+      <button class="btn" id="bmGo">Apply and re-run</button>
+      ${bundleMuts.length ? '<button class="btn ghost" id="bmClear">Clear all edits</button>' : ''}
     </div>
+    <datalist id="bmFields"></datalist>
     <div class="empty" id="bmHint"></div>
     ${pills ? `<div class="bn-edits">${pills}</div>` : ''}`;
+}
+
+// Each kind needs different inputs. Rather than five forms, one form that
+// relabels itself, so the shape of what you are about to change stays visible.
+function bundleKindShape() {
+  const kind = $('bmKind').value;
+  const shapes = {
+    lamports: { addr: true, a: 'new balance, in lamports', b: null,
+                hint: 'Set it low to starve the step, high to fund it.' },
+    field:    { addr: true, a: 'field name', b: 'new value',
+                hint: 'A named field of the decoded account, for instance amount on a token account. The fields this step changed are offered as you type.' },
+    data:     { addr: true, a: 'byte offset', b: 'bytes, hex',
+                hint: 'Writes raw bytes at an offset. For layouts the engine cannot decode.' },
+    skipix:   { addr: false, a: 'instruction index', b: null,
+                hint: 'Removes one top-level instruction from this step before it runs.' },
+    ixdata:   { addr: false, a: 'instruction index', b: 'new data, hex',
+                hint: "Replaces one instruction's data wholesale." },
+  };
+  const shape = shapes[kind];
+  $('bmAddrWrap').hidden = !shape.addr;
+  $('bmALabel').textContent = shape.a;
+  $('bmBWrap').hidden = !shape.b;
+  if (shape.b) $('bmBLabel').textContent = shape.b;
+  $('bmA').setAttribute('list', kind === 'field' ? 'bmFields' : '');
+  $('bmHint').textContent = shape.hint;
+  if (shape.addr) bundleFillAccounts();
 }
 
 // Fill the account picker from whichever step is selected.
@@ -5281,20 +5316,25 @@ function bundleFillAccounts() {
   const opts = [...accounts.entries()].map(([a, bal]) =>
     `<option value="${esc(a)}" data-bal="${bal === null ? '' : bal}">${short(a, 10)}${bal === null ? '' : ' · ' + lamp(bal)}</option>`).join('');
   $('bmAddr').innerHTML = opts || '<option value="">this step touched nothing</option>';
-  bundleHint();
+  bundleFillFields();
 }
 
-function bundleHint() {
-  const sel = $('bmAddr').selectedOptions[0];
-  const bal = sel && sel.dataset.bal;
-  $('bmHint').textContent = bal
-    ? `That account holds ${bal} lamports going into this step. Set it lower to starve the step, higher to fund it.`
-    : 'This account was inherited from an earlier step, so its balance is whatever that step left.';
+// The fields this step changed on the chosen account, offered as you type.
+// Only the changed ones are known here, which is exactly the useful set: they
+// are the numbers the transaction moved.
+function bundleFillFields() {
+  const idx = Number($('bmStep').value);
+  const step = (bundleBase && bundleBase[idx]) || (bundleReport && bundleReport.steps[idx]);
+  const addr = $('bmAddr').value;
+  const entry = step && step.diff.find(d => d.address === addr);
+  const names = entry && entry.fields ? entry.fields : [];
+  const list = $('bmFields');
+  if (list) list.innerHTML = names.map(f => `<option value="${esc(f.name)}">${esc(f.ty || '')} · now ${esc(f.after)}</option>`).join('');
 }
 
 function renderBundle(r) {
   bundleReport = r;
-  const edited = Object.keys(bundleMuts).length > 0;
+  const edited = bundleMuts.length > 0;
   if (!edited) bundleBase = r.steps.slice();
   const base = edited && bundleBase ? bundleBase : null;
 
@@ -5325,9 +5365,9 @@ function renderBundle(r) {
   if (edges.length) $('bundleCascade').innerHTML = bundleCascadeRows(edges);
 
   $('bundleEditCard').hidden = false;
-  $('bundleEditCount').textContent = edited ? `${Object.keys(bundleMuts).length} active` : '';
+  $('bundleEditCount').textContent = edited ? `${bundleMuts.length} active` : '';
   $('bundleEdit').innerHTML = bundleEditPanel(r);
-  bundleFillAccounts();
+  bundleKindShape();
 
   // Row expansion, step-through, and the edit controls.
   $('bundleSummary').querySelectorAll('[data-brow]').forEach(tr => {
@@ -5341,23 +5381,27 @@ function renderBundle(r) {
   $('bundleSummary').querySelectorAll('[data-bstep]').forEach(b => {
     b.addEventListener('click', ev => { ev.stopPropagation(); bundleTrace(Number(b.dataset.bstep)); });
   });
-  $('bmStep').addEventListener('change', bundleFillAccounts);
-  $('bmAddr').addEventListener('change', bundleHint);
+  $('bmStep').addEventListener('change', bundleKindShape);
+  $('bmKind').addEventListener('change', bundleKindShape);
+  $('bmAddr').addEventListener('change', bundleFillFields);
   $('bmGo').addEventListener('click', bundleApplyMutation);
   const clear = $('bmClear');
-  if (clear) clear.addEventListener('click', () => { bundleMuts = {}; bundleRun(); });
+  if (clear) clear.addEventListener('click', () => { bundleMuts = []; bundleRun(); });
   $('bundleEdit').querySelectorAll('[data-bdrop]').forEach(b => {
-    b.addEventListener('click', () => { delete bundleMuts[b.dataset.bdrop]; bundleRun(); });
+    b.addEventListener('click', () => { bundleMuts.splice(Number(b.dataset.bdrop), 1); bundleRun(); });
   });
 }
 
 // The request body both POST routes take: the target plus every edit made so
 // far, grouped the way the engine wants them.
 function bundleBody(extra) {
-  const mutations = Object.entries(bundleMuts).map(([step, m]) => ({
-    step: Number(step),
-    mutations: [{ kind: 'lamports', address: m.address, lamports: m.lamports }],
-  }));
+  // Several edits may land on one step; the engine wants them grouped by step.
+  const byStep = new Map();
+  for (const m of bundleMuts) {
+    if (!byStep.has(m.step)) byStep.set(m.step, []);
+    byStep.get(m.step).push(m.mut);
+  }
+  const mutations = [...byStep.entries()].map(([step, muts]) => ({ step, mutations: muts }));
   // Same cluster / custom-RPC / relay selection every other request carries.
   const body = Object.assign({ mutations }, clusterParams());
   if (bundleTargetCur.includes(',')) body.signatures = bundleTargetCur.split(',').map(x => x.trim()).filter(Boolean);
@@ -5371,7 +5415,7 @@ async function bundleRun() {
   hideAllViews(); $('bundle').classList.remove('hidden');
   $('bundleLanding').classList.add('hidden'); $('bundleMain').classList.remove('hidden');
   bundleNavOn();
-  const edited = Object.keys(bundleMuts).length > 0;
+  const edited = bundleMuts.length > 0;
   $('bundleState').textContent = edited ? 're-running with your edit…' : 'building one world per step…';
   $('bundleSummary').innerHTML = '<div class="empty">Each step is a historical replay. The first run of a bundle takes a few minutes; after that it is cached. You can leave and come back, the engine keeps building.</div>';
   $('bundleStepCard').hidden = true;
@@ -5444,17 +5488,50 @@ async function bundleTrace(step) {
 
 function bundleApplyMutation() {
   const step = Number($('bmStep').value);
+  const kind = $('bmKind').value;
   const address = ($('bmAddr').value || '').trim();
-  const lamports = ($('bmLam').value || '').trim();
-  if (!address) return bundleShowErr('pick the account whose balance to change');
-  if (!/^\d+$/.test(lamports)) return bundleShowErr('lamports must be a whole number');
+  const a = ($('bmA').value || '').trim();
+  const b = ($('bmB').value || '').trim();
+  const needsAccount = kind === 'lamports' || kind === 'field' || kind === 'data';
+  if (needsAccount && !address) return bundleShowErr('pick the account to change');
+
+  let mut = null, label = '';
+  if (kind === 'lamports') {
+    if (!/^\d+$/.test(a)) return bundleShowErr('a balance is a whole number of lamports');
+    mut = { kind: 'lamports', address, lamports: Number(a) };
+    label = `${short(address)} balance → ${a}`;
+  } else if (kind === 'field') {
+    if (!a) return bundleShowErr('name the field to change');
+    if (!b) return bundleShowErr('give the field a value');
+    // Numbers stay numbers; anything else goes as a string, which is how the
+    // engine takes a pubkey or a value too large for a JavaScript number.
+    mut = { kind: 'field', address, field: a, value: /^-?\d+$/.test(b) ? Number(b) : b };
+    label = `${short(address)}.${a} → ${b}`;
+  } else if (kind === 'data') {
+    if (!/^\d+$/.test(a)) return bundleShowErr('the offset is a whole number of bytes');
+    const hex = b.replace(/^0x/i, '').replace(/[\s_]/g, '');
+    if (!hex || !/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2) return bundleShowErr('bytes must be hex, two characters per byte');
+    mut = { kind: 'data', address, offset: Number(a), bytes_hex: hex };
+    label = `${short(address)} @${a} ← 0x${hex.slice(0, 12)}${hex.length > 12 ? '…' : ''}`;
+  } else if (kind === 'skipix') {
+    if (!/^\d+$/.test(a)) return bundleShowErr('the instruction index is a whole number');
+    mut = { kind: 'skipix', index: Number(a) };
+    label = `drop instruction ${a}`;
+  } else if (kind === 'ixdata') {
+    if (!/^\d+$/.test(a)) return bundleShowErr('the instruction index is a whole number');
+    const hex = b.replace(/^0x/i, '').replace(/[\s_]/g, '');
+    if (!hex || !/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2) return bundleShowErr('data must be hex, two characters per byte');
+    mut = { kind: 'ixdata', index: Number(a), bytes_hex: hex };
+    label = `instruction ${a} data → 0x${hex.slice(0, 12)}${hex.length > 12 ? '…' : ''}`;
+  }
+  if (!mut) return bundleShowErr('pick what to change');
   bundleShowErr('');
-  bundleMuts[step] = { address, lamports: Number(lamports) };
+  bundleMuts.push({ step, mut, label });
   bundleRun();
 }
 
 function showBundle(target, push) {
-  if (target !== bundleTargetCur) { bundleMuts = {}; bundleBase = null; bundleOpen = {}; }
+  if (target !== bundleTargetCur) { bundleMuts = []; bundleBase = null; bundleOpen = {}; }
   $('bundleSig2').value = target;
   $('bundleTarget').value = target;
   bundleTargetCur = target;
