@@ -5140,6 +5140,16 @@ let bundleReport = null, bundleBase = null, bundleTargetCur = '', bundleMuts = [
 // Stop polling eventually; the engine still finishes, and the next visit is instant.
 const BUNDLE_GIVE_UP = 900;
 const lamp = (n) => (n / 1e9).toFixed(6).replace(/0+$/, '').replace(/\.$/, '') + ' SOL';
+// What a step did, as a value that can be compared between two runs.
+// Not JSON.stringify of the diff: the cached read route serialises object keys
+// alphabetically and the edit route serialises them in declaration order, so
+// identical effects compare unequal and every step looks changed.
+const bundleEffect = (diff) => JSON.stringify(
+  (diff || [])
+    .map(d => [d.address, d.lamports_before, d.lamports_after, !!d.raw_data_changed,
+               (d.fields || []).map(f => [f.name, f.after])])
+    .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+);
 
 function bundleShowErr(msg) {
   const el = $('bundleErr');
@@ -5187,7 +5197,7 @@ function bundleStepRow(s, base) {
     else if (b.result.compute_units !== s.result.compute_units) {
       const d = s.result.compute_units - b.result.compute_units;
       flags.push(`<span class="bn-moved">${d > 0 ? '+' : ''}${d} CU</span>`);
-    } else if (JSON.stringify(b.diff) !== JSON.stringify(s.diff)) flags.push('<span class="bn-moved">different effect</span>');
+    } else if (bundleEffect(b.diff) !== bundleEffect(s.diff)) flags.push('<span class="bn-moved">different effect</span>');
   }
   return `<tr class="bn-row${bundleOpen[s.index] ? ' on' : ''}" data-brow="${s.index}">
     <td>${s.index}</td>
@@ -5345,14 +5355,31 @@ function renderBundle(r) {
   const mode = r.mode === 'consecutive'
     ? 'All in one slot, back to back. Nothing could have touched these accounts in between, so replaying them in order is exact rather than an approximation.'
     : 'These are in different slots. What earlier steps wrote is carried forward, everything else is rebuilt at each step\'s own slot, and any account where those two answers disagree is flagged below instead of being quietly picked for you.';
-  const verdict = r.exact
-    ? `<span class="bn-verdict ok">${icon('check')}every step matches the chain</span>`
-    : `<span class="bn-verdict bad">${icon('alert')}drift starts at step ${r.first_drift}</span>`;
+  // Unedited, the question is whether the replay matches the chain. Edited, it
+  // is not: you asked for a world that never happened, so what matters is
+  // which steps your change moved. Saying "matches the chain" over a
+  // counterfactual invites the reader to think their edit did nothing.
+  let verdict;
+  if (edited) {
+    const moved = base
+      ? r.steps.filter((s, i) => base[i] && (
+          base[i].result.success !== s.result.success ||
+          base[i].result.compute_units !== s.result.compute_units ||
+          bundleEffect(base[i].diff) !== bundleEffect(s.diff))).length
+      : 0;
+    verdict = moved
+      ? `<span class="bn-verdict bad">${icon('alert')}your change moved ${moved} of ${r.steps.length} steps</span>`
+      : `<span class="bn-verdict ok">${icon('check')}your change moved nothing</span>`;
+  } else {
+    verdict = r.exact
+      ? `<span class="bn-verdict ok">${icon('check')}every step matches the chain</span>`
+      : `<span class="bn-verdict bad">${icon('alert')}drift starts at step ${r.first_drift}</span>`;
+  }
 
   $('bundleState').textContent = `${r.steps.length} steps`;
   $('bundleSummary').innerHTML =
     `<div class="bn-meta">${head}</div>
-     <div style="margin:var(--s-3) 0">${verdict}${edited ? ' <span class="bn-verdict bad">with your edits applied</span>' : ''}</div>
+     <div style="margin:var(--s-3) 0">${verdict}${edited ? ` <span class="empty">against the unedited run${r.exact ? ', which matched the chain on every step' : `, which drifted at step ${r.first_drift}`}</span>` : ''}</div>
      <p class="bn-lead">${mode}</p>
      <table class="bn-steps"><thead><tr>
         <th>step</th><th>transaction</th><th>replay</th><th>chain</th><th>compute</th><th>changed</th><th>inherited</th><th></th><th></th>
