@@ -598,6 +598,10 @@ impl Scope {
         static GLOBAL: std::sync::LazyLock<Mutex<IdlCache>> =
             std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
         const TTL: Duration = Duration::from_secs(600);
+        // A miss, or a name-only IDL recovered from the binary, is remembered
+        // only briefly: the program may publish its IDL any minute, and one
+        // failed RPC call must not hide it from everyone for ten minutes.
+        const MISS_TTL: Duration = Duration::from_secs(20);
 
         let mut cache = self.idl_cache.lock().unwrap();
         if let Some(v) = cache.get(program) {
@@ -615,7 +619,11 @@ impl Scope {
         }
         if let Ok(g) = GLOBAL.lock() {
             if let Some((at, v)) = g.get(program) {
-                if at.elapsed() < TTL {
+                let ttl = match v {
+                    Some(idl) if !idl::is_synthesized(idl) => TTL,
+                    _ => MISS_TTL,
+                };
+                if at.elapsed() < ttl {
                     cache.insert(program.to_string(), v.clone());
                     return v.clone();
                 }
