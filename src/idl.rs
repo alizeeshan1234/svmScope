@@ -1376,6 +1376,8 @@ mod recovery_tests {
             .collect();
         assert_eq!(names, ["add", "add_liquidity", "add_liquidity_unable"]);
         assert!(is_synthesized(&idl));
-        assert!(!is_synthesized(&serde_json::json!({ "metadata": { "name": "real" } })));
+        assert!(!is_synthesized(
+            &serde_json::json!({ "metadata": { "name": "real" } })
+        ));
     }
 }
