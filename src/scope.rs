@@ -2616,6 +2616,7 @@ impl Scope {
         }
         let idl = self
             .idl_for(program_id)
+            .filter(|idl| !idl::is_synthesized(idl))
             .ok_or_else(|| Error::NoIdl(program_id.to_string()))?;
         Ok(idl::instructions(&idl))
     }

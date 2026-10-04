@@ -179,14 +179,25 @@ pub(crate) fn fetch_idl_json(client: &RpcClient, program_id: Address) -> Option<
         })
 }
 
+/// Origin marker of an IDL [`synthesize_from_elf`] produced. Such an IDL knows
+/// names and discriminators only: good enough to label a decoded instruction,
+/// useless for building one (no accounts, no args), so the simulate flow must
+/// not offer it.
+const ELF_ORIGIN: &str = "svmscope-elf";
+
+/// Whether `idl` was recovered from a program binary rather than published.
+pub(crate) fn is_synthesized(idl: &Value) -> bool {
+    idl["metadata"]["origin"].as_str() == Some(ELF_ORIGIN)
+}
+
 /// Recover an Anchor program's instruction names from its compiled binary. The
 /// dispatcher of every Anchor program (unless built with `no-log-ix-name`)
 /// logs `Instruction: <Name>` on entry, so those literals sit in the ELF's
 /// read-only data. Rust packs adjacent string literals with no terminator, so
-/// each literal's true end is unknown; every identifier prefix is offered as a
-/// candidate and only the one whose `sha256("global:<snake>")` matches real
-/// instruction data ever surfaces. Produces a minimal IDL (names and
-/// discriminators only, no accounts or args).
+/// each literal's true end is unknown; every prefix that ends on a CamelCase
+/// word boundary is offered as a candidate and only the one whose
+/// `sha256("global:<snake>")` matches real instruction data ever surfaces.
+/// Produces a minimal IDL (names and discriminators only, no accounts or args).
 pub(crate) fn synthesize_from_elf(elf: &[u8], program: &str) -> Option<Value> {
     use sha2::{Digest, Sha256};
     const TAG: &[u8] = b"Instruction: ";
@@ -201,6 +212,13 @@ pub(crate) fn synthesize_from_elf(elf: &[u8], program: &str) -> Option<Value> {
             .copied()
             .collect();
         for n in 1..=ident.len() {
+            // A name can only end where the next word starts (or the run ends):
+            // `AddLiquidityUnable` yields add / add_liquidity /
+            // add_liquidity_unable, not every one of its 18 prefixes.
+            let at_boundary = ident.get(n).is_none_or(|b| b.is_ascii_uppercase());
+            if !at_boundary {
+                continue;
+            }
             if let Ok(s) = std::str::from_utf8(&ident[..n]) {
                 if s.as_bytes()[0].is_ascii_alphabetic() {
                     names.insert(crate::program::camel_to_snake(s));
@@ -221,7 +239,7 @@ pub(crate) fn synthesize_from_elf(elf: &[u8], program: &str) -> Option<Value> {
         .collect();
     Some(serde_json::json!({
         "address": program,
-        "metadata": { "name": "recovered", "origin": "svmscope-elf",
+        "metadata": { "name": "recovered", "origin": ELF_ORIGIN,
                       "note": "instruction names recovered from the program binary; no accounts or args" },
         "instructions": instructions,
         "accounts": [],
@@ -1344,5 +1362,20 @@ mod recovery_tests {
         assert!(find_ix(&idl, &disc("sell_anchor_error")).is_some());
         assert!(find_ix(&idl, &[0u8; 8]).is_none());
         assert!(synthesize_from_elf(b"no log literals here", "Prog").is_none());
+    }
+
+    #[test]
+    fn recovered_names_stop_at_word_boundaries() {
+        let elf = b"....Instruction: AddLiquidityUnable to....".to_vec();
+        let idl = synthesize_from_elf(&elf, "Prog").expect("names found");
+        let names: Vec<&str> = idl["instructions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|ix| ix["name"].as_str())
+            .collect();
+        assert_eq!(names, ["add", "add_liquidity", "add_liquidity_unable"]);
+        assert!(is_synthesized(&idl));
+        assert!(!is_synthesized(&serde_json::json!({ "metadata": { "name": "real" } })));
     }
 }
