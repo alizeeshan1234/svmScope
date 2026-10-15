@@ -5853,7 +5853,7 @@ function summaryLine(sm) {
   if (sm.compute_delta_total) bits.push(`compute ${sm.compute_delta_total > 0 ? '+' : ''}${sm.compute_delta_total} CU`);
   return bits.join(' · ');
 }
-function renderReport(r) {
+function renderDepReport(r) {
   const base = r.baseline === 'previous' ? 'the binary before its current deploy' : r.baseline === 'at_slot' ? 'the binary at each transaction\'s slot' : 'the current binary on both sides (no earlier binary available)';
   const dep = r.dependency_deploy ? ` · deployed at slot ${r.dependency_deploy.last_deploy_slot}` : '';
   const note = r.corpus_note ? `<div class="empty">${esc(r.corpus_note)}</div>` : '';
@@ -5931,7 +5931,7 @@ async function loadWatch() {
     const body = el.querySelector('.rep-body');
     if (body.innerHTML) { body.innerHTML = ''; return; }
     body.innerHTML = '<div class="empty">loading…</div>';
-    try { const d = await api('/dependency_reports/' + el.dataset.report).then(r => r.json()); body.innerHTML = renderReport(d.report); }
+    try { const d = await api('/dependency_reports/' + el.dataset.report).then(r => r.json()); body.innerHTML = renderDepReport(d.report); }
     catch (err) { body.innerHTML = `<div class="empty">${esc(err.message || err)}</div>`; }
   }));
 }
@@ -5977,7 +5977,7 @@ $('watchRun').addEventListener('click', async () => {
     if (!res.ok) throw new Error(await res.text());
     const rep = await res.json();
     $('watchCheckState').textContent = `${((Date.now() - t0) / 1000).toFixed(1)}s`;
-    $('watchResult').innerHTML = renderReport(rep);
+    $('watchResult').innerHTML = renderDepReport(rep);
   } catch (err) {
     $('watchResult').innerHTML = `<div class="dbg-err">${esc(err.message || err)}</div>`;
   } finally { $('watchProgress').classList.add('hidden'); }

@@ -8,7 +8,7 @@
 //! on-chain Anchor IDL or known native layout, balance and token changes, and
 //! compute units per program; (2) **replays** it locally in an embedded SVM
 //! ([LiteSVM](https://docs.rs/litesvm)), re-executing the real program binaries
-//! against the transaction's reconstructed state; and (3) **mutates** — change an
+//! against the transaction's reconstructed state; and (3) **mutates** — change a
 //! account's lamports or data, warp the clock, flip feature gates, then replay
 //! again to ask *"what if this had been different?"*.
 //!
