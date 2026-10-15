@@ -524,12 +524,18 @@ fn scope_for(rpc: Rpc, archive: Option<String>) -> Scope {
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(0);
+    // The stream and the record store hold mainnet history and nothing else.
+    // Asked about a devnet slot, the stream would wait for a mainnet block
+    // tens of millions of slots in the future and sit on its deadline for
+    // every window and key, which is a request that never answers. Devnet and
+    // testnet replay from current state, the same as before the stream existed.
+    let mainnet = is_mainnet_url(&url);
     let scope = Scope::new(url).with_reconstruction_budget(budget);
-    let scope = match svmscope::history::HistoryStream::from_env() {
+    let scope = match svmscope::history::HistoryStream::from_env().filter(|_| mainnet) {
         Some(stream) => scope.with_history_stream(stream),
         None => scope,
     };
-    let scope = match RECORDS.as_ref() {
+    let scope = match RECORDS.as_ref().filter(|_| mainnet) {
         Some(store) => {
             let dynamic: std::sync::Arc<dyn svmscope::records::StateStore> =
                 std::sync::Arc::<svmscope::records::LogStore>::clone(store);
@@ -541,6 +547,23 @@ fn scope_for(rpc: Rpc, archive: Option<String>) -> Scope {
         Some(a) => scope.with_archive(a),
         None => scope,
     }
+}
+
+/// Whether a resolved RPC URL is this instance's mainnet: one of the endpoints
+/// its own configuration maps mainnet to, or, for a caller-supplied endpoint
+/// under the opt-in, a URL that names mainnet and no other cluster. Anything
+/// else gets no mainnet history attached.
+fn is_mainnet_url(url: &str) -> bool {
+    let configured = [
+        Some(rpc_url()),
+        cluster_env_rpc(Some("mainnet")),
+        Some(DEFAULT_RPC.to_string()),
+    ];
+    if configured.iter().flatten().any(|u| u == url) {
+        return true;
+    }
+    let lower = url.to_ascii_lowercase();
+    lower.contains("mainnet") && !lower.contains("devnet") && !lower.contains("testnet")
 }
 
 /// Resolve the archival endpoint for a request. A caller-supplied `archive`
@@ -3510,6 +3533,28 @@ mod tests {
         );
         let without = scope_for(Rpc::Url("https://8.8.8.8/".into()), None);
         assert!(without.archive_url().is_none() || std::env::var("SVMSCOPE_ARCHIVE_URL").is_ok());
+    }
+
+    #[test]
+    fn mainnet_history_never_attaches_to_another_cluster() {
+        // The configured mainnet endpoints are mainnet; the public devnet and
+        // testnet endpoints, a Helius devnet URL and a local validator are not.
+        assert!(is_mainnet_url(&rpc_url()));
+        assert!(is_mainnet_url(DEFAULT_RPC));
+        assert!(is_mainnet_url("https://mainnet.helius-rpc.com/?api-key=x"));
+        for other in [
+            "https://api.devnet.solana.com",
+            "https://api.testnet.solana.com",
+            "https://devnet.helius-rpc.com/?api-key=x",
+            "http://127.0.0.1:8899",
+            "https://8.8.8.8/",
+        ] {
+            assert!(!is_mainnet_url(other), "{other}");
+            assert!(
+                scope_for(Rpc::Url(other.into()), None).records().is_none(),
+                "{other}"
+            );
+        }
     }
 
     #[test]
