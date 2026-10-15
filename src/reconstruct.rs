@@ -19,6 +19,18 @@ use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_request::RpcRequest;
 use std::collections::HashMap;
 
+/// Set a write's replay to the clock it ran under on chain: its own slot and
+/// block time, as `Scope::replay_at` does for the target. `Scope::replay`
+/// alone runs at today's clock, and a program that reads the clock during a
+/// write and stores it (an activation slot, a position's timestamp, an oracle
+/// staleness field) would bake today's time into the rebuilt state.
+fn warp_to_write(replay: &mut crate::Replay, slot: u64, tx: Option<&Value>) {
+    replay.warp_to_slot(slot);
+    if let Some(ts) = tx.and_then(|t| t["blockTime"].as_i64()) {
+        replay.warp_to_timestamp(ts);
+    }
+}
+
 /// One transaction that touched an account, and where it landed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteRef {
@@ -463,13 +475,14 @@ pub fn reconstruct_account_from(
             // prefix of the history, not the state at the slot.
             return Err(Error::ReconstructBudget(max_writes));
         }
-        let replay = match scope.replay(&w.signature) {
+        let mut replay = match scope.replay(&w.signature) {
             Ok(r) => r,
             Err(_) => {
                 skipped += 1;
                 continue;
             }
         };
+        warp_to_write(&mut replay, w.slot, tx.as_ref());
         // Inject the account's running reconstructed state before replaying this
         // write; the very first write starts from whatever the account was
         // (empty at creation).
@@ -765,7 +778,7 @@ impl<'a> Reconstructor<'a> {
         }
 
         self.replays += 1;
-        let replay = match self.scope.replay(&last.signature) {
+        let mut replay = match self.scope.replay(&last.signature) {
             Ok(r) => r,
             Err(_) => {
                 let state = self.scope.account_data(address)?;
@@ -775,6 +788,7 @@ impl<'a> Reconstructor<'a> {
                 });
             }
         };
+        warp_to_write(&mut replay, last.slot, Some(&tx));
         let state = replay.account_after(&muts, address)?;
         Ok(Recon {
             state,
