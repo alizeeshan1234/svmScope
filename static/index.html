@@ -503,6 +503,9 @@ input[type=datetime-local]::-webkit-calendar-picker-indicator:hover { opacity: 1
 .cf-panel { margin-top: var(--s-3); padding: 12px var(--s-3); border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-0); }
 .cf-title { font-size: 12.5px; font-weight: 600; color: var(--text-1); margin-bottom: 9px; display: flex; align-items: center; gap: 6px; }
 .cf-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.patch-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.patch-side { min-width: 0; }
+@media (max-width: 720px) { .patch-grid { grid-template-columns: 1fr; } }
 .cf-select { background: var(--bg-inset); color: var(--text-1); border: 1px solid var(--border-strong); border-radius: var(--r-sm); padding: 4px 8px; font-family: var(--font-mono); font-size: 12px; }
 .cf-card { margin-top: 10px; padding: 10px var(--s-3); border-radius: var(--r-sm); background: var(--green-soft); border: 1px solid var(--green-border); font-size: 13px; color: var(--text-1); }
 .cf-scan-row { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -2272,7 +2275,7 @@ function renderReplayPanel() {
         renderReport(rep, $('replay'));
         // The controls and the what-if box stay available under a shifted
         // clock or flipped gates: they run under the same environment.
-        $('replay').insertAdjacentHTML('beforeend', replayControls(true) + '<div id="certPanel"></div>' + cfBox());
+        $('replay').insertAdjacentHTML('beforeend', replayControls(true) + '<div id="certPanel"></div>' + cfBox() + patchBox());
         wireReplayPanel();
       })
       .catch(e => { $('replay').innerHTML = `<div class="err-box">${esc(errText(e))}</div>`; });
@@ -2283,7 +2286,8 @@ function renderReplayPanel() {
     ? renderReplay(analysis.replay)
     : `${replayControls(true)}
        <div id="certPanel"></div>
-       ${cfBox()}`;
+       ${cfBox()}
+       ${patchBox()}`;
   $('replay').innerHTML = body;
   wireReplayPanel();
 }
@@ -2295,7 +2299,7 @@ function wireReplayPanel() {
   $('runReplay')?.addEventListener('click', async () => {
     const b = $('runReplay'); b.disabled = true; b.innerHTML = icon('play') + 'Replaying…';
     // A what-if answer already on screen survives the re-render.
-    const keep = ['cfResult', 'cfScanResult', 'cfNarrateResult'].map(id => [id, $(id)?.innerHTML || '']);
+    const keep = ['cfResult', 'cfScanResult', 'cfNarrateResult', 'patchResult'].map(id => [id, $(id)?.innerHTML || '']);
     try {
       await ensureBaseline(); renderReplayPanel();
       keep.forEach(([id, html]) => { const el = $(id); if (el && html) el.innerHTML = html; });
@@ -2309,6 +2313,7 @@ function wireReplayPanel() {
   $('cfRun')?.addEventListener('click', runCounterfactual);
   $('cfScanAll')?.addEventListener('click', runScan);
   $('cfNarrate')?.addEventListener('click', runNarrate);
+  $('patchRun')?.addEventListener('click', runPatch);
 }
 // The breaking-point tools look for what would make a passing transaction
 // fail. When it already fails, say so above their answer instead of letting
@@ -2443,6 +2448,68 @@ function cfBox() {
     <div id="cfNarrateResult"></div>
   </div>`;
 }
+// Run with your build: swap one program in this transaction for a .so the
+// reader uploads and replay both on identical state. The question an
+// undeployed fix needs answered: what would this transaction have done?
+const NATIVE_PROGRAMS = new Set([
+  '11111111111111111111111111111111', 'ComputeBudget111111111111111111111111111111',
+  'Vote111111111111111111111111111111111111111', 'Stake11111111111111111111111111111111111111',
+  'Config1111111111111111111111111111111111111', 'AddressLookupTab1e1111111111111111111111111',
+  'Ed25519SigVerify111111111111111111111111111', 'KeccakSecp256k11111111111111111111111111111',
+  'Secp256r1SigVerify1111111111111111111111111',
+]);
+function patchBox() {
+  const progs = [...new Set((analysis?.compute || []).map(r => r.program))].filter(p => p && !NATIVE_PROGRAMS.has(p));
+  if (!progs.length) return '';
+  const opts = progs.map(p => { const i = progInfo(p); return `<option value="${esc(p)}">${esc(i.known ? `${i.name} · ${short(p)}` : short(p))}</option>`; }).join('');
+  return `<div class="cf-panel" id="patchPanel">
+    <div class="cf-title"><svg class="ic" aria-hidden="true"><use href="#i-replay"/></svg>Run with your build</div>
+    <div class="cf-row">
+      <span class="cu-note">replace</span>
+      <select id="patchProgram" class="cf-select">${opts}</select>
+      <span class="cu-note">with</span>
+      <input type="file" id="patchFile" accept=".so,application/octet-stream" />
+      <button class="btn ghost sm" id="patchRun">Compare</button>
+    </div>
+    <div class="cu-note" style="margin-top:6px">Upload the <code>.so</code> that <code>cargo build-sbf</code> writes. This transaction runs twice on identical state, once with the program as deployed and once with your build, so you see what your change would have done here before you ship it.</div>
+    <div id="patchResult"></div>
+  </div>`;
+}
+async function runPatch() {
+  const program = $('patchProgram')?.value, file = $('patchFile')?.files?.[0], out = $('patchResult');
+  if (!program || !out) return;
+  if (!file) { out.innerHTML = '<div class="err-box">choose the .so file first</div>'; return; }
+  const b = $('patchRun'); b.disabled = true;
+  out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>replaying with the deployed program and with your build…</div>';
+  try {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    if (buf.length < 4 || buf[0] !== 0x7f || buf[1] !== 0x45 || buf[2] !== 0x4c || buf[3] !== 0x46) throw new Error("that file is not a program: expected the .so that cargo build-sbf writes");
+    let bin = ''; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+    const res = await api('/patch_compare', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signature: currentSig, program, so_b64: btoa(bin), mutations: [], time_travel: timeTravel, features: activeFeatures, ...atSlotParam(), ...clusterParams() }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    out.innerHTML = renderPatch(await res.json(), file.name);
+  } catch (e) { out.innerHTML = `<div class="err-box">${esc(errText(e))}</div>`; }
+  finally { b.disabled = false; }
+}
+function renderPatch(c, fileName) {
+  const side = (label, r) => {
+    const badge = r.success ? '<span class="badge ok"><span class="b-dot"></span>success</span>' : '<span class="badge fail"><span class="b-dot"></span>failed</span>';
+    const err = r.error ? `<div class="err-box">${esc(r.error_name ? `${r.error_name} — ${r.error}` : r.error)}</div>` : '';
+    const logs = r.logs?.length ? `<details style="margin-top:6px"><summary class="cu-note">logs (${r.logs.length})</summary><div class="logs">${renderLogs(r.logs)}</div></details>` : '';
+    return `<div class="patch-side"><div class="cf-title">${esc(label)}</div><div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${err}${logs}</div>`;
+  };
+  const d = c.after.compute_units - c.before.compute_units;
+  const verdict = c.before.success !== c.after.success
+    ? (c.after.success ? 'Your build makes this transaction succeed.' : 'Your build makes this transaction fail.')
+    : (c.before.error || '') !== (c.after.error || '') ? 'Same outcome, different error.'
+    : d !== 0 ? `Same outcome, ${d > 0 ? '+' : ''}${fmt(d)} compute units.`
+    : 'No observable change: same outcome, same compute.';
+  return `<div class="cu-note" style="margin:10px 0 6px"><b>${esc(verdict)}</b></div>
+    <div class="patch-grid">${side('As deployed', c.before)}${side(`Your build · ${fileName}`, c.after)}</div>`;
+}
 function renderReplay(r) {
   // A replay with no slot ran against today's on-chain state, which has moved
   // on since the transaction landed; say so in the badge itself.
@@ -2460,7 +2527,8 @@ function renderReplay(r) {
   return `<div class="replay-head">${badge}<span class="cu-note"><b>${fmt(r.compute_units)}</b> compute units</span></div>${note}${err}${logs}
     ${replayControls(false)}
     <div id="certPanel"></div>
-    ${cfBox()}`;
+    ${cfBox()}
+    ${patchBox()}`;
 }
 
 // Counterfactual search — binary-search an account's balance for the outcome

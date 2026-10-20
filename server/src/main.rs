@@ -1545,6 +1545,96 @@ async fn simulate_handler(
     }
 }
 
+/// A program binary larger than any deployable Solana program (the loader caps
+/// programdata at 10 MiB); anything bigger is not a program.
+const MAX_PROGRAM_BYTES: usize = 16 * 1024 * 1024;
+
+/// POST body for /patch_compare.
+#[derive(Deserialize)]
+struct PatchRequest {
+    signature: String,
+    /// The program whose binary to swap; it must be one the transaction loads.
+    program: String,
+    /// The replacement program, the `.so` that `cargo build-sbf` writes, base64.
+    so_b64: String,
+    #[serde(default)]
+    slot: Option<u64>,
+    #[serde(default)]
+    mutations: Vec<MutationInput>,
+    #[serde(default)]
+    time_travel: TimeTravel,
+    #[serde(default)]
+    features: Vec<svmscope::spec::FeatureInput>,
+    #[serde(default)]
+    cluster: Option<String>,
+    #[serde(default)]
+    rpc: Option<String>,
+    #[serde(default)]
+    relay: Option<String>,
+    #[serde(default)]
+    archive: Option<String>,
+}
+
+/// POST /patch_compare — replay a transaction twice on identical state, once
+/// with the program as deployed and once with a build the caller uploads, and
+/// return both outcomes. The undeployed-build question: "what would this
+/// transaction have done with my fix in it?"
+async fn patch_compare_handler(
+    Json(req): Json<PatchRequest>,
+) -> Result<Json<svmscope::PatchComparison>, (StatusCode, String)> {
+    use base64::Engine as _;
+    cap(req.mutations.len(), MAX_MUTATIONS_PER_REQUEST, "mutations")?;
+    let elf = base64::engine::general_purpose::STANDARD
+        .decode(req.so_b64.as_bytes())
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("program file: {e}")))?;
+    if elf.len() > MAX_PROGRAM_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "program file too large".into(),
+        ));
+    }
+    if !elf.starts_with(b"\x7fELF") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "that file is not a program: expected the .so that `cargo build-sbf` writes".into(),
+        ));
+    }
+    let mutations: Vec<Mutation> = req
+        .mutations
+        .into_iter()
+        .map(MutationInput::into_mutation)
+        .collect::<Result<_, _>>()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let features = svmscope::spec::feature_toggles(req.features)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    let (url, archive) = endpoints_for(
+        req.cluster.as_deref(),
+        req.rpc.as_deref(),
+        req.archive.as_deref(),
+        req.relay.as_deref(),
+    )?;
+    let result = tokio::task::spawn_blocking(
+        move || -> Result<svmscope::PatchComparison, svmscope::Error> {
+            let scope = scope_for(url, archive);
+            let mut replay = replay_for(&scope, &req.signature, req.slot)?;
+            replay.set_time_travel(req.time_travel);
+            replay.set_features(features);
+            replay.compare_patch(&req.program, elf, &mutations)
+        },
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("task error: {e}"),
+        )
+    })?;
+    match result {
+        Ok(cmp) => Ok(Json(cmp)),
+        Err(e) => Err(lib_err(e)),
+    }
+}
+
 /// POST /simulate_suite — run a suite of test scenarios, return per-scenario pass/fail.
 async fn suite_handler(
     Json(req): Json<SuiteRequest>,
@@ -3030,6 +3120,7 @@ async fn api_index() -> Json<serde_json::Value> {
             "POST /bundle":               "{ bundle | signatures[], mutations[{ step, mutations[] }] } — the same report with per-step what-if mutations; an edit at one step cascades into every step after it. Answers 202 until the sequence has been built by a GET; after that an edit costs milliseconds, because the per-step worlds are already in memory.",
             "POST /bundle/accounts":      "{ bundle | signatures[], step, mutations[] } — every account that step can be asked about, decoded as the step sees them: current values, field names and offsets, for building an editor. Answers 202 until the sequence has been built by a GET.",
             "POST /bundle/trace":         "{ bundle | signatures[], step, mutations[{ step, mutations[] }] } — step debugger for one step of a bundle, with every step before it already run. Answers 202 until the sequence has been built by a GET.",
+            "POST /patch_compare":        "{ signature, program, so_b64, slot?, mutations[]?, time_travel?, features? } — replay with the program as deployed and with an uploaded build of it (.so, base64), on identical state; returns both outcomes.",
             "POST /profile":              "{ signature, mutations[]?, time_travel?, features?, symbols[{program, elf_b64}]? } — compute profiler: every BPF instruction attributed to functions, syscalls and call stacks per program frame; symbols name a program's functions from its .debug file.",
             "GET  /profile/{signature}":  "The as-it-happened compute profile, no symbols, cacheable.",
             "GET  /freeze/{signature}":   "Capture a self-contained fixture for deterministic, offline replay.",
@@ -3331,6 +3422,12 @@ async fn main() {
             get(analyze_handler).post(analyze_post_handler),
         )
         .route("/simulate", post(simulate_handler))
+        .route(
+            "/patch_compare",
+            post(patch_compare_handler).layer(axum::extract::DefaultBodyLimit::max(
+                MAX_PROGRAM_BYTES * 4 / 3 + 1024 * 1024,
+            )),
+        )
         .route("/simulate_suite", post(suite_handler))
         .route("/preflight", post(preflight_handler))
         .route("/preflight_report", post(preflight_report_handler))
