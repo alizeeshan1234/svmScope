@@ -2479,9 +2479,18 @@ function patchBox() {
       <input type="file" id="patchFile" accept=".so,application/octet-stream" />
       <button class="btn ghost sm" id="patchRun">Compare</button>
     </div>
-    <div class="cu-note" style="margin-top:6px">Upload the <code>.so</code> that <code>cargo build-sbf</code> writes. This transaction runs twice on identical state, once with the program as deployed and once with your build, so you see what your change would have done here before you ship it.</div>
+    <div class="cu-note" style="margin-top:6px">Upload the <code>.so</code> that <code>cargo build-sbf</code> writes. This transaction runs twice on the state it saw when it landed, once with the program as deployed and once with your build, so you see what your change would have done here before you ship it.</div>
     <div id="patchResult"></div>
   </div>`;
+}
+// The world the comparison runs in: the slot the reader picked, or else the
+// transaction's own slot, so both sides see the state the transaction saw
+// when it landed rather than today's.
+function patchSlot() {
+  const picked = atSlotParam();
+  if (picked.slot != null) return picked;
+  const landed = analysis?.landed_slot ?? analysis?.overview?.slot;
+  return landed != null ? { slot: landed } : {};
 }
 async function runPatch() {
   const program = $('patchProgram')?.value, file = $('patchFile')?.files?.[0], out = $('patchResult');
@@ -2495,7 +2504,7 @@ async function runPatch() {
     let bin = ''; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
     const res = await api('/patch_compare', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, program, so_b64: btoa(bin), mutations: [], time_travel: timeTravel, features: activeFeatures, ...atSlotParam(), ...clusterParams() }),
+      body: JSON.stringify({ signature: currentSig, program, so_b64: btoa(bin), mutations: [], time_travel: timeTravel, features: activeFeatures, ...patchSlot(), ...clusterParams() }),
     });
     if (!res.ok) throw new Error(await res.text());
     out.innerHTML = renderPatch(await res.json(), file.name);
@@ -2515,7 +2524,11 @@ function renderPatch(c, fileName) {
     : (c.before.error || '') !== (c.after.error || '') ? 'Same outcome, different error.'
     : d !== 0 ? `Same outcome, ${d > 0 ? '+' : ''}${fmt(d)} compute units.`
     : 'No observable change: same outcome, same compute.';
-  return `<div class="cu-note" style="margin:10px 0 6px"><b>${esc(verdict)}</b></div>
+  const onchain = analysis?.overview?.success;
+  const match = onchain == null ? '' : c.before.success === onchain
+    ? `<div class="cu-note">The deployed side matches the chain (${onchain ? 'succeeded' : 'failed'} on mainnet), so the comparison is against the real outcome.</div>`
+    : `<div class="cu-note">The deployed side does not match the chain (${onchain ? 'succeeded' : 'failed'} on mainnet): some state at this slot could not be rebuilt exactly. An archive endpoint makes it exact.</div>`;
+  return `<div class="cu-note" style="margin:10px 0 6px"><b>${esc(verdict)}</b></div>${match}
     <div class="patch-grid">${side('As deployed', c.before)}${side(`Your build · ${fileName}`, c.after)}</div>`;
 }
 function renderReplay(r) {
