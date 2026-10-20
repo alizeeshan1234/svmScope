@@ -3996,6 +3996,22 @@ impl Replay {
         })
     }
 
+    /// Run `program_id` from `elf` in this replay, whether or not it exists on
+    /// chain: the way to simulate a program before it is deployed. An address
+    /// the chain already has is replaced outright. Errors if `elf` is not an
+    /// ELF file.
+    pub fn load_program(&mut self, program_id: &str, elf: Vec<u8>) -> Result<()> {
+        if !elf.starts_with(b"\x7fELF") {
+            return Err(Error::InvalidSpec(format!(
+                "the binary for {program_id} is not an ELF file"
+            )));
+        }
+        let address = Address::from_str(program_id)
+            .map_err(|_| Error::InvalidSpec(format!("{program_id} is not a valid address")))?;
+        self.ctx.set_program(address, elf);
+        Ok(())
+    }
+
     /// Replay the transaction against the original program and against
     /// `patched_elf`, and report the difference — the pre-deployment gate "does
     /// this patch change what really happened?". `mutations` apply to both runs.

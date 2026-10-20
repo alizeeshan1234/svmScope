@@ -1278,6 +1278,12 @@ input.derived { border-color: var(--green-border); color: var(--green); }
             <input id="buildProg" class="finput mono" spellcheck="false" placeholder="program address…" />
             <button class="btn ghost sm" id="loadIx">Load instructions</button>
           </div>
+          <div class="buildhint" style="margin-top:8px">
+            <label>Not deployed, or testing a new build? Run it from its <code>.so</code>:
+              <input type="file" id="buildSo" accept=".so,application/octet-stream" /></label>
+            <button class="rst hidden" id="buildSoClear">remove</button>
+            <div id="buildSoState" class="dim"></div>
+          </div>
           <div id="ixHint" class="buildhint">
             Pick any Anchor program and we'll list its instructions — fill in the accounts
             (PDAs derive themselves) and simulate, no serialized transaction needed.
@@ -1289,7 +1295,7 @@ input.derived { border-color: var(--green-border); color: var(--green); }
             </div>
           </div>
           <div id="idlFallback" class="hidden" style="margin-top:14px">
-            <label class="flabel">No on-chain IDL — paste the program's Anchor IDL JSON</label>
+            <label class="flabel">No on-chain IDL (or not deployed) — paste the program's Anchor IDL JSON</label>
             <textarea id="idlJson" class="ta" spellcheck="false"
               placeholder="paste the IDL JSON — e.g. the contents of target/idl/&lt;program&gt;.json"></textarea>
             <button class="btn ghost sm" id="useIdl" style="margin-top:8px">Load instructions from IDL</button>
@@ -1924,7 +1930,9 @@ function mintInfo(mint) {
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 function bs58decode(str) {
   const map = {}; for (let i = 0; i < B58.length; i++) map[B58[i]] = i;
-  const bytes = [0];
+  // Start empty: a leading '1' is a zero byte, added below, and an all-'1'
+  // address (the System Program) is exactly that many zero bytes, not one more.
+  const bytes = [];
   for (const ch of str.trim()) {
     if (!(ch in map)) throw new Error('invalid base58 character: ' + ch);
     let carry = map[ch];
@@ -4038,6 +4046,26 @@ function onClockChanged() {
   if (analysis && !$('out').classList.contains('hidden')) renderReplayPanel();
 }
 
+// The uploaded .so, if any, runs as the program in the Program ID box: one
+// that was never deployed, or a new build of one that was.
+async function buildPrograms() {
+  const file = $('buildSo')?.files?.[0];
+  if (!file) return [];
+  const program = $('buildProg').value.trim();
+  if (!program) throw new Error('enter the program ID your build should run as');
+  const buf = new Uint8Array(await file.arrayBuffer());
+  if (buf.length < 4 || buf[0] !== 0x7f || buf[1] !== 0x45 || buf[2] !== 0x4c || buf[3] !== 0x46) throw new Error('that file is not a program: expected the .so that cargo build-sbf writes');
+  let bin = ''; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+  return [{ program, so_b64: btoa(bin) }];
+}
+function showBuildSo() {
+  const file = $('buildSo')?.files?.[0];
+  $('buildSoClear').classList.toggle('hidden', !file);
+  $('buildSoState').textContent = file ? `Simulations run ${file.name} as this program instead of anything on chain.` : '';
+  // A program that isn't deployed has no on-chain IDL: offer the paste box straight away.
+  if (file) $('idlFallback').classList.remove('hidden');
+}
+
 async function runPreflight() {
   const btn = $('runSim'); btn.disabled = true;
   $('simOut').innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>simulating against live state…</div>';
@@ -4045,9 +4073,10 @@ async function runPreflight() {
     const building = !$('tabBuild').classList.contains('hidden');
     const b64 = building ? buildTxB64() : $('txB64').value.trim();
     if (!b64) throw new Error('paste a base64 transaction first');
+    const programs = building ? await buildPrograms() : [];
     const res = await api('/preflight_report', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transaction: b64, mutations: [], time_travel: timeTravel, features: activeFeatures, ...clusterParams() }),
+      body: JSON.stringify({ transaction: b64, mutations: [], time_travel: timeTravel, features: activeFeatures, programs, ...clusterParams() }),
     });
     if (!res.ok) throw new Error(await res.text());
     renderReport(await res.json(), $('simOut'));
@@ -4296,6 +4325,8 @@ $('closeSim').addEventListener('click', () => showSim(false));
 $('runSim').addEventListener('click', runPreflight);
 $('loadIx').addEventListener('click', loadInstructions);
 $('useIdl').addEventListener('click', loadInstructionsFromIdl);
+$('buildSo').addEventListener('change', showBuildSo);
+$('buildSoClear').addEventListener('click', () => { $('buildSo').value = ''; showBuildSo(); });
 document.querySelectorAll('.trychip').forEach(chip => chip.addEventListener('click', async () => {
   $('cluster').value = chip.dataset.cluster || 'devnet';
   $('buildProg').value = chip.dataset.prog;

@@ -782,6 +782,13 @@ impl ReplayContext {
         self.loaded.push((address, Loaded::Program(elf)));
     }
 
+    /// Load `elf` as the program at `address`, whatever the chain holds there:
+    /// a program that was never deployed, or a deployed one replaced outright.
+    pub(crate) fn set_program(&mut self, address: Address, elf: Vec<u8>) {
+        self.loaded.retain(|(a, _)| *a != address);
+        self.loaded.push((address, Loaded::Program(elf)));
+    }
+
     /// Whether `address` is loaded in any form.
     pub(crate) fn is_loaded(&self, address: &Address) -> bool {
         self.loaded.iter().any(|(a, _)| a == address)

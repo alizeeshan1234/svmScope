@@ -1549,6 +1549,50 @@ async fn simulate_handler(
 /// programdata at 10 MiB); anything bigger is not a program.
 const MAX_PROGRAM_BYTES: usize = 16 * 1024 * 1024;
 
+/// Most programs one request may upload. A transaction that needs more
+/// undeployed programs than this is not a pre-flight check.
+const MAX_PROGRAM_UPLOADS: usize = 4;
+
+/// A program binary the caller supplies: run `program` from this `.so`.
+#[derive(Deserialize)]
+struct ProgramUpload {
+    program: String,
+    so_b64: String,
+}
+
+/// Decode an uploaded `.so`, refusing anything too large or not an ELF file.
+fn decode_program(so_b64: &str) -> Result<Vec<u8>, (StatusCode, String)> {
+    use base64::Engine as _;
+    let elf = base64::engine::general_purpose::STANDARD
+        .decode(so_b64.as_bytes())
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("program file: {e}")))?;
+    if elf.len() > MAX_PROGRAM_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "program file too large".into(),
+        ));
+    }
+    if !elf.starts_with(b"\x7fELF") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "that file is not a program: expected the .so that `cargo build-sbf` writes".into(),
+        ));
+    }
+    Ok(elf)
+}
+
+/// Uploaded programs, decoded: (program address, ELF).
+type Programs = Vec<(String, Vec<u8>)>;
+
+/// Every upload decoded, keyed by program address.
+fn decode_programs(uploads: Vec<ProgramUpload>) -> Result<Programs, (StatusCode, String)> {
+    cap(uploads.len(), MAX_PROGRAM_UPLOADS, "programs")?;
+    uploads
+        .into_iter()
+        .map(|u| Ok((u.program, decode_program(&u.so_b64)?)))
+        .collect()
+}
+
 /// POST body for /patch_compare.
 #[derive(Deserialize)]
 struct PatchRequest {
@@ -1582,23 +1626,8 @@ struct PatchRequest {
 async fn patch_compare_handler(
     Json(req): Json<PatchRequest>,
 ) -> Result<Json<svmscope::PatchComparison>, (StatusCode, String)> {
-    use base64::Engine as _;
     cap(req.mutations.len(), MAX_MUTATIONS_PER_REQUEST, "mutations")?;
-    let elf = base64::engine::general_purpose::STANDARD
-        .decode(req.so_b64.as_bytes())
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("program file: {e}")))?;
-    if elf.len() > MAX_PROGRAM_BYTES {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "program file too large".into(),
-        ));
-    }
-    if !elf.starts_with(b"\x7fELF") {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "that file is not a program: expected the .so that `cargo build-sbf` writes".into(),
-        ));
-    }
+    let elf = decode_program(&req.so_b64)?;
     let mutations: Vec<Mutation> = req
         .mutations
         .into_iter()
@@ -1698,6 +1727,10 @@ async fn suite_handler(
 struct PreflightRequest {
     /// base64 wire bytes of an (unsigned) VersionedTransaction.
     transaction: String,
+    /// Programs to run from an uploaded `.so` instead of the chain: one that
+    /// was never deployed, or a new build of one that was.
+    #[serde(default)]
+    programs: Vec<ProgramUpload>,
     #[serde(default)]
     mutations: Vec<MutationInput>,
     /// Optional clock warp — test time-gated logic without waiting.
@@ -1739,8 +1772,12 @@ async fn preflight_handler(
         req.archive.as_deref(),
         req.relay.as_deref(),
     )?;
+    let programs = decode_programs(req.programs)?;
     let result = tokio::task::spawn_blocking(move || -> Result<ReplayResult, svmscope::Error> {
-        let replay = scope_for(url, archive).preflight(&req.transaction)?;
+        let mut replay = scope_for(url, archive).preflight(&req.transaction)?;
+        for (program, elf) in programs {
+            replay.load_program(&program, elf)?;
+        }
         Ok(replay.simulate(&mutations)?.result)
     })
     .await
@@ -1832,6 +1869,7 @@ async fn preflight_report_handler(
         req.relay.as_deref(),
     )?;
     let tt = req.time_travel.clone();
+    let programs = decode_programs(req.programs)?;
     let result = tokio::task::spawn_blocking(
         move || -> Result<svmscope::SimulationReport, svmscope::Error> {
             let scope = scope_for(url, archive);
@@ -1841,6 +1879,9 @@ async fn preflight_report_handler(
             // when the simulation itself fails.
             let mut overview = scope.preflight_overview(&tx);
             let mut replay = scope.preflight_tx(tx)?;
+            for (program, elf) in programs {
+                replay.load_program(&program, elf)?;
+            }
             replay.set_time_travel(tt);
             replay.set_features(features);
             let mut report = replay.simulate(&mutations)?.into_report();
@@ -3113,7 +3154,7 @@ async fn api_index() -> Json<serde_json::Value> {
             "GET  /replay/{signature}":   "Re-execute the transaction locally against reconstructed pre-state.",
             "POST /simulate":             "{ signature, mutations[], time_travel?, features? } — replay with what-if account mutations, an optional clock warp, and optional runtime feature-gate toggles.",
             "POST /simulate_suite":       "{ signature, scenarios[], time_travel?, features? } — run a suite of scenarios with outcome + state assertions, under optional feature-gate toggles.",
-            "POST /preflight":            "{ transaction, mutations[] } — simulate an UNSIGNED transaction against current state before sending.",
+            "POST /preflight":            "{ transaction, mutations[], programs[{program, so_b64}]? } — simulate an UNSIGNED transaction against current state before sending; programs run from an uploaded .so, deployed or not.",
             "POST /trace":                "{ signature | transaction, mutations[], time_travel?, features? } — step debugger: every instruction and CPI with decoded args, per-step account diffs, and the failing step.",
             "GET  /trace/{signature}":    "The same trace with no mutations, cacheable.",
             "GET  /bundle/{id_or_sig}":   "Bundle replay: a Jito bundle id, a signature inside one, or a comma-separated list, replayed in order on one SVM and compared with the chain step by step. Cacheable.",
@@ -3124,7 +3165,7 @@ async fn api_index() -> Json<serde_json::Value> {
             "POST /profile":              "{ signature, mutations[]?, time_travel?, features?, symbols[{program, elf_b64}]? } — compute profiler: every BPF instruction attributed to functions, syscalls and call stacks per program frame; symbols name a program's functions from its .debug file.",
             "GET  /profile/{signature}":  "The as-it-happened compute profile, no symbols, cacheable.",
             "GET  /freeze/{signature}":   "Capture a self-contained fixture for deterministic, offline replay.",
-            "POST /preflight_report":     "{ transaction, mutations[] } — preflight as an HTML report.",
+            "POST /preflight_report":     "{ transaction, mutations[], programs[{program, so_b64}]? } — preflight with the outcome explained and the account diff.",
             "POST /replay_report":        "{ signature, scenarios[] } — a suite run as an HTML report.",
             "GET  /replay_at_slot/{signature}": "Replay against state reconstructed at the transaction's slot, with a per-account fidelity certificate.",
             "GET  /replay_at/{signature}?slot=N": "Replay against the world as of any slot (exact for every account recorded across it, labelled otherwise), with the same certificate.",
@@ -3429,8 +3470,18 @@ async fn main() {
             )),
         )
         .route("/simulate_suite", post(suite_handler))
-        .route("/preflight", post(preflight_handler))
-        .route("/preflight_report", post(preflight_report_handler))
+        .route(
+            "/preflight",
+            post(preflight_handler).layer(axum::extract::DefaultBodyLimit::max(
+                MAX_PROGRAM_UPLOADS * MAX_PROGRAM_BYTES * 4 / 3 + 1024 * 1024,
+            )),
+        )
+        .route(
+            "/preflight_report",
+            post(preflight_report_handler).layer(axum::extract::DefaultBodyLimit::max(
+                MAX_PROGRAM_UPLOADS * MAX_PROGRAM_BYTES * 4 / 3 + 1024 * 1024,
+            )),
+        )
         .route("/replay_report", post(replay_report_handler))
         .route("/bundle", post(bundle_post_handler))
         .route("/bundle/trace", post(bundle_trace_handler))
