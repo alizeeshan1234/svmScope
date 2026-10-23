@@ -1600,7 +1600,12 @@ struct PatchRequest {
     /// The program whose binary to swap; it must be one the transaction loads.
     program: String,
     /// The replacement program, the `.so` that `cargo build-sbf` writes, base64.
-    so_b64: String,
+    #[serde(default)]
+    so_b64: Option<String>,
+    /// Instead of an upload: the program as deployed today, so history
+    /// replays against the current binary. Exactly one of the two.
+    #[serde(default)]
+    current: bool,
     #[serde(default)]
     slot: Option<u64>,
     #[serde(default)]
@@ -1619,15 +1624,34 @@ struct PatchRequest {
     archive: Option<String>,
 }
 
+/// A patch comparison plus where the "as it was" side's binary came from:
+/// the program at that slot, or today's when the old one could not be
+/// loaded, in which case both sides ran the same code.
+#[derive(Serialize)]
+struct PatchResponse {
+    #[serde(flatten)]
+    comparison: svmscope::PatchComparison,
+    as_it_was: Option<svmscope::Provenance>,
+}
+
 /// POST /patch_compare — replay a transaction twice on identical state, once
 /// with the program as deployed and once with a build the caller uploads, and
 /// return both outcomes. The undeployed-build question: "what would this
 /// transaction have done with my fix in it?"
 async fn patch_compare_handler(
     Json(req): Json<PatchRequest>,
-) -> Result<Json<svmscope::PatchComparison>, (StatusCode, String)> {
+) -> Result<Json<PatchResponse>, (StatusCode, String)> {
     cap(req.mutations.len(), MAX_MUTATIONS_PER_REQUEST, "mutations")?;
-    let elf = decode_program(&req.so_b64)?;
+    let upload =
+        match (&req.so_b64, req.current) {
+            (Some(b64), false) => Some(decode_program(b64)?),
+            (None, true) => None,
+            _ => return Err((
+                StatusCode::BAD_REQUEST,
+                "send either so_b64 (your build) or current: true (the program as deployed today)"
+                    .into(),
+            )),
+        };
     let mutations: Vec<Mutation> = req
         .mutations
         .into_iter()
@@ -1642,15 +1666,27 @@ async fn patch_compare_handler(
         req.archive.as_deref(),
         req.relay.as_deref(),
     )?;
-    let result = tokio::task::spawn_blocking(
-        move || -> Result<svmscope::PatchComparison, svmscope::Error> {
-            let scope = scope_for(url, archive);
-            let mut replay = replay_for(&scope, &req.signature, req.slot)?;
-            replay.set_time_travel(req.time_travel);
-            replay.set_features(features);
-            replay.compare_patch(&req.program, elf, &mutations)
-        },
-    )
+    let result = tokio::task::spawn_blocking(move || -> Result<PatchResponse, svmscope::Error> {
+        let scope = scope_for(url, archive);
+        let mut replay = replay_for(&scope, &req.signature, req.slot)?;
+        replay.set_time_travel(req.time_travel);
+        replay.set_features(features);
+        let elf = match upload {
+            Some(elf) => elf,
+            None => scope.current_program_elf(&req.program)?,
+        };
+        let as_it_was = replay
+            .certificate()
+            .accounts
+            .into_iter()
+            .find(|a| a.address == req.program)
+            .map(|a| a.source);
+        let comparison = replay.compare_patch(&req.program, elf, &mutations)?;
+        Ok(PatchResponse {
+            comparison,
+            as_it_was,
+        })
+    })
     .await
     .map_err(|e| {
         (
@@ -3161,7 +3197,7 @@ async fn api_index() -> Json<serde_json::Value> {
             "POST /bundle":               "{ bundle | signatures[], mutations[{ step, mutations[] }] } — the same report with per-step what-if mutations; an edit at one step cascades into every step after it. Answers 202 until the sequence has been built by a GET; after that an edit costs milliseconds, because the per-step worlds are already in memory.",
             "POST /bundle/accounts":      "{ bundle | signatures[], step, mutations[] } — every account that step can be asked about, decoded as the step sees them: current values, field names and offsets, for building an editor. Answers 202 until the sequence has been built by a GET.",
             "POST /bundle/trace":         "{ bundle | signatures[], step, mutations[{ step, mutations[] }] } — step debugger for one step of a bundle, with every step before it already run. Answers 202 until the sequence has been built by a GET.",
-            "POST /patch_compare":        "{ signature, program, so_b64, slot?, mutations[]?, time_travel?, features? } — replay with the program as deployed and with an uploaded build of it (.so, base64), on identical state; returns both outcomes.",
+            "POST /patch_compare":        "{ signature, program, so_b64 | current: true, slot?, mutations[]?, time_travel?, features? } — replay with the program as it was and with an uploaded build of it (.so, base64) or the version deployed today, on identical state; returns both outcomes.",
             "POST /profile":              "{ signature, mutations[]?, time_travel?, features?, symbols[{program, elf_b64}]? } — compute profiler: every BPF instruction attributed to functions, syscalls and call stacks per program frame; symbols name a program's functions from its .debug file.",
             "GET  /profile/{signature}":  "The as-it-happened compute profile, no symbols, cacheable.",
             "GET  /freeze/{signature}":   "Capture a self-contained fixture for deterministic, offline replay.",

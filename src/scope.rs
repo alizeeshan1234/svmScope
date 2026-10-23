@@ -1079,6 +1079,18 @@ impl Scope {
         self.program_elf_at_from(&data, key, slot)
     }
 
+    /// The binary `program_id` runs today, from this scope's RPC: the
+    /// programdata account's ELF for an upgradeable program, the account
+    /// itself for the legacy loaders. Pair it with [`Replay::compare_patch`]
+    /// to replay history with the program as currently deployed.
+    pub fn current_program_elf(&self, program_id: &str) -> Result<Vec<u8>> {
+        crate::replay::fetch_program_elf(&self.client, program_id).ok_or_else(|| {
+            Error::InvalidSpec(format!(
+                "{program_id} has no deployed program binary on this cluster"
+            ))
+        })
+    }
+
     /// An upgradeable program's binary as deployed before `slot`, with that
     /// deploy's slot, from the account-changes stream; `None` without the
     /// stream or when the program's history does not reach back that far.

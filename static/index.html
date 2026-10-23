@@ -2322,6 +2322,7 @@ function wireReplayPanel() {
   $('cfScanAll')?.addEventListener('click', runScan);
   $('cfNarrate')?.addEventListener('click', runNarrate);
   $('patchRun')?.addEventListener('click', runPatch);
+  $('patchSource')?.addEventListener('change', () => $('patchFile')?.classList.toggle('hidden', $('patchSource').value !== 'file'));
 }
 // The breaking-point tools look for what would make a passing transaction
 // fail. When it already fails, say so above their answer instead of letting
@@ -2476,10 +2477,14 @@ function patchBox() {
       <span class="cu-note">replace</span>
       <select id="patchProgram" class="cf-select">${opts}</select>
       <span class="cu-note">with</span>
-      <input type="file" id="patchFile" accept=".so,application/octet-stream" />
+      <select id="patchSource" class="cf-select">
+        <option value="current">the version deployed today</option>
+        <option value="file">your build (.so)</option>
+      </select>
+      <input type="file" id="patchFile" class="hidden" accept=".so,application/octet-stream" />
       <button class="btn ghost sm" id="patchRun">Compare</button>
     </div>
-    <div class="cu-note" style="margin-top:6px">Upload the <code>.so</code> that <code>cargo build-sbf</code> writes. This transaction runs twice on the state it saw when it landed, once with the program as deployed and once with your build, so you see what your change would have done here before you ship it.</div>
+    <div class="cu-note" style="margin-top:6px">This transaction runs twice on the state it saw when it landed: once with the program as it was then, and once with the version deployed today or the <code>.so</code> that <code>cargo build-sbf</code> writes. Everything else stays historical, so the only difference is the program.</div>
     <div id="patchResult"></div>
   </div>`;
 }
@@ -2493,25 +2498,32 @@ function patchSlot() {
   return landed != null ? { slot: landed } : {};
 }
 async function runPatch() {
-  const program = $('patchProgram')?.value, file = $('patchFile')?.files?.[0], out = $('patchResult');
+  const program = $('patchProgram')?.value, out = $('patchResult');
   if (!program || !out) return;
-  if (!file) { out.innerHTML = '<div class="err-box">choose the .so file first</div>'; return; }
+  const today = $('patchSource')?.value !== 'file';
+  const file = $('patchFile')?.files?.[0];
+  if (!today && !file) { out.innerHTML = '<div class="err-box">choose the .so file first</div>'; return; }
   const b = $('patchRun'); b.disabled = true;
-  out.innerHTML = '<div class="status" style="text-align:left"><span class="spinner"></span>replaying with the deployed program and with your build…</div>';
+  out.innerHTML = `<div class="status" style="text-align:left"><span class="spinner"></span>replaying with the program as it was and with ${today ? 'the version deployed today' : 'your build'}…</div>`;
   try {
-    const buf = new Uint8Array(await file.arrayBuffer());
-    if (buf.length < 4 || buf[0] !== 0x7f || buf[1] !== 0x45 || buf[2] !== 0x4c || buf[3] !== 0x46) throw new Error("that file is not a program: expected the .so that cargo build-sbf writes");
-    let bin = ''; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+    let source;
+    if (today) source = { current: true };
+    else {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      if (buf.length < 4 || buf[0] !== 0x7f || buf[1] !== 0x45 || buf[2] !== 0x4c || buf[3] !== 0x46) throw new Error("that file is not a program: expected the .so that cargo build-sbf writes");
+      let bin = ''; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+      source = { so_b64: btoa(bin) };
+    }
     const res = await api('/patch_compare', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature: currentSig, program, so_b64: btoa(bin), mutations: [], time_travel: timeTravel, features: activeFeatures, ...patchSlot(), ...clusterParams() }),
+      body: JSON.stringify({ signature: currentSig, program, ...source, mutations: [], time_travel: timeTravel, features: activeFeatures, ...patchSlot(), ...clusterParams() }),
     });
     if (!res.ok) throw new Error(await res.text());
-    out.innerHTML = renderPatch(await res.json(), file.name);
+    out.innerHTML = renderPatch(await res.json(), today ? 'Deployed today' : `Your build · ${file.name}`);
   } catch (e) { out.innerHTML = `<div class="err-box">${esc(errText(e))}</div>`; }
   finally { b.disabled = false; }
 }
-function renderPatch(c, fileName) {
+function renderPatch(c, afterLabel) {
   const side = (label, r) => {
     const badge = r.success ? '<span class="badge ok"><span class="b-dot"></span>success</span>' : '<span class="badge fail"><span class="b-dot"></span>failed</span>';
     const err = r.error ? `<div class="err-box">${esc(r.error_name ? `${r.error_name} — ${r.error}` : r.error)}</div>` : '';
@@ -2520,16 +2532,26 @@ function renderPatch(c, fileName) {
   };
   const d = c.after.compute_units - c.before.compute_units;
   const verdict = c.before.success !== c.after.success
-    ? (c.after.success ? 'Your build makes this transaction succeed.' : 'Your build makes this transaction fail.')
+    ? (c.after.success ? 'With this version the transaction succeeds.' : 'With this version the transaction fails.')
     : (c.before.error || '') !== (c.after.error || '') ? 'Same outcome, different error.'
     : d !== 0 ? `Same outcome, ${d > 0 ? '+' : ''}${fmt(d)} compute units.`
     : 'No observable change: same outcome, same compute.';
+  // Which binary the "as it was" side really ran. When the program was
+  // upgraded since and its old binary could not be loaded, both sides ran
+  // today's code and the comparison shows nothing about the upgrade.
+  const src = c.as_it_was || null;
+  const up = src?.Program?.upgraded_since;
+  const binNote = up === true
+    ? `<div class="err-box">This program was upgraded after that slot, but its old binary could not be loaded, so the "as it was" side also ran today's version. Both sides are the same code; an archive endpoint loads the old binary exactly.</div>`
+    : up === false ? `<div class="cu-note">This program has not been upgraded since that slot, so the "as it was" side runs the same binary as today.</div>`
+    : src?.Recorded ? `<div class="cu-note">The "as it was" side runs the binary deployed at slot ${fmt(src.Recorded.slot)}, the version live when this transaction landed.</div>`
+    : src === 'HistoricalArchive' ? `<div class="cu-note">The "as it was" side runs the binary loaded from the archive at that slot.</div>` : '';
   const onchain = analysis?.overview?.success;
   const match = onchain == null ? '' : c.before.success === onchain
-    ? `<div class="cu-note">The deployed side matches the chain (${onchain ? 'succeeded' : 'failed'} on mainnet), so the comparison is against the real outcome.</div>`
-    : `<div class="cu-note">The deployed side does not match the chain (${onchain ? 'succeeded' : 'failed'} on mainnet): some state at this slot could not be rebuilt exactly. An archive endpoint makes it exact.</div>`;
-  return `<div class="cu-note" style="margin:10px 0 6px"><b>${esc(verdict)}</b></div>${match}
-    <div class="patch-grid">${side('As deployed', c.before)}${side(`Your build · ${fileName}`, c.after)}</div>`;
+    ? `<div class="cu-note">The as-it-was side matches the chain (${onchain ? 'succeeded' : 'failed'} on mainnet), so the comparison is against the real outcome.</div>`
+    : `<div class="cu-note">The as-it-was side does not match the chain (${onchain ? 'succeeded' : 'failed'} on mainnet): some state at this slot could not be rebuilt exactly. An archive endpoint makes it exact.</div>`;
+  return `<div class="cu-note" style="margin:10px 0 6px"><b>${esc(verdict)}</b></div>${binNote}${match}
+    <div class="patch-grid">${side('As it was at that slot', c.before)}${side(afterLabel, c.after)}</div>`;
 }
 function renderReplay(r) {
   // A replay with no slot ran against today's on-chain state, which has moved
