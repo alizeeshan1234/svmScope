@@ -29,6 +29,39 @@ All notable changes to svmscope are documented here. The format follows
 - **A bundle page** on the site at `/bundles`, with the account editor the
   simulate page uses: open any account a step touches and type over any field.
 
+- **Run history against a new build.** `Replay::compare_patch` already swapped
+  one program for A/B testing; the new `Scope::current_program_elf` fetches the
+  binary a program runs today, so a past transaction replays at its own slot with
+  everything historical except the program: the version that ran then against
+  the version deployed now, or against an unreleased `.so`. `POST /patch_compare`
+  takes `so_b64` for an upload or `current: true` for today's binary, and every
+  comparison reports which binary the historical side ran.
+- **Programs that were never deployed.** `Replay::load_program` runs a program
+  from its ELF at any address, deployed or not, replacing whatever the chain holds
+  there. `POST /preflight` and `/preflight_report` accept
+  `programs: [{ program, so_b64 }]`.
+- **On the site:** a "Run with your build" box in the Replay tab (pick a program,
+  then today's deployed version or a `.so`; runs at the transaction's own slot and
+  says whether the historical side matched the chain), and a `.so` picker in the
+  Simulate page's transaction builder.
+
+### Fixed
+
+- **Rebuilt history carried today's clock.** Reconstructing an account at an
+  earlier slot replayed each of its writes at the current clock, so a program that
+  stores the clock (a pool's activation slot, a position's timestamp) came back
+  with today's value. A cp-amm pool rebuilt this way had an activation point in
+  the future and its swap failed `PoolDisabled` while the certificate called it
+  exact. Every rebuilt write now replays at its own slot and block time.
+- **A devnet replay at a slot never answered.** The mainnet account-changes stream
+  and record store were attached to every request, so a devnet slot was asked of
+  mainnet, tens of millions of slots past its head, and waited out every deadline.
+  Both now attach to mainnet requests only.
+- **The site's transaction builder produced undecodable transactions** for any
+  instruction touching the System Program: its base58 decoder turned the all-`1`
+  address into 33 bytes. Nearly every instruction that creates an account was
+  affected.
+
 ### Notes
 
 - Replaying one slot back to back is exact in a way a single historical replay is

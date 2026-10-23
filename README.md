@@ -5,7 +5,7 @@
 [![CI](https://github.com/alizeeshan1234/svmScope/actions/workflows/ci.yml/badge.svg)](https://github.com/alizeeshan1234/svmScope/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/crates/l/svmscope.svg)](./LICENSE)
 
-**Start from a real transaction.** Decode it, replay it locally in an embedded SVM, mutate state and time-travel, freeze it into a fixture, and assert on it forever.
+**Start from a real transaction.** Decode it, replay it locally in an embedded SVM, mutate state and time-travel, run it against a new build of your program, freeze it into a fixture, and assert on it forever.
 
 > 📦 **Full working example:** [github.com/alizeeshan1234/svmscope_example](https://github.com/alizeeshan1234/svmscope_example) — an Anchor program plus a Rust project that consumes the published crate end-to-end.
 
@@ -285,7 +285,7 @@ assert!(outcomes.iter().all(|outcome| outcome.pass));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-## The three things it does
+## What it does
 
 **1. Post-mortem a transaction.** Paste a failed mainnet signature: the CPI tree arrives with instructions, arguments, and accounts *named* (resolved from the on-chain Anchor IDL or known native layouts), balance and token diffs, per-program compute units, and — on replay — the failure explained in plain language (`"SlippageToleranceExceeded"`, not `Custom(6001)`). Then change one thing and run it again.
 
@@ -298,6 +298,29 @@ assert!(outcomes.iter().all(|outcome| outcome.pass));
 **5. Replay a whole bundle, not one transaction.** Some transactions only make sense together: a bot buys in one and sells in the next, a liquidator moves a price and then seizes the position. `scope.bundle(input)?.run(&[])` takes a Jito bundle id, any signature that landed inside one, or your own ordered list, and replays every transaction in sequence on one SVM, each starting from what the ones before it left behind. Every step is checked against what the chain recorded, the accounts that carry state between steps are reported as edges, and `Bundle::trace(step, ..)` steps through any one of them with all its predecessors already run. Edit a step and every step after it re-runs on the result.
 
 Replaying one slot back to back is *more* faithful than replaying one transaction historically. On a pinned five-transaction bundle every step matched the chain's outcome and its exact compute units; a single historical replay matches compute exactly about a third of the time. Nothing is reconstructed between steps of one slot, which is the whole reason.
+
+**6. Test a new build against real history.** Before you ship an upgrade, run it against the transactions your users actually sent. `replay.compare_patch(program, elf, &mutations)` replays one transaction twice on identical state, once with the program that ran and once with a binary you supply, and reports the outcome, error and compute of each: *what would this change have done here?* The binary can be the `.so` that `cargo build-sbf` writes, or the program as deployed right now, from `scope.current_program_elf(program)`, which asks the reverse question: *how does today's program handle last month's traffic?* Replay at the transaction's own slot and everything except the program stays historical.
+
+```rust,no_run
+# use svmscope::Scope;
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let scope = Scope::new("https://api.mainnet-beta.solana.com");
+let program = "<your-program-id>";
+// The world as it was the moment the transaction landed.
+let mut replay = scope.replay_at_slot("<signature>")?;
+
+// Your unreleased build against that exact state…
+let build = std::fs::read("target/deploy/my_program.so")?;
+println!("{}", replay.compare_patch(program, build, &[])?.summary());
+
+// …or the version deployed today, with everything else historical.
+let today = scope.current_program_elf(program)?;
+println!("{}", replay.compare_patch(program, today, &[])?.summary());
+# Ok(())
+# }
+```
+
+The "as it was" side runs the bytecode that was live at that slot: a program upgraded since loads its earlier deploy, and the fidelity certificate says which binary ran, so a comparison never silently pits a program against itself. A program that was never deployed works too: `replay.load_program(program, elf)` loads it into any replay or pre-flight simulation, and transactions build and run against it like any program on chain. On the site, the Replay tab's **Run with your build** does the comparison in two clicks, and the Simulate page takes a `.so` for the program you are building against.
 
 Errors are typed and self-explanatory: a typo'd mutation address is a hard `Error::MutationTargetMissing`, never a fake "revert" your test happily accepts; an unknown field name errors *listing the available fields*.
 
@@ -420,6 +443,7 @@ Assert kinds: `lamports`, `u64` (at an offset), `token_amount`, `lamports_delta`
 
 - **Decode** — walks `getTransaction`: the CPI tree from `innerInstructions` + `stackHeight`, diffs from `pre/postBalances`, compute from the logs, Address Lookup Table resolution, instruction/account/field naming from on-chain IDLs (Anchor and the Program Metadata program) or built-in native layouts.
 - **Reconstruct** — `getMultipleAccounts` for every touched account; programs resolve through the upgradeable loader's programdata pointer to the raw ELF; closed accounts (drained fee payers, closed token accounts) are rebuilt from the transaction's own metadata; pre-transaction SPL balances are rewound so swaps replay faithfully.
+- **Rebuild the past** — for a replay at an earlier slot, an account written since is rebuilt by replaying its own writes oldest-first, each at the slot and block time it landed in, so anything a program derives from the clock (activation points, timestamps, vesting starts) comes back as it was, not as today. With an archival endpoint (`Scope::with_archive`), every account and program binary loads exactly as of the slot instead.
 - **Replay** — everything loads into a pristine LiteSVM per run (sigverify/blockhash checks off — the original blockhash can't be valid in a fresh SVM), the clock anchored to the transaction's real slot and block time. There is no validator to wait for, so runs are microseconds and trivially parallel.
 - **Time travel** — programs read time from the Clock sysvar; we own it. Warps move slot, epoch, and timestamp *coherently* (432k slots/epoch, ~400ms/slot), so a program checking all three sees a consistent world.
 
@@ -442,6 +466,14 @@ cargo run -p svmscope-server   # → http://127.0.0.1:3000, GET /api lists the s
 
 A typed TypeScript client lives in [`sdk/`](./sdk). Point it at your own RPC
 endpoint — the public mainnet RPC is heavily rate-limited.
+
+`POST /patch_compare` runs a past transaction against a new build: send
+`{ signature, program, so_b64 }` for an uploaded `.so`, or `current: true` for
+the version deployed today, and both outcomes come back with the provenance of
+the binary the historical side ran. `POST /preflight` and `/preflight_report`
+take `programs: [{ program, so_b64 }]` to simulate against programs that are
+not deployed. Set `SVMSCOPE_ARCHIVE_URL` to an archival RPC (one that honours
+`slot` on `getAccountInfo`) and replays at a slot load exact state.
 
 ### Who is using it
 
@@ -592,10 +624,16 @@ as base64. From the library: `Scope::lift(signature, router)`.
 - [x] Typed errors; mutations validated up front (no silently-passing revert tests)
 - [x] `Scope`/`Replay` library API — fetch once, replay forever
 - [x] Mollusk-style `Check` DSL with named-field assertions
+- [x] Named-field mutations — `Mutation::field(addr, "count", 99)`
+- [x] Compute profiler — every BPF instruction attributed to functions, syscalls and call stacks
+- [x] Replay at any slot, with a per-account fidelity certificate; exact with an archival endpoint
+- [x] Bundle and sequence replay — dependent transactions in order on one SVM
+- [x] Dependency watch — replay a protocol's traffic against a dependency's old and new binary
+- [x] Run history against a new build or today's deployed program; simulate undeployed programs
+- [x] Anchor event decoding in the step debugger
 - [ ] Codama/Shank IDL support (named fields for native & Pinocchio programs)
-- [ ] Named-field mutations — `Mutation::field(addr, "count", 99)`
 - [ ] Async/trait RPC abstraction
-- [ ] Anchor event decoding; archival state at the exact slot; cross-account invariants
+- [ ] Same-block predecessors replayed on the archival tier, as they are on the free tier
 
 See [VISION.md](./VISION.md) for the full architecture.
 
