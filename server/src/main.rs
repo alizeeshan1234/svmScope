@@ -764,6 +764,10 @@ struct BundleRequest {
     bundle: Option<String>,
     #[serde(default)]
     signatures: Vec<String>,
+    /// A sequence that may mix landed signatures with your own transactions:
+    /// each entry is a signature, or `{ transaction, replaces?, slot? }`.
+    #[serde(default)]
+    steps: Vec<svmscope::StepInput>,
     #[serde(default)]
     mutations: Vec<StepMutationInput>,
     /// Trace this step instead of reporting every step (POST /bundle/trace).
@@ -812,15 +816,16 @@ fn bundle_input_of(target: &str) -> BundleInput {
 
 /// The input a request body names, and its per-step mutations.
 fn bundle_parts(req: BundleRequest) -> Result<(BundleInput, StepMutations), (StatusCode, String)> {
-    let input = match (&req.bundle, req.signatures.is_empty()) {
-        (Some(target), true) => bundle_input_of(target),
-        (None, false) => BundleInput::Signatures {
+    let input = match (&req.bundle, req.signatures.is_empty(), req.steps.is_empty()) {
+        (Some(target), true, true) => bundle_input_of(target),
+        (None, false, true) => BundleInput::Signatures {
             signatures: req.signatures,
         },
+        (None, true, false) => BundleInput::Steps { steps: req.steps },
         _ => {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "provide exactly one of `bundle` or `signatures`".into(),
+                "provide exactly one of `bundle`, `signatures` or `steps`".into(),
             ))
         }
     };
@@ -935,9 +940,23 @@ async fn bundle_get_handler(
     Path(target): Path<String>,
     Query(q): Query<BundleQuery>,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
-    use axum::response::IntoResponse;
     let (url, archive) = endpoints_for(q.cluster.as_deref(), None, None, None)?;
     let key = format!("bundle|{url}|{}|{target}", archive.as_deref().unwrap_or(""));
+    let input = bundle_input_of(&target);
+    baseline_or_building(key, input, url, archive).await
+}
+
+/// The baseline report for `key`, building the bundle if nobody has: from
+/// the report cache, by joining a build already running, or by starting one.
+/// Answers `202` while the build runs, so the caller polls rather than holds
+/// a connection open for minutes.
+async fn baseline_or_building(
+    key: String,
+    input: BundleInput,
+    url: Rpc,
+    archive: Option<String>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::response::IntoResponse;
     if let Some(hit) = at_cache_get(&key) {
         return Ok(Json(hit).into_response());
     }
@@ -955,7 +974,6 @@ async fn bundle_get_handler(
             None => {
                 let (tx, rx) = tokio::sync::watch::channel(None);
                 jobs.insert(key.clone(), rx.clone());
-                let input = bundle_input_of(&target);
                 let job_key = key.clone();
                 let job_key2 = key.clone();
                 tokio::spawn(async move {
@@ -1035,8 +1053,15 @@ async fn bundle_post_handler(
         req.relay.as_deref(),
     )?;
     let key = bundle_key(&url, archive.as_deref(), &req);
-    let (_input, step_muts) = bundle_parts(req)?;
+    let (input, step_muts) = bundle_parts(req)?;
+    // A sequence carrying your own transactions cannot be named in a URL, so
+    // this route builds it too: the first request starts the build and gets
+    // the baseline (or a 202 to poll); edits after that run on the held build.
     let Some(built) = built_get(&key) else {
+        let baseline = baseline_or_building(key, input, url, archive).await?;
+        if step_muts.is_empty() || baseline.status() != StatusCode::OK {
+            return Ok(baseline);
+        }
         return Ok(bundle_building());
     };
     tokio::task::spawn_blocking(move || -> Result<svmscope::BundleReport, svmscope::Error> {
@@ -1094,8 +1119,9 @@ async fn bundle_accounts_handler(
 /// The key a bundle is stored under, the same one the read route uses, so a
 /// reader who opened the baseline has already paid for every edit that follows.
 fn bundle_key(url: &Rpc, archive: Option<&str>, req: &BundleRequest) -> String {
-    let target = match (&req.bundle, req.signatures.is_empty()) {
-        (Some(t), true) => t.clone(),
+    let target = match (&req.bundle, req.signatures.is_empty(), req.steps.is_empty()) {
+        (Some(t), true, true) => t.clone(),
+        (_, _, false) => serde_json::to_string(&req.steps).unwrap_or_default(),
         _ => req.signatures.join(","),
     };
     format!("bundle|{url}|{}|{target}", archive.unwrap_or(""))
@@ -3211,6 +3237,7 @@ async fn api_index() -> Json<serde_json::Value> {
             "GET  /diagnose/{signature}": "A failure explained: error name, docs, the step and accounts involved.",
             "GET  /account/{address}":    "An account decoded through its program's layout or IDL.",
             "GET  /signatures/{address}": "Recent signatures for an address.",
+            "POST /bundle (steps)":       "{ steps: [signature | { transaction, replaces?, slot? }], mutations? } — a sequence mixing landed transactions with your own (base64): each runs against the state the steps before it left; a custom step is compared with the one it replaces, and every step reports its token changes and any accounts at today's state.",
             "GET  /registry":               "?registry= — every protocol and dependency in the on-chain dependency registry (devnet).",
             "GET  /dependency_check/{program}": "?dependency=&limit=&baseline=previous|at_slot|current — replay the program's recent transactions against the dependency's current binary and report what changed.",
             "GET  /lift/{signature}":       "?router=&exact=&cluster= — rebuild a landed transaction with its router's inner calls as top-level instructions (composition in transaction construction), run both on the same state, report equivalence, compute saved, packet fit, and what could not be lifted.",

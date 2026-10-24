@@ -2481,6 +2481,83 @@ impl Scope {
         })
     }
 
+    /// The world for a transaction of your own placed in history: every
+    /// account it names loaded as of now, then, when it replaces a landed
+    /// transaction, that transaction's historical world laid over it, and the
+    /// clock anchored to the slot it takes. Accounts only your transaction
+    /// names, which the replaced one never touched, load from the archive as
+    /// of the slot when one is attached, and otherwise keep today's bytes,
+    /// labelled `CurrentRpc` so the certificate counts them as drift.
+    pub(crate) fn custom_step_replay(
+        &self,
+        tx: solana_transaction::versioned::VersionedTransaction,
+        label: String,
+        slot: u64,
+        block_time: Option<i64>,
+        base: Option<&Replay>,
+    ) -> Result<Replay> {
+        let keys: Vec<String> = {
+            let mut k: Vec<String> = tx
+                .message
+                .static_account_keys()
+                .iter()
+                .map(|a| a.to_string())
+                .collect();
+            let (w, r) = crate::replay::resolve_alt_addresses(&self.client, &tx);
+            k.extend(w);
+            k.extend(r);
+            k
+        };
+        let mut replay = self.preflight_tx(tx)?;
+        // Accounts the replaced transaction never touched: a different route
+        // goes through different pools, and today's bytes for those would
+        // benchmark against the wrong prices. An archive that honours the slot
+        // loads them as of the slot before; without one they keep today's
+        // bytes and the certificate says so.
+        // Covered: anything the replaced transaction's world loaded, or knows
+        // something about without loading it (an account it proved empty at
+        // the slot has a label and no bytes).
+        let covered = |key: &str| {
+            base.is_some_and(|b| {
+                b.provenance.contains_key(key)
+                    || Address::from_str(key).is_ok_and(|a| b.ctx.has_loaded(&a))
+            })
+        };
+        let extra: Vec<String> = keys.iter().filter(|k| !covered(k)).cloned().collect();
+        let archive = self
+            .archive
+            .as_ref()
+            .filter(|a| crate::replay::archive_honors_slot(a, slot));
+        let from_archive = match archive {
+            Some(a) if !extra.is_empty() => {
+                replay
+                    .ctx
+                    .reload_at_slot(a, &extra, slot.saturating_sub(1))?
+            }
+            _ => Vec::new(),
+        };
+        if let Some(base) = base {
+            replay.ctx.overlay(&base.ctx);
+            replay.fidelity = base.fidelity;
+            replay.provenance = base.provenance.clone();
+            // The replaced transaction's record is what proves its wallets'
+            // balances at the slot; without it the certificate would call
+            // them today's data.
+            replay.recorded = base.recorded.clone();
+        }
+        for key in extra {
+            let source = if from_archive.contains(&key) {
+                Provenance::HistoricalArchive
+            } else {
+                Provenance::CurrentRpc
+            };
+            replay.provenance.insert(key, source);
+        }
+        replay.ctx.anchor_clock(slot, block_time);
+        replay.ctx.set_signature(label);
+        Ok(replay)
+    }
+
     /// See [`Scope::preflight`]: parse base64 into a transaction, accepting a
     /// bare message too. Exposed for testing.
     #[doc(hidden)]

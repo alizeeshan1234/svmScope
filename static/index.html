@@ -1618,6 +1618,11 @@ input.derived { border-color: var(--green-border); color: var(--green); }
         <p class="whatif-lead">An account that one step changed and a later step also uses. These are the wires a change travels along: edit the earlier step and any step on the far side of one of these lines can move.</p>
         <div id="bundleCascade"></div>
       </div>
+      <div class="card full" id="bundleSwapCard" hidden>
+        <h2>Swap in your own transactions <span class="count" id="bundleSwapCount"></span></h2>
+        <p class="whatif-lead">Replace any step with a transaction you built, or insert one between steps. It runs against exactly the state the steps before it left behind, and a replacement is compared with the transaction it stands in for: outcome, compute, and the tokens each one moved. Paste base64 of a serialized transaction, signed or not, or of its bare message.</p>
+        <div id="bundleSwap"></div>
+      </div>
       <div class="card full" id="bundleEditCard" hidden>
         <h2>Change one step <span class="count" id="bundleEditCount"></span></h2>
         <p class="whatif-lead">Pick a step and open any account it touches. Every field it has is listed with the value that step actually sees, once the steps before it have run. Type over the one you want different and apply. The step runs with your value and every step after it runs on whatever that produced, so you watch the change arrive downstream rather than having to imagine it. Edits stack, on one step or several.</p>
@@ -5274,6 +5279,10 @@ window.addEventListener('popstate', e => {
 // or any list the reader pastes. The engine builds one world per step, runs
 // them in order, and reports every step against what the chain recorded.
 let bundleReport = null, bundleBase = null, bundleTargetCur = '', bundleMuts = [], bundleOpen = {};
+// Your own transactions swapped into the sequence: { mode: 'replace' | 'insert',
+// at: landed index (-1 = before the first), tx: base64 }. `bundleLanded` is the
+// landed sequence they are positioned against.
+let bundleSwaps = [], bundleLanded = [];
 // Stop polling eventually; the engine still finishes, and the next visit is instant.
 const BUNDLE_GIVE_UP = 900;
 const lamp = (n) => (n / 1e9).toFixed(6).replace(/0+$/, '').replace(/\.$/, '') + ' SOL';
@@ -5325,7 +5334,12 @@ function bundleStepRow(s, base) {
     ? '<span class="amt pos">ok</span>'
     : `<span class="amt neg">${esc(s.result.error_name || s.result.error || 'failed')}</span>`;
   const flags = [];
-  if (!s.matches_chain) flags.push('<span class="amt neg">drift</span>');
+  if (s.custom) flags.push('<span class="bn-moved">your tx</span>');
+  if (s.custom) {
+    if (s.replaces && (!s.matches_chain || bundleTokenKey(s.token_changes) !== bundleTokenKey(s.chain_token_changes)))
+      flags.push('<span class="bn-moved">differs from original</span>');
+  } else if (!s.matches_chain) flags.push('<span class="amt neg">drift</span>');
+  if ((s.today_state || []).length) flags.push(`<span class="amt neg" title="accounts loaded at today's state, not this slot's">${s.today_state.length} today</span>`);
   if (bundleMuts.some(m => m.step === s.index)) flags.push('<span class="bn-moved">edited</span>');
   // Against the unmutated run, when there is one to compare with.
   if (base && base[s.index]) {
@@ -5338,9 +5352,9 @@ function bundleStepRow(s, base) {
   }
   return `<tr class="bn-row${bundleOpen[s.index] ? ' on' : ''}" data-brow="${s.index}">
     <td>${s.index}</td>
-    <td><span class="mono">${short(s.signature)}</span></td>
+    <td><span class="mono">${s.custom ? (s.replaces ? `yours, for ${short(s.replaces)}` : 'yours, inserted') : short(s.signature)}</span></td>
     <td>${outcome}</td>
-    <td>${s.chain_success ? 'ok' : 'failed'}</td>
+    <td>${s.custom && !s.replaces ? '<span class="empty">none</span>' : (s.chain_success ? 'ok' : 'failed')}</td>
     <td>${cu}</td>
     <td>${s.diff.length}</td>
     <td>${s.carried.length}</td>
@@ -5368,19 +5382,116 @@ function bundleStepDetail(s) {
         return `<div><span class="bn-acct">${short(d.account)}</span> ${what}</div>`;
       }).join('') + `</div>`
     : '';
-  const why = s.matches_chain ? '' :
+  const why = s.matches_chain || s.custom ? '' :
     `<div class="col"><h4>why this step drifted</h4>
        <div>replay: ${esc(s.result.error || 'succeeded')}</div>
        <div>chain: ${esc(s.chain_error || 'succeeded')}</div>
        <div class="empty" style="margin-top:4px">The chain and the replay disagree. On the free tier the state this step started from is reconstructed, so the difference is usually drift since its slot rather than a bug.</div>
      </div>`;
+  const tokens = bundleTokenTable(s);
+  const today = (s.today_state || []).length
+    ? `<div class="col"><h4>ran on today's state</h4><div class="empty">${s.today_state.length} account${s.today_state.length === 1 ? '' : 's'} loaded as they are now, not as of this slot, so this step can differ from what that moment would give. An archive endpoint loads them exactly.</div>` +
+      s.today_state.slice(0, 8).map(a => `<span class="bn-acct">${short(a)}</span>`).join(' ') + `</div>`
+    : '';
   return `<tr class="bn-detail"><td colspan="9">
+    ${tokens}
     <div class="col"><h4>what it changed</h4>${changed}</div>
     <div class="col"><h4>what it inherited</h4>${carried}</div>
-    ${diverged}${why}
+    ${diverged}${why}${today}
     <div style="clear:both"></div>
     <div class="empty">Transaction <span class="mono">${esc(s.signature)}</span></div>
   </td></tr>`;
+}
+
+// Token movements grouped by wallet and mint, so "what did the swapper get"
+// reads off directly. A key for comparing two runs' movements.
+function bundleTokenNet(changes) {
+  const net = new Map();
+  for (const c of changes || []) {
+    const k = c.owner + '|' + c.mint;
+    const prev = net.get(k) || { owner: c.owner, mint: c.mint, decimals: c.decimals, raw: 0n };
+    prev.raw += BigInt(c.delta_raw);
+    net.set(k, prev);
+  }
+  return net;
+}
+function bundleTokenKey(changes) {
+  return JSON.stringify([...bundleTokenNet(changes).entries()].filter(([, v]) => v.raw !== 0n).map(([k, v]) => [k, v.raw.toString()]).sort());
+}
+function bundleUnits(raw, decimals) {
+  const neg = raw < 0n, abs = neg ? -raw : raw, d = BigInt(decimals || 0);
+  const whole = d ? abs / 10n ** d : abs, frac = d ? (abs % 10n ** d).toString().padStart(Number(d), '0').replace(/0+$/, '') : '';
+  return (neg ? '−' : '+') + whole.toLocaleString() + (frac ? '.' + frac : '');
+}
+// The comparison that matters for a swap: per wallet and token, what this run
+// moved next to what the chain recorded at this position.
+function bundleTokenTable(s) {
+  const mine = bundleTokenNet(s.token_changes), chain = bundleTokenNet(s.chain_token_changes);
+  const keys = [...new Set([...mine.keys(), ...chain.keys()])]
+    .filter(k => (mine.get(k)?.raw || 0n) !== 0n || (chain.get(k)?.raw || 0n) !== 0n);
+  if (!keys.length) return '';
+  const theirs = s.custom ? (s.replaces ? 'the original' : '—') : 'on chain';
+  const rows = keys.map(k => {
+    const m = mine.get(k), c = chain.get(k), ref = m || c;
+    const a = m ? bundleUnits(m.raw, m.decimals) : '0', b = c ? bundleUnits(c.raw, c.decimals) : (s.custom && !s.replaces ? '' : '0');
+    const differs = s.custom && s.replaces && (m?.raw || 0n) !== (c?.raw || 0n);
+    return `<tr><td><span class="bn-acct">${short(ref.owner)}</span></td><td><span class="bn-acct">${short(ref.mint)}</span></td>
+      <td class="${differs ? 'bn-moved' : ''}">${a}</td><td>${b}</td></tr>`;
+  }).join('');
+  return `<div class="col" style="width:100%"><h4>tokens moved, by wallet</h4>
+    <table class="bn-steps"><thead><tr><th>wallet</th><th>token</th><th>${s.custom ? 'yours' : 'replay'}</th><th>${theirs}</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+// The landed sequence with your transactions swapped in, as the engine's
+// `steps`: a signature, or { transaction, replaces } in place of one, or
+// { transaction } between them.
+function bundleStepsWithSwaps() {
+  const at = (mode, i) => bundleSwaps.filter(w => w.mode === mode && w.at === i);
+  const steps = at('insert', -1).map(w => ({ transaction: w.tx }));
+  bundleLanded.forEach((sig, i) => {
+    const rep = at('replace', i)[0];
+    steps.push(rep ? { transaction: rep.tx, replaces: sig } : sig);
+    for (const w of at('insert', i)) steps.push({ transaction: w.tx });
+  });
+  return steps;
+}
+function bundleSwapPanel() {
+  const opts = ['<option value="insert:-1">insert before step 0</option>'].concat(
+    bundleLanded.flatMap((sig, i) => [
+      `<option value="replace:${i}">replace step ${i} · ${short(sig)}</option>`,
+      `<option value="insert:${i}">insert after step ${i}</option>`])).join('');
+  const pills = bundleSwaps.map((w, i) =>
+    `<span class="bn-edit-pill">${w.mode === 'replace' ? `replaces step ${w.at}` : w.at < 0 ? 'before step 0' : `after step ${w.at}`} · ${w.tx.length} chars<button data-bswapdrop="${i}" title="remove">✕</button></span>`).join('');
+  return `<div class="cf-row"><select id="bswapAt" class="cf-select">${opts}</select></div>
+    <textarea id="bswapTx" class="ta" spellcheck="false" placeholder="base64 of your transaction: Buffer.from(tx.serialize()).toString('base64')"></textarea>
+    <div class="cf-row" style="margin-top:8px">
+      <button class="btn ghost sm" id="bswapAdd">Add to the sequence</button>
+      ${bundleSwaps.length ? '<button class="btn sm" id="bswapRun">Run with your transactions</button><button class="btn ghost sm" id="bswapClear">Back to what landed</button>' : ''}
+    </div>
+    <div style="margin-top:8px">${pills}</div>
+    <div class="dbg-err hidden" id="bswapErr"></div>`;
+}
+function bundleWireSwaps() {
+  const err = (m) => { const e = $('bswapErr'); e.classList.toggle('hidden', !m); e.textContent = m || ''; };
+  $('bswapAdd')?.addEventListener('click', () => {
+    const tx = ($('bswapTx').value || '').replace(/\s+/g, '');
+    if (!tx) return err('paste the base64 of your transaction first');
+    try { atob(tx); } catch { return err('that is not base64'); }
+    const [mode, at] = $('bswapAt').value.split(':');
+    if (mode === 'replace' && bundleSwaps.some(w => w.mode === 'replace' && w.at === Number(at)))
+      return err(`step ${at} already has a replacement; remove it first`);
+    bundleSwaps.push({ mode, at: Number(at), tx });
+    $('bswapTx').value = '';
+    $('bundleSwap').innerHTML = bundleSwapPanel(); bundleWireSwaps();
+    $('bundleSwapCount').textContent = `${bundleSwaps.length} active`;
+  });
+  $('bswapRun')?.addEventListener('click', () => { bundleMuts = []; bundleOpen = {}; bundleRun(); });
+  $('bswapClear')?.addEventListener('click', () => { bundleSwaps = []; bundleMuts = []; bundleOpen = {}; bundleRun(); });
+  $('bundleSwap').querySelectorAll('[data-bswapdrop]').forEach(b => b.addEventListener('click', () => {
+    bundleSwaps.splice(Number(b.dataset.bswapdrop), 1);
+    $('bundleSwap').innerHTML = bundleSwapPanel(); bundleWireSwaps();
+    $('bundleSwapCount').textContent = bundleSwaps.length ? `${bundleSwaps.length} active` : '';
+  }));
 }
 
 function bundleCascadeRows(edges) {
@@ -5541,9 +5652,12 @@ function bundleStageIx() {
 
 function renderBundle(r) {
   bundleReport = r;
+  const swapped = bundleSwaps.length > 0;
   const edited = bundleMuts.length > 0;
-  if (!edited) bundleBase = r.steps.slice();
-  const base = edited && bundleBase ? bundleBase : null;
+  if (!edited && !swapped) { bundleBase = r.steps.slice(); bundleLanded = r.steps.map(s => s.signature); }
+  // Inserted steps shift every index after them, so step-by-step comparison
+  // with the landed run only means something without swaps.
+  const base = edited && !swapped && bundleBase ? bundleBase : null;
 
   const meta = r.meta;
   const head = meta
@@ -5557,7 +5671,11 @@ function renderBundle(r) {
   // which steps your change moved. Saying "matches the chain" over a
   // counterfactual invites the reader to think their edit did nothing.
   let verdict;
-  if (edited) {
+  if (swapped) {
+    const mine = r.steps.filter(s => s.custom);
+    const differ = mine.filter(s => s.replaces && (!s.matches_chain || bundleTokenKey(s.token_changes) !== bundleTokenKey(s.chain_token_changes))).length;
+    verdict = `<span class="bn-verdict ${differ ? 'bad' : 'ok'}">${icon(differ ? 'alert' : 'check')}${mine.length} of your transactions in the sequence${differ ? `, ${differ} ending differently from what they replaced` : ''}</span>`;
+  } else if (edited) {
     const moved = base
       ? r.steps.filter((s, i) => base[i] && (
           base[i].result.success !== s.result.success ||
@@ -5587,6 +5705,11 @@ function renderBundle(r) {
   $('bundleCascadeCard').hidden = edges.length === 0;
   $('bundleEdgeCount').textContent = edges.length ? `${edges.length} links` : '';
   if (edges.length) $('bundleCascade').innerHTML = bundleCascadeRows(edges);
+
+  $('bundleSwapCard').hidden = false;
+  $('bundleSwapCount').textContent = swapped ? `${bundleSwaps.length} active` : '';
+  $('bundleSwap').innerHTML = bundleSwapPanel();
+  bundleWireSwaps();
 
   $('bundleEditCard').hidden = false;
   $('bundleEditCount').textContent = edited ? `${bundleMuts.length} active` : '';
@@ -5627,7 +5750,8 @@ function bundleBody(extra) {
   const mutations = [...byStep.entries()].map(([step, muts]) => ({ step, mutations: muts }));
   // Same cluster / custom-RPC / relay selection every other request carries.
   const body = Object.assign({ mutations }, clusterParams());
-  if (bundleTargetCur.includes(',')) body.signatures = bundleTargetCur.split(',').map(x => x.trim()).filter(Boolean);
+  if (bundleSwaps.length) body.steps = bundleStepsWithSwaps();
+  else if (bundleTargetCur.includes(',')) body.signatures = bundleTargetCur.split(',').map(x => x.trim()).filter(Boolean);
   else body.bundle = bundleTargetCur;
   return Object.assign(body, extra || {});
 }
@@ -5644,6 +5768,7 @@ async function bundleRun() {
   $('bundleStepCard').hidden = true;
   $('bundleCascadeCard').hidden = true;
   $('bundleEditCard').hidden = true;
+  $('bundleSwapCard').hidden = true;
   const started = Date.now();
   const elapsed = () => Math.round((Date.now() - started) / 1000);
   try {
@@ -5654,7 +5779,7 @@ async function bundleRun() {
     // connection open long enough for a browser or a proxy to give up.
     // A mutated run has no such route yet and still waits on the one request.
     for (;;) {
-      const res = edited
+      const res = edited || bundleSwaps.length
         ? await api('/bundle', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(bundleBody()) })
         : await api('/bundle/' + encodeURIComponent(bundleTargetCur) + clusterQ());
       if (res.status === 202) {
@@ -5710,7 +5835,7 @@ async function bundleTrace(step) {
 }
 
 function showBundle(target, push) {
-  if (target !== bundleTargetCur) { bundleMuts = []; bundleBase = null; bundleOpen = {}; }
+  if (target !== bundleTargetCur) { bundleMuts = []; bundleBase = null; bundleOpen = {}; bundleSwaps = []; bundleLanded = []; }
   $('bundleSig2').value = target;
   $('bundleTarget').value = target;
   bundleTargetCur = target;

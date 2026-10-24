@@ -36,6 +36,17 @@ All notable changes to svmscope are documented here. The format follows
   the version deployed now, or against an unreleased `.so`. `POST /patch_compare`
   takes `so_b64` for an upload or `current: true` for today's binary, and every
   comparison reports which binary the historical side ran.
+- **Your own transactions in a sequence.** `BundleInput::Steps` mixes landed
+  signatures with `StepInput::Custom { transaction, replaces, slot }`: replace a
+  step with a transaction you built, or insert one between steps, and it runs
+  against the state the steps before it left. A replacement inherits the slot and
+  historical world of what it replaces and is compared with it. Every step now
+  reports `token_changes` next to `chain_token_changes`, and `today_state`, the
+  accounts it ran on at today's state; for a custom step's accounts the replaced
+  transaction never touched, an archive endpoint loads them as of the slot.
+  `POST /bundle` takes `steps` and builds the sequence itself (answering 202
+  while it works), and the bundle page has a "Swap in your own transactions" card
+  with a per-wallet token comparison.
 - **Programs that were never deployed.** `Replay::load_program` runs a program
   from its ELF at any address, deployed or not, replacing whatever the chain holds
   there. `POST /preflight` and `/preflight_report` accept
@@ -61,6 +72,13 @@ All notable changes to svmscope are documented here. The format follows
   instruction touching the System Program: its base58 decoder turned the all-`1`
   address into 33 bytes. Nearly every instruction that creates an account was
   affected.
+
+### Known issues
+
+- The pinned five-step bundle no longer matches the chain's compute to the unit
+  (141,916 against 140,521 on step 1): a program it calls was upgraded after it
+  landed, and the free sources do not return the earlier binary. Outcomes still
+  match. Present before the custom-step work; an archive endpoint resolves it.
 
 ### Notes
 

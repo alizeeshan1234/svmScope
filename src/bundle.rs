@@ -4,10 +4,11 @@
 
 use crate::analyze::AccountDiff;
 use crate::decode::AccountInfo;
+use crate::diffs::TokenChange;
 use crate::error::{Error, Result};
 use crate::jito::{BundleMeta, JitoClient, Segment};
 use crate::replay::{to_replay_result, Mutation, Prepared, ReplayContext, ReplayResult};
-use crate::scope::{diffs_of, OnchainRecord, Replay, Scope};
+use crate::scope::{diffs_of, OnchainRecord, Provenance, Replay, Scope};
 use crate::trace::Trace;
 use crate::utils::resolve_account_keys;
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,43 @@ pub enum BundleInput {
         /// The transactions, in the order they should replay.
         signatures: Vec<String>,
     },
+    /// An ordered list that may mix landed transactions with your own: run
+    /// a route you built in place of a swap that landed, or insert one
+    /// between landed transactions, against the state history left there.
+    Steps {
+        /// The steps, in the order they should replay.
+        steps: Vec<StepInput>,
+    },
+}
+
+/// One step of a hand-made sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StepInput {
+    /// A transaction that landed, by signature.
+    Signature(String),
+    /// A transaction of your own, never sent: base64 of a serialized
+    /// `VersionedTransaction` (signed or not) or of its bare message.
+    Custom {
+        /// The transaction, base64.
+        transaction: String,
+        /// The landed transaction this one stands in for. Its slot, its
+        /// historical world and its on-chain outcome become this step's
+        /// position, starting state and point of comparison.
+        #[serde(default)]
+        replaces: Option<String>,
+        /// The slot to run at, when nothing is replaced. Defaults to the
+        /// slot of the nearest landed step before it, else after it.
+        #[serde(default)]
+        slot: Option<u64>,
+    },
+}
+
+/// A step that is your own transaction rather than one that landed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CustomStep {
+    /// The landed transaction it stands in for, if any.
+    pub replaces: Option<String>,
 }
 
 /// How the steps relate in time.
@@ -123,6 +161,20 @@ pub struct StepReport {
     pub carried: Vec<String>,
     /// Carried accounts that disagree with this step's rebuilt world.
     pub diverged: Vec<Diverged>,
+    /// Whether this step is your own transaction rather than a landed one.
+    pub custom: bool,
+    /// For your own transaction: the landed one it stands in for, whose
+    /// on-chain outcome the `chain_*` fields then describe.
+    pub replaces: Option<String>,
+    /// Data accounts this step ran on at today's state rather than as of
+    /// its slot. For your own transaction, these are usually pools the
+    /// replaced one never touched; an archive endpoint loads them exactly.
+    pub today_state: Vec<String>,
+    /// Token balances this replay changed.
+    pub token_changes: Vec<TokenChange>,
+    /// Token balances the chain recorded changing, for the landed
+    /// transaction at this position (or the one a custom step replaces).
+    pub chain_token_changes: Vec<TokenChange>,
 }
 
 /// The whole sequence, run.
@@ -157,6 +209,13 @@ pub struct BundleStep {
     pub record: OnchainRecord,
     /// The Jito bundle it landed in, if any.
     pub bundle_id: Option<String>,
+    /// Set when this step is your own transaction.
+    pub custom: Option<CustomStep>,
+    /// Data accounts this step loaded at today's state rather than as of its
+    /// slot: where its replay may differ from what that moment would give.
+    pub today_state: Vec<String>,
+    /// Token balance changes the chain recorded at this position.
+    chain_tokens: Vec<TokenChange>,
     tx: serde_json::Value,
 }
 
@@ -191,12 +250,19 @@ impl Scope {
     pub fn bundle(&self, input: BundleInput) -> Result<Bundle> {
         let client = JitoClient::new()?;
 
-        let (signatures, meta): (Vec<String>, Option<BundleMeta>) = match input {
+        let (planned, meta): (Vec<StepInput>, Option<BundleMeta>) = match input {
             BundleInput::BundleId { id } => {
                 let meta = client
                     .bundle(&id)?
                     .ok_or_else(|| Error::TransactionNotFound(id.clone()))?;
-                (meta.signatures.clone(), Some(meta))
+                (
+                    meta.signatures
+                        .iter()
+                        .cloned()
+                        .map(StepInput::Signature)
+                        .collect(),
+                    Some(meta),
+                )
             }
             BundleInput::Signature { signature } => {
                 // Say "that is not a signature" rather than "that signature is
@@ -220,7 +286,14 @@ impl Scope {
                 let meta = client
                     .bundle(&id)?
                     .ok_or_else(|| Error::TransactionNotFound(id.clone()))?;
-                (meta.signatures.clone(), Some(meta))
+                (
+                    meta.signatures
+                        .iter()
+                        .cloned()
+                        .map(StepInput::Signature)
+                        .collect(),
+                    Some(meta),
+                )
             }
             BundleInput::Signatures { signatures } => {
                 let mut unique: Vec<String> = Vec::with_capacity(signatures.len());
@@ -229,43 +302,249 @@ impl Scope {
                         unique.push(sig);
                     }
                 }
-                (unique, None)
+                (unique.into_iter().map(StepInput::Signature).collect(), None)
             }
+            BundleInput::Steps { steps } => (steps, None),
         };
 
         // Every input can land here empty: a hand-made list of nothing, or a
         // bundle id whose metadata carries no signatures at all. Guard once,
         // before anything indexes step zero.
-        if signatures.is_empty() {
+        if planned.is_empty() {
             return Err(Error::InvalidSpec(
                 "a bundle needs at least one signature".into(),
             ));
         }
+        if planned.len() > MAX_STEPS {
+            return Err(Error::InvalidSpec(format!(
+                "{} steps; a bundle replays up to {MAX_STEPS}",
+                planned.len()
+            )));
+        }
 
-        let segments = client.segments(&signatures)?;
+        let landed: Vec<String> = planned
+            .iter()
+            .filter_map(|p| match p {
+                StepInput::Signature(s) => Some(s.clone()),
+                StepInput::Custom { .. } => None,
+            })
+            .collect();
+        let segments = if landed.is_empty() {
+            Vec::new()
+        } else {
+            client.segments(&landed)?
+        };
 
-        let mut steps = Vec::with_capacity(signatures.len());
-        for (index, input_sig) in signatures.iter().enumerate() {
-            let signature = self.resolve_signature(input_sig)?;
-            let tx = self.transaction_json(&signature)?;
-            let slot = tx["slot"].as_u64().ok_or_else(|| {
-                Error::InvalidSpec(format!("{signature} has no slot in its record"))
-            })?;
-            let keys = resolve_account_keys(&tx);
-            let record = OnchainRecord::from_tx_json(&tx);
-            let bundle_id = segments
-                .iter()
-                .find(|s| s.signatures.iter().any(|s| s == input_sig))
-                .and_then(|s| s.bundle_id.clone());
-            steps.push(BundleStep {
-                index,
-                signature,
-                slot,
-                keys,
-                record,
-                bundle_id,
-                tx,
+        // First pass: what each step is. A landed step brings its record; a
+        // custom one brings its transaction and, if it replaces a landed one,
+        // that one's record, which fixes its slot and is what it is compared
+        // against.
+        enum Resolved {
+            Landed {
+                signature: String,
+                input: String,
+                tx: serde_json::Value,
+            },
+            Custom {
+                tx: solana_transaction::versioned::VersionedTransaction,
+                replaces: Option<(String, serde_json::Value)>,
+                slot: Option<u64>,
+            },
+        }
+        let mut resolved: Vec<Resolved> = Vec::with_capacity(planned.len());
+        for p in &planned {
+            resolved.push(match p {
+                StepInput::Signature(input) => {
+                    let signature = self.resolve_signature(input)?;
+                    let tx = self.transaction_json(&signature)?;
+                    Resolved::Landed {
+                        signature,
+                        input: input.clone(),
+                        tx,
+                    }
+                }
+                StepInput::Custom {
+                    transaction,
+                    replaces,
+                    slot,
+                } => {
+                    let tx = Scope::parse_unsigned_b64(transaction)?;
+                    let replaces = match replaces {
+                        Some(r) => {
+                            let signature = self.resolve_signature(r)?;
+                            let json = self.transaction_json(&signature)?;
+                            Some((signature, json))
+                        }
+                        None => None,
+                    };
+                    Resolved::Custom {
+                        tx,
+                        replaces,
+                        slot: *slot,
+                    }
+                }
             });
+        }
+        let slot_of_json = |tx: &serde_json::Value| tx["slot"].as_u64();
+        // The slot each step runs at: a landed one's own, a replacement's
+        // original's, an explicit one, or the nearest landed step's.
+        let known: Vec<Option<u64>> = resolved
+            .iter()
+            .map(|r| match r {
+                Resolved::Landed { tx, .. } => slot_of_json(tx),
+                Resolved::Custom { replaces, slot, .. } => {
+                    slot.or_else(|| replaces.as_ref().and_then(|(_, j)| slot_of_json(j)))
+                }
+            })
+            .collect();
+        let mut slots: Vec<u64> = Vec::with_capacity(resolved.len());
+        for (k, r) in resolved.iter().enumerate() {
+            let slot = match known[k] {
+                Some(s) => s,
+                None => {
+                    let landed_slot = |r: &Resolved| match r {
+                        Resolved::Landed { tx, .. } => slot_of_json(tx),
+                        Resolved::Custom { .. } => None,
+                    };
+                    let before = resolved[..k].iter().rev().find_map(landed_slot);
+                    let after = resolved[k + 1..].iter().find_map(landed_slot);
+                    match (r, before.or(after)) {
+                        (Resolved::Custom { .. }, Some(s)) => s,
+                        (Resolved::Custom { .. }, None) => {
+                            return Err(Error::InvalidSpec(format!(
+                                "step {k} is your own transaction with nothing to place it by: \
+                                 give it a `slot`, a `replaces` signature, or a landed step \
+                                 before or after it"
+                            )))
+                        }
+                        (Resolved::Landed { signature, .. }, None) => {
+                            return Err(Error::InvalidSpec(format!(
+                                "{signature} has no slot in its record"
+                            )))
+                        }
+                        (Resolved::Landed { .. }, Some(s)) => s,
+                    }
+                }
+            };
+            slots.push(slot);
+        }
+
+        // Second pass: the steps and, one at a time, their worlds. Sequential
+        // on purpose; see the note below on why concurrent fetches lost.
+        //
+        // The whole `Replay` per step, not just its context: a trace needs the
+        // fidelity and provenance that a bare context has already lost.
+        //
+        // Fetching three steps' worlds at once was measured against the public
+        // endpoint and came out 27% *slower*: 32s against 25s on the pinned
+        // five-step bundle, over repeated runs. The endpoint rate-limits, and
+        // concurrent fetches also race to download the same program binaries
+        // before the shared cache has any of them. An endpoint with real quota
+        // would likely reverse this; measure before changing it.
+        let mut steps = Vec::with_capacity(resolved.len());
+        let mut replays: Vec<Replay> = Vec::with_capacity(resolved.len());
+        for (index, r) in resolved.into_iter().enumerate() {
+            let slot = slots[index];
+            match r {
+                Resolved::Landed {
+                    signature,
+                    input,
+                    tx,
+                } => {
+                    let keys = resolve_account_keys(&tx);
+                    let record = OnchainRecord::from_tx_json(&tx);
+                    let bundle_id = segments
+                        .iter()
+                        .find(|s| s.signatures.contains(&input))
+                        .and_then(|s| s.bundle_id.clone());
+                    replays.push(self.replay_at(&signature, slot)?);
+                    steps.push(BundleStep {
+                        index,
+                        signature,
+                        slot,
+                        chain_tokens: chain_token_changes(&tx),
+                        keys,
+                        record,
+                        bundle_id,
+                        custom: None,
+                        today_state: Vec::new(),
+                        tx,
+                    });
+                }
+                Resolved::Custom { tx, replaces, .. } => {
+                    let label = format!("your-tx-{index}");
+                    let (base, record, chain_tokens, replaced_sig, block_time) = match &replaces {
+                        Some((sig, json)) => {
+                            let base = self.replay_at(sig, slot)?;
+                            (
+                                Some(base),
+                                OnchainRecord::from_tx_json(json),
+                                chain_token_changes(json),
+                                Some(sig.clone()),
+                                json["blockTime"].as_i64(),
+                            )
+                        }
+                        None => (
+                            None,
+                            OnchainRecord {
+                                success: true,
+                                error: None,
+                                fee: 0,
+                                compute_units: None,
+                                slot: Some(slot),
+                                block_time: None,
+                                logs: Vec::new(),
+                            },
+                            Vec::new(),
+                            None,
+                            self.client().get_block_time(slot).ok(),
+                        ),
+                    };
+                    let keys = custom_keys(self, &tx);
+                    let json = synthetic_tx_json(&tx, self);
+                    replays.push(self.custom_step_replay(
+                        tx,
+                        label.clone(),
+                        slot,
+                        block_time,
+                        base.as_ref(),
+                    )?);
+                    steps.push(BundleStep {
+                        index,
+                        signature: label,
+                        slot,
+                        keys,
+                        record,
+                        bundle_id: None,
+                        custom: Some(CustomStep {
+                            replaces: replaced_sig,
+                        }),
+                        today_state: Vec::new(),
+                        chain_tokens,
+                        tx: json,
+                    });
+                }
+            }
+        }
+
+        // What each step's certificate says ran on today's bytes. An account
+        // empty in the step's world is left out: it is one the transaction
+        // creates (a temporary token account, a new position), and "nothing
+        // there" is as true at the slot as today.
+        for (step, replay) in steps.iter_mut().zip(&replays) {
+            step.today_state = replay
+                .certificate()
+                .accounts
+                .into_iter()
+                .filter(|a| !a.is_program && matches!(a.source, Provenance::CurrentRpc))
+                .filter(|a| {
+                    Address::from_str(&a.address)
+                        .ok()
+                        .and_then(|addr| replay.ctx.loaded_data_of(&addr))
+                        .is_some_and(|acc| acc.lamports > 0 || !acc.data.is_empty())
+                })
+                .map(|a| a.address)
+                .collect();
         }
 
         let first_slot = steps[0].slot;
@@ -275,24 +554,29 @@ impl Scope {
             Mode::CrossSlot
         };
 
-        // The whole `Replay` per step, not just its context: a trace needs the
-        // fidelity and provenance that a bare context has already lost.
-        //
-        // One at a time, which is not an oversight. Fetching three steps'
-        // worlds at once was measured against the public endpoint and came out
-        // 27% *slower* — 32s against 25s on the pinned five-step bundle, over
-        // repeated runs. The endpoint rate-limits, and concurrent fetches also
-        // race to download the same program binaries before the shared cache
-        // has any of them. Both costs land on the wall clock. An endpoint with
-        // real quota would likely reverse this; measure before changing it.
-        let mut replays: Vec<Replay> = Vec::with_capacity(steps.len());
-        for step in &steps {
-            replays.push(self.replay_at(&step.signature, step.slot)?);
+        // The pre-bundle world. Landed steps merge first-wins, as they always
+        // have. A custom step's world holds today's bytes for whatever the
+        // history did not cover, so it only fills gaps: historical state wins
+        // wherever both have an account. When step 0 itself is custom, its
+        // transaction still heads the world.
+        let mut historical: Option<ReplayContext> = None;
+        for (step, r) in steps.iter().zip(&replays) {
+            if step.custom.is_some() {
+                continue;
+            }
+            match historical.as_mut() {
+                Some(h) => h.absorb(&r.ctx),
+                None => historical = Some(r.ctx.clone()),
+            }
         }
-
         let mut world = replays[0].ctx.clone();
-        for r in &replays[1..] {
-            world.absorb(&r.ctx);
+        if let Some(h) = &historical {
+            world.overlay(h);
+        }
+        for (step, r) in steps.iter().zip(&replays) {
+            if step.custom.is_some() {
+                world.absorb(&r.ctx);
+            }
         }
 
         Ok(Bundle {
@@ -305,6 +589,123 @@ impl Scope {
             baseline: std::sync::Mutex::new(None),
         })
     }
+}
+
+/// Every account a transaction of your own names, lookup tables resolved
+/// against today's tables: the static keys, then loaded writable, then
+/// loaded readonly, the order the runtime resolves them.
+fn custom_keys(
+    scope: &Scope,
+    tx: &solana_transaction::versioned::VersionedTransaction,
+) -> Vec<String> {
+    let mut keys: Vec<String> = tx
+        .message
+        .static_account_keys()
+        .iter()
+        .map(|k| k.to_string())
+        .collect();
+    let (writable, readonly) = crate::replay::resolve_alt_addresses(scope.client(), tx);
+    keys.extend(writable);
+    keys.extend(readonly);
+    keys
+}
+
+/// The parts of a `getTransaction` record the cascade reads, written for a
+/// transaction that never landed: its keys, its header and its lookup-table
+/// addresses, so `Scope::tx_writes` can tell which accounts it may write.
+fn synthetic_tx_json(
+    tx: &solana_transaction::versioned::VersionedTransaction,
+    scope: &Scope,
+) -> serde_json::Value {
+    let header = tx.message.header();
+    let keys: Vec<String> = tx
+        .message
+        .static_account_keys()
+        .iter()
+        .map(|k| k.to_string())
+        .collect();
+    let (writable, readonly) = crate::replay::resolve_alt_addresses(scope.client(), tx);
+    serde_json::json!({
+        "transaction": { "message": {
+            "accountKeys": keys,
+            "header": {
+                "numRequiredSignatures": header.num_required_signatures,
+                "numReadonlySignedAccounts": header.num_readonly_signed_accounts,
+                "numReadonlyUnsignedAccounts": header.num_readonly_unsigned_accounts,
+            },
+        }},
+        "meta": { "loadedAddresses": { "writable": writable, "readonly": readonly } },
+    })
+}
+
+const TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+
+/// A token account's (mint, owner, amount), for SPL Token and Token-2022
+/// accounts alike. A Token-2022 mint with extensions is also longer than 165
+/// bytes; the account-type byte at 165 tells the two apart.
+fn token_of(account: &Account) -> Option<(String, String, u64)> {
+    let program = account.owner.to_string();
+    if program != TOKEN_PROGRAM && program != TOKEN_2022_PROGRAM {
+        return None;
+    }
+    let d = &account.data;
+    if d.len() < 165 || (d.len() > 165 && d[165] != 2) {
+        return None;
+    }
+    let mint: [u8; 32] = d[0..32].try_into().ok()?;
+    let owner: [u8; 32] = d[32..64].try_into().ok()?;
+    let amount = u64::from_le_bytes(d[64..72].try_into().ok()?);
+    Some((
+        Address::from(mint).to_string(),
+        Address::from(owner).to_string(),
+        amount,
+    ))
+}
+
+/// Every token balance a run changed among `keys`, read from the SVM after
+/// it and from the loaded world before it. An account the step created has
+/// no "before" and starts from zero.
+fn svm_token_changes(
+    keys: &[String],
+    pre: &HashMap<Address, Account>,
+    svm: &litesvm::LiteSVM,
+) -> Vec<TokenChange> {
+    let mut out = Vec::new();
+    for key in keys {
+        let Ok(address) = Address::from_str(key) else {
+            continue;
+        };
+        let before = pre.get(&address).and_then(token_of);
+        let after = svm.get_account(&address).as_ref().and_then(token_of);
+        let Some((mint, owner, _)) = after.clone().or_else(|| before.clone()) else {
+            continue;
+        };
+        let post = after.map_or(0, |t| t.2);
+        let delta = post as i128 - before.map_or(0, |t| t.2) as i128;
+        if delta != 0 {
+            // A mint keeps its decimals at byte 44.
+            let decimals = Address::from_str(&mint)
+                .ok()
+                .and_then(|m| svm.get_account(&m))
+                .and_then(|m| m.data.get(44).copied())
+                .unwrap_or(0);
+            out.push(TokenChange {
+                address: key.clone(),
+                owner,
+                mint,
+                decimals,
+                delta_raw: delta.to_string(),
+                post_raw: post.to_string(),
+            });
+        }
+    }
+    out
+}
+
+/// Every token balance the chain recorded changing at this position.
+fn chain_token_changes(tx: &serde_json::Value) -> Vec<TokenChange> {
+    crate::diffs::token_diffs(tx)
 }
 
 /// A carried account against the world rebuilt at the later step's own slot:
@@ -392,8 +793,11 @@ impl Bundle {
             }
         }
 
-        let exact = steps.iter().all(|s| s.matches_chain);
-        let first_drift = steps.iter().position(|s| !s.matches_chain);
+        // Exactness is a claim about history: only landed steps make it. A
+        // step of your own differing from what it replaced is the result
+        // being asked for, not drift.
+        let exact = steps.iter().all(|s| s.custom || s.matches_chain);
+        let first_drift = steps.iter().position(|s| !s.custom && !s.matches_chain);
         let edges = edges_of(&self.steps, &steps);
 
         Ok(BundleReport {
@@ -557,10 +961,18 @@ impl Bundle {
                 .cloned()
                 .collect();
 
+            let token_changes = svm_token_changes(&step.keys, &pre, &svm);
+
             // Outcome only. LiteSVM formats its errors as text and the RPC
             // returns JSON, so identical failures compare unequal as strings;
-            // both are kept in the report for the reader to compare.
-            let matches_chain = result.success == step.record.success;
+            // both are kept in the report for the reader to compare. A step of
+            // your own compares with the transaction it replaces; with nothing
+            // replaced there is nothing to disagree with.
+            let replaces = step.custom.as_ref().and_then(|c| c.replaces.clone());
+            let matches_chain = match &step.custom {
+                Some(c) if c.replaces.is_none() => true,
+                _ => result.success == step.record.success,
+            };
 
             reports.push(StepReport {
                 index: k,
@@ -573,6 +985,11 @@ impl Bundle {
                 chain_compute: step.record.compute_units,
                 carried: carried_here,
                 diverged: std::mem::take(&mut state.pending),
+                custom: step.custom.is_some(),
+                today_state: step.today_state.clone(),
+                replaces,
+                token_changes,
+                chain_token_changes: step.chain_tokens.clone(),
             });
 
             // Everything this step wrote joins the cascade.
@@ -825,6 +1242,138 @@ mod tests {
 
     /// A step whose message puts `address` among the writable accounts, or
     /// among the readonly ones when `writable` is false.
+    /// The custom-step proof: replace a landed step with that very
+    /// transaction supplied as your own, and it must reproduce the landed
+    /// step: same outcome, same compute to the unit, and the same token
+    /// amounts the chain recorded. Anything else would mean a custom step
+    /// runs in a different world than the transaction it stands in for.
+    #[test]
+    #[ignore = "network"]
+    fn a_step_replaced_by_its_own_transaction_reproduces_it() {
+        use base64::Engine as _;
+        let scope = scope();
+        let landed = scope
+            .bundle(BundleInput::BundleId {
+                id: BIG_ID.to_string(),
+            })
+            .unwrap();
+        let baseline = landed.run(&Vec::new()).unwrap();
+        let sigs: Vec<String> = landed.steps.iter().map(|s| s.signature.clone()).collect();
+        let k = 2;
+        let raw: serde_json::Value = scope
+            .client()
+            .send(
+                solana_client::rpc_request::RpcRequest::GetTransaction,
+                serde_json::json!([sigs[k], {"encoding": "base64", "maxSupportedTransactionVersion": 0}]),
+            )
+            .unwrap();
+        let b64 = raw["transaction"][0].as_str().unwrap().to_string();
+        assert!(base64::engine::general_purpose::STANDARD
+            .decode(&b64)
+            .is_ok());
+
+        let mut steps: Vec<StepInput> = sigs.iter().cloned().map(StepInput::Signature).collect();
+        steps[k] = StepInput::Custom {
+            transaction: b64,
+            replaces: Some(sigs[k].clone()),
+            slot: None,
+        };
+        let mixed = scope.bundle(BundleInput::Steps { steps }).unwrap();
+        assert_eq!(mixed.mode, Mode::Consecutive);
+        let report = mixed.run(&Vec::new()).unwrap();
+
+        let custom = &report.steps[k];
+        assert!(custom.custom);
+        assert_eq!(custom.replaces.as_deref(), Some(sigs[k].as_str()));
+        assert!(custom.matches_chain, "{:?}", custom.result.error);
+        assert_eq!(
+            custom.result.compute_units, baseline.steps[k].result.compute_units,
+            "same world, same transaction: same compute"
+        );
+        let delta = |c: &[TokenChange]| {
+            let mut v: Vec<(String, String)> = c
+                .iter()
+                .map(|t| (t.address.clone(), t.delta_raw.clone()))
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            delta(&custom.token_changes),
+            delta(&custom.chain_token_changes)
+        );
+        // Every landed step around it is untouched.
+        assert!(report.exact, "first drift at {:?}", report.first_drift);
+        for (a, b) in report.steps.iter().zip(&baseline.steps) {
+            assert_eq!(a.result.compute_units, b.result.compute_units);
+        }
+    }
+
+    #[test]
+    fn steps_mix_signatures_and_your_own_transactions() {
+        let input: BundleInput = serde_json::from_value(serde_json::json!({
+            "kind": "steps",
+            "steps": [
+                "5sig",
+                { "transaction": "AQID", "replaces": "6sig" },
+                { "transaction": "BAUG", "slot": 7 }
+            ]
+        }))
+        .unwrap();
+        let BundleInput::Steps { steps } = input else {
+            panic!("expected steps")
+        };
+        assert_eq!(steps[0], StepInput::Signature("5sig".into()));
+        assert_eq!(
+            steps[1],
+            StepInput::Custom {
+                transaction: "AQID".into(),
+                replaces: Some("6sig".into()),
+                slot: None
+            }
+        );
+        assert_eq!(
+            steps[2],
+            StepInput::Custom {
+                transaction: "BAUG".into(),
+                replaces: None,
+                slot: Some(7)
+            }
+        );
+    }
+
+    fn token_account(program: &str, len: usize, kind: u8, amount: u64) -> Account {
+        let mut data = vec![0u8; len];
+        data[0..32].copy_from_slice(&[1u8; 32]);
+        data[32..64].copy_from_slice(&[2u8; 32]);
+        data[64..72].copy_from_slice(&amount.to_le_bytes());
+        if len > 165 {
+            data[165] = kind;
+        }
+        Account {
+            lamports: 1,
+            data,
+            owner: Address::from_str(program).unwrap(),
+            executable: false,
+            rent_epoch: 0,
+        }
+    }
+
+    #[test]
+    fn token_accounts_are_read_and_mints_are_not() {
+        let plain = token_account(TOKEN_PROGRAM, 165, 0, 42);
+        assert_eq!(token_of(&plain).map(|t| t.2), Some(42));
+        // Token-2022 with extensions: account type 2 is an account, 1 a mint.
+        let ext_account = token_account(TOKEN_2022_PROGRAM, 200, 2, 7);
+        assert_eq!(token_of(&ext_account).map(|t| t.2), Some(7));
+        let ext_mint = token_account(TOKEN_2022_PROGRAM, 200, 1, 7);
+        assert!(token_of(&ext_mint).is_none());
+        let wrong_owner = token_account("11111111111111111111111111111111", 165, 0, 9);
+        assert!(token_of(&wrong_owner).is_none());
+        let short = token_account(TOKEN_PROGRAM, 82, 0, 0);
+        assert!(token_of(&short).is_none());
+    }
+
     fn synthetic_step(index: usize, keys: &[&str], writable: bool) -> BundleStep {
         // One signer (the fee payer, always writable) plus the keys; marking
         // them readonly-unsigned is what makes `tx_writes` say readonly.
@@ -850,6 +1399,9 @@ mod tests {
             keys: keys.iter().map(|k| k.to_string()).collect(),
             record: OnchainRecord::from_tx_json(&tx),
             bundle_id: None,
+            custom: None,
+            today_state: Vec::new(),
+            chain_tokens: Vec::new(),
             tx,
         }
     }
@@ -882,6 +1434,11 @@ mod tests {
             chain_compute: None,
             carried: Vec::new(),
             diverged: Vec::new(),
+            custom: false,
+            replaces: None,
+            today_state: Vec::new(),
+            token_changes: Vec::new(),
+            chain_token_changes: Vec::new(),
         }
     }
 

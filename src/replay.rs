@@ -851,6 +851,50 @@ impl ReplayContext {
             .collect()
     }
 
+    /// Lay `other`'s accounts and programs over this world: wherever both
+    /// hold an address, `other` wins. How a transaction of your own picks up
+    /// the historical state of the one it replaces, over the current state it
+    /// was loaded with.
+    pub(crate) fn overlay(&mut self, other: &ReplayContext) {
+        for (address, loaded) in &other.loaded {
+            match self.loaded.iter_mut().find(|(a, _)| a == address) {
+                Some((_, existing)) => *existing = loaded.clone(),
+                None => self.loaded.push((*address, loaded.clone())),
+            }
+        }
+    }
+
+    /// Reload `keys` from an archive as of `slot`, over whatever this world
+    /// holds for them, programs included (resolved through their programdata
+    /// at the same slot). Returns the keys the archive answered for.
+    pub(crate) fn reload_at_slot(
+        &mut self,
+        archive: &RpcClient,
+        keys: &[String],
+        slot: u64,
+    ) -> Result<Vec<String>> {
+        let (loaded, existing) = fetch_loaded_at_slot(archive, keys, slot)?;
+        for (address, l) in loaded {
+            match self.loaded.iter_mut().find(|(a, _)| *a == address) {
+                Some((_, slot_entry)) => *slot_entry = l,
+                None => self.loaded.push((address, l)),
+            }
+        }
+        Ok(existing.into_keys().collect())
+    }
+
+    /// Run at `slot` and `block_time` instead of whatever this world was
+    /// loaded at: the position a transaction of your own takes in history.
+    pub(crate) fn anchor_clock(&mut self, slot: u64, block_time: Option<i64>) {
+        self.slot = Some(slot);
+        self.block_time = block_time;
+    }
+
+    /// Name this world's transaction, for reports and traces.
+    pub(crate) fn set_signature(&mut self, signature: String) {
+        self.signature = signature;
+    }
+
     pub(crate) fn absorb(&mut self, other: &ReplayContext) {
         for (address, loaded) in &other.loaded {
             if !self.has_loaded(address) {

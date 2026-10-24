@@ -172,8 +172,8 @@ pub use analyze::{
     ProgramInfo, SigInfo, SimulationReport,
 };
 pub use bundle::{
-    Bundle, BundleInput, BundleReport, BundleStep, Diverged, Edge, Mode, Role, StepMutations,
-    StepReport, MAX_STEPS,
+    Bundle, BundleInput, BundleReport, BundleStep, CustomStep, Diverged, Edge, Mode, Role,
+    StepInput, StepMutations, StepReport, MAX_STEPS,
 };
 pub use check::{AccountCheck, Check, Cmp, Scenario};
 pub use compute::CuUsage;
