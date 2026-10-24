@@ -943,7 +943,22 @@ async fn bundle_get_handler(
     let (url, archive) = endpoints_for(q.cluster.as_deref(), None, None, None)?;
     let key = format!("bundle|{url}|{}|{target}", archive.as_deref().unwrap_or(""));
     let input = bundle_input_of(&target);
-    baseline_or_building(key, input, url, archive).await
+    baseline_or_building(key, input, url, archive, false).await
+}
+
+/// The held bundle for `key`, rebuilding it when it has been evicted: `None`
+/// means it is building and the caller should answer 202 and be polled.
+async fn held_or_build(
+    key: &str,
+    input: BundleInput,
+    url: Rpc,
+    archive: Option<String>,
+) -> Result<Option<std::sync::Arc<svmscope::Bundle>>, (StatusCode, String)> {
+    if let Some(b) = built_get(key) {
+        return Ok(Some(b));
+    }
+    baseline_or_building(key.to_string(), input, url, archive, true).await?;
+    Ok(built_get(key))
 }
 
 /// The baseline report for `key`, building the bundle if nobody has: from
@@ -955,10 +970,16 @@ async fn baseline_or_building(
     input: BundleInput,
     url: Rpc,
     archive: Option<String>,
+    need_built: bool,
 ) -> Result<axum::response::Response, (StatusCode, String)> {
     use axum::response::IntoResponse;
+    // A cached report is enough for a reader; an edit, a trace or an account
+    // list needs the built bundle itself, which a newer sequence may have
+    // evicted while its report stayed cached. Those rebuild.
     if let Some(hit) = at_cache_get(&key) {
-        return Ok(Json(hit).into_response());
+        if !need_built || built_get(&key).is_some() {
+            return Ok(Json(hit).into_response());
+        }
     }
 
     // Join the build already running for this bundle, or start one.
@@ -1055,13 +1076,12 @@ async fn bundle_post_handler(
     let key = bundle_key(&url, archive.as_deref(), &req);
     let (input, step_muts) = bundle_parts(req)?;
     // A sequence carrying your own transactions cannot be named in a URL, so
-    // this route builds it too: the first request starts the build and gets
-    // the baseline (or a 202 to poll); edits after that run on the held build.
-    let Some(built) = built_get(&key) else {
-        let baseline = baseline_or_building(key, input, url, archive).await?;
-        if step_muts.is_empty() || baseline.status() != StatusCode::OK {
-            return Ok(baseline);
-        }
+    // this route builds it too. Unedited, the baseline report is the answer;
+    // edited, the built bundle is needed, rebuilt if it was evicted.
+    if step_muts.is_empty() && built_get(&key).is_none() {
+        return baseline_or_building(key, input, url, archive, false).await;
+    }
+    let Some(built) = held_or_build(&key, input, url, archive).await? else {
         return Ok(bundle_building());
     };
     tokio::task::spawn_blocking(move || -> Result<svmscope::BundleReport, svmscope::Error> {
@@ -1096,8 +1116,8 @@ async fn bundle_accounts_handler(
         req.relay.as_deref(),
     )?;
     let key = bundle_key(&url, archive.as_deref(), &req);
-    let (_input, step_muts) = bundle_parts(req)?;
-    let Some(built) = built_get(&key) else {
+    let (input, step_muts) = bundle_parts(req)?;
+    let Some(built) = held_or_build(&key, input, url, archive).await? else {
         return Ok(bundle_building());
     };
     tokio::task::spawn_blocking(
@@ -1158,8 +1178,8 @@ async fn bundle_trace_handler(
         req.relay.as_deref(),
     )?;
     let key = bundle_key(&url, archive.as_deref(), &req);
-    let (_input, step_muts) = bundle_parts(req)?;
-    let Some(built) = built_get(&key) else {
+    let (input, step_muts) = bundle_parts(req)?;
+    let Some(built) = held_or_build(&key, input, url, archive).await? else {
         return Ok(bundle_building());
     };
     tokio::task::spawn_blocking(move || -> Result<svmscope::Trace, svmscope::Error> {

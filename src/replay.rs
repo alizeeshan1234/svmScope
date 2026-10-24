@@ -895,9 +895,20 @@ impl ReplayContext {
         self.signature = signature;
     }
 
-    pub(crate) fn absorb(&mut self, other: &ReplayContext) {
+    /// Every address this world holds bytes or a program for.
+    pub(crate) fn loaded_addresses(&self) -> impl Iterator<Item = &Address> {
+        self.loaded.iter().map(|(a, _)| a)
+    }
+
+    /// [`ReplayContext::absorb`], skipping anything already `decided`: held
+    /// by an earlier world, or proven absent there.
+    pub(crate) fn absorb_undecided(
+        &mut self,
+        other: &ReplayContext,
+        decided: &std::collections::HashSet<Address>,
+    ) {
         for (address, loaded) in &other.loaded {
-            if !self.has_loaded(address) {
+            if !decided.contains(address) && !self.has_loaded(address) {
                 self.loaded.push((*address, loaded.clone()));
             }
         }

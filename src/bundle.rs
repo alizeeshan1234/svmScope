@@ -443,6 +443,30 @@ impl Scope {
         // would likely reverse this; measure before changing it.
         let mut steps = Vec::with_capacity(resolved.len());
         let mut replays: Vec<Replay> = Vec::with_capacity(resolved.len());
+        // Historical state, merged first-wins in step order: each landed
+        // step's world, and for a replacement the world of the transaction it
+        // replaces, at its own position. A replacement must start from the
+        // state before the original ran, so a later landed step's world, which
+        // already holds the original's effects, must not get there first.
+        // `decided` is every account an earlier position settled, by bytes
+        // or by proving it absent: an account the original created is absent
+        // in the replacement's world and must stay so, even though a later
+        // landed step's world already holds it.
+        let mut historical: Option<ReplayContext> = None;
+        let mut decided: std::collections::HashSet<Address> = std::collections::HashSet::new();
+        let mut absent: std::collections::HashSet<Address> = std::collections::HashSet::new();
+        let mut merge = |h: &mut Option<ReplayContext>, replay: &Replay| {
+            match h.as_mut() {
+                Some(h) => h.absorb_undecided(&replay.ctx, &decided),
+                None => *h = Some(replay.ctx.clone()),
+            }
+            decided.extend(replay.ctx.loaded_addresses().copied());
+            for a in replay.known_absent() {
+                if decided.insert(a) {
+                    absent.insert(a);
+                }
+            }
+        };
         for (index, r) in resolved.into_iter().enumerate() {
             let slot = slots[index];
             match r {
@@ -457,7 +481,9 @@ impl Scope {
                         .iter()
                         .find(|s| s.signatures.contains(&input))
                         .and_then(|s| s.bundle_id.clone());
-                    replays.push(self.replay_at(&signature, slot)?);
+                    let replay = self.replay_at(&signature, slot)?;
+                    merge(&mut historical, &replay);
+                    replays.push(replay);
                     steps.push(BundleStep {
                         index,
                         signature,
@@ -500,6 +526,9 @@ impl Scope {
                             self.client().get_block_time(slot).ok(),
                         ),
                     };
+                    if let Some(b) = &base {
+                        merge(&mut historical, b);
+                    }
                     let keys = custom_keys(self, &tx);
                     let json = synthetic_tx_json(&tx, self);
                     replays.push(self.custom_step_replay(
@@ -527,10 +556,36 @@ impl Scope {
             }
         }
 
-        // What each step's certificate says ran on today's bytes. An account
-        // empty in the step's world is left out: it is one the transaction
-        // creates (a temporary token account, a new position), and "nothing
-        // there" is as true at the slot as today.
+        let first_slot = steps[0].slot;
+        let mode = if steps.iter().all(|s| s.slot == first_slot) {
+            Mode::Consecutive
+        } else {
+            Mode::CrossSlot
+        };
+
+        // The pre-bundle world: the ordered historical merge, headed by step
+        // 0's transaction, then today's bytes only for accounts no historical
+        // world covered (pools a custom route touches that nothing landed did).
+        let mut world = replays[0].ctx.clone();
+        if let Some(h) = &historical {
+            world.overlay(h);
+        }
+        for a in &absent {
+            if historical.as_ref().is_none_or(|h| !h.has_loaded(a)) {
+                world.set_loaded_data(*a, None);
+            }
+        }
+        for (step, r) in steps.iter().zip(&replays) {
+            if step.custom.is_some() {
+                world.absorb_undecided(&r.ctx, &decided);
+            }
+        }
+
+        // What each step ran on at today's bytes. In one slot every step runs
+        // on the merged world, so an account a historical world supplied is
+        // not today's even if the step's own world held a current copy. An
+        // account empty in the step's world is left out: it is one the
+        // transaction creates, and "nothing there" is as true at the slot.
         for (step, replay) in steps.iter_mut().zip(&replays) {
             step.today_state = replay
                 .certificate()
@@ -543,40 +598,15 @@ impl Scope {
                         .and_then(|addr| replay.ctx.loaded_data_of(&addr))
                         .is_some_and(|acc| acc.lamports > 0 || !acc.data.is_empty())
                 })
+                .filter(|a| {
+                    !(mode == Mode::Consecutive
+                        && step.custom.is_some()
+                        && historical.as_ref().is_some_and(|h| {
+                            Address::from_str(&a.address).is_ok_and(|addr| h.has_loaded(&addr))
+                        }))
+                })
                 .map(|a| a.address)
                 .collect();
-        }
-
-        let first_slot = steps[0].slot;
-        let mode = if steps.iter().all(|s| s.slot == first_slot) {
-            Mode::Consecutive
-        } else {
-            Mode::CrossSlot
-        };
-
-        // The pre-bundle world. Landed steps merge first-wins, as they always
-        // have. A custom step's world holds today's bytes for whatever the
-        // history did not cover, so it only fills gaps: historical state wins
-        // wherever both have an account. When step 0 itself is custom, its
-        // transaction still heads the world.
-        let mut historical: Option<ReplayContext> = None;
-        for (step, r) in steps.iter().zip(&replays) {
-            if step.custom.is_some() {
-                continue;
-            }
-            match historical.as_mut() {
-                Some(h) => h.absorb(&r.ctx),
-                None => historical = Some(r.ctx.clone()),
-            }
-        }
-        let mut world = replays[0].ctx.clone();
-        if let Some(h) = &historical {
-            world.overlay(h);
-        }
-        for (step, r) in steps.iter().zip(&replays) {
-            if step.custom.is_some() {
-                world.absorb(&r.ctx);
-            }
         }
 
         Ok(Bundle {
@@ -670,6 +700,7 @@ fn svm_token_changes(
     keys: &[String],
     pre: &HashMap<Address, Account>,
     svm: &litesvm::LiteSVM,
+    known_decimals: &HashMap<String, u8>,
 ) -> Vec<TokenChange> {
     let mut out = Vec::new();
     for key in keys {
@@ -684,11 +715,13 @@ fn svm_token_changes(
         let post = after.map_or(0, |t| t.2);
         let delta = post as i128 - before.map_or(0, |t| t.2) as i128;
         if delta != 0 {
-            // A mint keeps its decimals at byte 44.
+            // A mint keeps its decimals at byte 44. Many swaps never pass the
+            // mint, so fall back to what the chain records say about it.
             let decimals = Address::from_str(&mint)
                 .ok()
                 .and_then(|m| svm.get_account(&m))
                 .and_then(|m| m.data.get(44).copied())
+                .or_else(|| known_decimals.get(&mint).copied())
                 .unwrap_or(0);
             out.push(TokenChange {
                 address: key.clone(),
@@ -932,6 +965,12 @@ impl Bundle {
     ) -> Result<(Vec<Snapshot>, Vec<StepReport>)> {
         let mut snapshots: Vec<Snapshot> = Vec::new();
         let mut reports: Vec<StepReport> = Vec::with_capacity(upto.saturating_sub(start));
+        let known_decimals: HashMap<String, u8> = self
+            .steps
+            .iter()
+            .flat_map(|s| s.chain_tokens.iter())
+            .map(|t| (t.mint.clone(), t.decimals))
+            .collect();
         let mut state = entry;
 
         for k in start..upto {
@@ -961,7 +1000,7 @@ impl Bundle {
                 .cloned()
                 .collect();
 
-            let token_changes = svm_token_changes(&step.keys, &pre, &svm);
+            let token_changes = svm_token_changes(&step.keys, &pre, &svm, &known_decimals);
 
             // Outcome only. LiteSVM formats its errors as text and the RPC
             // returns JSON, so identical failures compare unequal as strings;
@@ -1250,7 +1289,6 @@ mod tests {
     #[test]
     #[ignore = "network"]
     fn a_step_replaced_by_its_own_transaction_reproduces_it() {
-        use base64::Engine as _;
         let scope = scope();
         let landed = scope
             .bundle(BundleInput::BundleId {
@@ -1259,7 +1297,17 @@ mod tests {
             .unwrap();
         let baseline = landed.run(&Vec::new()).unwrap();
         let sigs: Vec<String> = landed.steps.iter().map(|s| s.signature.clone()).collect();
-        let k = 2;
+        // Step 1 is the first to touch the pool every later step trades: a
+        // later step's world already holds the original's effects there and
+        // must not supply the replacement's starting state. Step 2 has
+        // earlier steps covering the same accounts.
+        for k in [1, 2] {
+            replaced_step_reproduces(&scope, &sigs, &baseline, k);
+        }
+    }
+
+    fn replaced_step_reproduces(scope: &Scope, sigs: &[String], baseline: &BundleReport, k: usize) {
+        use base64::Engine as _;
         let raw: serde_json::Value = scope
             .client()
             .send(
@@ -1285,10 +1333,10 @@ mod tests {
         let custom = &report.steps[k];
         assert!(custom.custom);
         assert_eq!(custom.replaces.as_deref(), Some(sigs[k].as_str()));
-        assert!(custom.matches_chain, "{:?}", custom.result.error);
+        assert!(custom.matches_chain, "step {k}: {:?}", custom.result.error);
         assert_eq!(
             custom.result.compute_units, baseline.steps[k].result.compute_units,
-            "same world, same transaction: same compute"
+            "step {k}: same world, same transaction, same compute"
         );
         let delta = |c: &[TokenChange]| {
             let mut v: Vec<(String, String)> = c
@@ -1300,12 +1348,21 @@ mod tests {
         };
         assert_eq!(
             delta(&custom.token_changes),
-            delta(&custom.chain_token_changes)
+            delta(&custom.chain_token_changes),
+            "step {k}"
         );
-        // Every landed step around it is untouched.
-        assert!(report.exact, "first drift at {:?}", report.first_drift);
+        assert_eq!(
+            delta(&custom.token_changes),
+            delta(&baseline.steps[k].token_changes),
+            "step {k}: the replacement moves what the landed replay moved"
+        );
+        assert!(
+            report.exact,
+            "step {k}: first drift at {:?}",
+            report.first_drift
+        );
         for (a, b) in report.steps.iter().zip(&baseline.steps) {
-            assert_eq!(a.result.compute_units, b.result.compute_units);
+            assert_eq!(a.result.compute_units, b.result.compute_units, "step {k}");
         }
     }
 

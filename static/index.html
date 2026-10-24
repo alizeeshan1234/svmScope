@@ -5282,7 +5282,19 @@ let bundleReport = null, bundleBase = null, bundleTargetCur = '', bundleMuts = [
 // Your own transactions swapped into the sequence: { mode: 'replace' | 'insert',
 // at: landed index (-1 = before the first), tx: base64 }. `bundleLanded` is the
 // landed sequence they are positioned against.
-let bundleSwaps = [], bundleLanded = [];
+let bundleSwaps = [], bundleSwapsApplied = [], bundleLanded = [];
+// A POST to the bundle routes, retried while the engine answers 202: a held
+// sequence can be evicted by a newer one and is rebuilt on demand.
+async function bundlePoll(path, body, onWait) {
+  const started = Date.now();
+  for (;;) {
+    const res = await api(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    if (res.status !== 202) return res;
+    if ((Date.now() - started) / 1000 > BUNDLE_GIVE_UP) throw new Error('the sequence is still being rebuilt; try again in a minute');
+    if (onWait) onWait(Math.round((Date.now() - started) / 1000));
+    await new Promise(r => setTimeout(r, 4000));
+  }
+}
 // Stop polling eventually; the engine still finishes, and the next visit is instant.
 const BUNDLE_GIVE_UP = 900;
 const lamp = (n) => (n / 1e9).toFixed(6).replace(/0+$/, '').replace(/\.$/, '') + ' SOL';
@@ -5445,8 +5457,8 @@ function bundleTokenTable(s) {
 // The landed sequence with your transactions swapped in, as the engine's
 // `steps`: a signature, or { transaction, replaces } in place of one, or
 // { transaction } between them.
-function bundleStepsWithSwaps() {
-  const at = (mode, i) => bundleSwaps.filter(w => w.mode === mode && w.at === i);
+function bundleStepsWithSwaps(swaps) {
+  const at = (mode, i) => swaps.filter(w => w.mode === mode && w.at === i);
   const steps = at('insert', -1).map(w => ({ transaction: w.tx }));
   bundleLanded.forEach((sig, i) => {
     const rep = at('replace', i)[0];
@@ -5454,6 +5466,11 @@ function bundleStepsWithSwaps() {
     for (const w of at('insert', i)) steps.push({ transaction: w.tx });
   });
   return steps;
+}
+function bundleSwapCountText() {
+  const same = JSON.stringify(bundleSwaps) === JSON.stringify(bundleSwapsApplied);
+  if (!bundleSwaps.length && !bundleSwapsApplied.length) return '';
+  return same ? `${bundleSwapsApplied.length} active` : `${bundleSwaps.length} pending, not run yet`;
 }
 function bundleSwapPanel() {
   const opts = ['<option value="insert:-1">insert before step 0</option>'].concat(
@@ -5466,7 +5483,8 @@ function bundleSwapPanel() {
     <textarea id="bswapTx" class="ta" spellcheck="false" placeholder="base64 of your transaction: Buffer.from(tx.serialize()).toString('base64')"></textarea>
     <div class="cf-row" style="margin-top:8px">
       <button class="btn ghost sm" id="bswapAdd">Add to the sequence</button>
-      ${bundleSwaps.length ? '<button class="btn sm" id="bswapRun">Run with your transactions</button><button class="btn ghost sm" id="bswapClear">Back to what landed</button>' : ''}
+      ${bundleSwaps.length ? '<button class="btn sm" id="bswapRun">Run with your transactions</button>' : ''}
+      ${bundleSwaps.length || bundleSwapsApplied.length ? '<button class="btn ghost sm" id="bswapClear">Back to what landed</button>' : ''}
     </div>
     <div style="margin-top:8px">${pills}</div>
     <div class="dbg-err hidden" id="bswapErr"></div>`;
@@ -5483,14 +5501,16 @@ function bundleWireSwaps() {
     bundleSwaps.push({ mode, at: Number(at), tx });
     $('bswapTx').value = '';
     $('bundleSwap').innerHTML = bundleSwapPanel(); bundleWireSwaps();
-    $('bundleSwapCount').textContent = `${bundleSwaps.length} active`;
+    $('bundleSwapCount').textContent = bundleSwapCountText();
   });
-  $('bswapRun')?.addEventListener('click', () => { bundleMuts = []; bundleOpen = {}; bundleRun(); });
-  $('bswapClear')?.addEventListener('click', () => { bundleSwaps = []; bundleMuts = []; bundleOpen = {}; bundleRun(); });
+  // Edits are numbered against the sequence on screen; a new sequence
+  // renumbers its steps, so they start over.
+  $('bswapRun')?.addEventListener('click', () => { bundleSwapsApplied = bundleSwaps.slice(); bundleMuts = []; bundleOpen = {}; bundleRun(); });
+  $('bswapClear')?.addEventListener('click', () => { bundleSwaps = []; bundleSwapsApplied = []; bundleMuts = []; bundleOpen = {}; bundleRun(); });
   $('bundleSwap').querySelectorAll('[data-bswapdrop]').forEach(b => b.addEventListener('click', () => {
     bundleSwaps.splice(Number(b.dataset.bswapdrop), 1);
     $('bundleSwap').innerHTML = bundleSwapPanel(); bundleWireSwaps();
-    $('bundleSwapCount').textContent = bundleSwaps.length ? `${bundleSwaps.length} active` : '';
+    $('bundleSwapCount').textContent = bundleSwapCountText();
   }));
 }
 
@@ -5543,11 +5563,8 @@ async function bundleLoadAccounts() {
   const box = $('bundleAccts');
   box.innerHTML = '<div class="empty">loading this step\'s accounts…</div>';
   try {
-    const res = await api('/bundle/accounts', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(bundleBody({ step })),
-    });
-    if (res.status === 202) { box.innerHTML = '<div class="empty">the sequence is still being built</div>'; return; }
+    const res = await bundlePoll('/bundle/accounts', bundleBody({ step }),
+      s => { box.innerHTML = `<div class="empty">rebuilding the sequence… ${s}s</div>`; });
     const text = await res.text();
     if (!res.ok) throw new Error(text || ('engine said ' + res.status));
     bundleAccounts = JSON.parse(text).filter(a => !a.executable);
@@ -5652,7 +5669,7 @@ function bundleStageIx() {
 
 function renderBundle(r) {
   bundleReport = r;
-  const swapped = bundleSwaps.length > 0;
+  const swapped = bundleSwapsApplied.length > 0;
   const edited = bundleMuts.length > 0;
   if (!edited && !swapped) { bundleBase = r.steps.slice(); bundleLanded = r.steps.map(s => s.signature); }
   // Inserted steps shift every index after them, so step-by-step comparison
@@ -5707,7 +5724,7 @@ function renderBundle(r) {
   if (edges.length) $('bundleCascade').innerHTML = bundleCascadeRows(edges);
 
   $('bundleSwapCard').hidden = false;
-  $('bundleSwapCount').textContent = swapped ? `${bundleSwaps.length} active` : '';
+  $('bundleSwapCount').textContent = bundleSwapCountText();
   $('bundleSwap').innerHTML = bundleSwapPanel();
   bundleWireSwaps();
 
@@ -5750,7 +5767,7 @@ function bundleBody(extra) {
   const mutations = [...byStep.entries()].map(([step, muts]) => ({ step, mutations: muts }));
   // Same cluster / custom-RPC / relay selection every other request carries.
   const body = Object.assign({ mutations }, clusterParams());
-  if (bundleSwaps.length) body.steps = bundleStepsWithSwaps();
+  if (bundleSwapsApplied.length) body.steps = bundleStepsWithSwaps(bundleSwapsApplied);
   else if (bundleTargetCur.includes(',')) body.signatures = bundleTargetCur.split(',').map(x => x.trim()).filter(Boolean);
   else body.bundle = bundleTargetCur;
   return Object.assign(body, extra || {});
@@ -5779,7 +5796,7 @@ async function bundleRun() {
     // connection open long enough for a browser or a proxy to give up.
     // A mutated run has no such route yet and still waits on the one request.
     for (;;) {
-      const res = edited || bundleSwaps.length
+      const res = edited || bundleSwapsApplied.length
         ? await api('/bundle', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(bundleBody()) })
         : await api('/bundle/' + encodeURIComponent(bundleTargetCur) + clusterQ());
       if (res.status === 202) {
@@ -5806,10 +5823,8 @@ async function bundleTrace(step) {
   $('bundleStepLabel').textContent = `step ${step}`;
   $('bundleStep').innerHTML = '<div class="empty">running every step before this one, then tracing this one…</div>';
   try {
-    const res = await api('/bundle/trace', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(bundleBody({ step })),
-    });
+    const res = await bundlePoll('/bundle/trace', bundleBody({ step }),
+      s => { $('bundleStep').innerHTML = `<div class="empty">rebuilding the sequence… ${s}s</div>`; });
     const text = await res.text();
     if (!res.ok) throw new Error(text || ('engine said ' + res.status));
     // Rendered here rather than through the debugger's own renderer: that one
@@ -5835,7 +5850,7 @@ async function bundleTrace(step) {
 }
 
 function showBundle(target, push) {
-  if (target !== bundleTargetCur) { bundleMuts = []; bundleBase = null; bundleOpen = {}; bundleSwaps = []; bundleLanded = []; }
+  if (target !== bundleTargetCur) { bundleMuts = []; bundleBase = null; bundleOpen = {}; bundleSwaps = []; bundleSwapsApplied = []; bundleLanded = []; }
   $('bundleSig2').value = target;
   $('bundleTarget').value = target;
   bundleTargetCur = target;

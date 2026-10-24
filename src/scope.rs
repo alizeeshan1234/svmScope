@@ -2544,6 +2544,17 @@ impl Scope {
             // balances at the slot; without it the certificate would call
             // them today's data.
             replay.recorded = base.recorded.clone();
+            // An account the replaced world knows about but holds no bytes for
+            // did not exist at the slot (the original created it). It may well
+            // exist today, so the copy loaded above must go, or the replacement
+            // starts with an account that was not there yet.
+            for key in base.provenance.keys() {
+                if let Ok(address) = Address::from_str(key) {
+                    if !base.ctx.has_loaded(&address) && replay.ctx.has_loaded(&address) {
+                        replay.ctx.set_loaded_data(address, None);
+                    }
+                }
+            }
         }
         for key in extra {
             let source = if from_archive.contains(&key) {
@@ -3237,6 +3248,16 @@ pub struct Replay {
 }
 
 impl Replay {
+    /// Accounts this replay's reconstruction accounted for without loading
+    /// bytes: proven absent at its slot.
+    pub(crate) fn known_absent(&self) -> Vec<Address> {
+        self.provenance
+            .keys()
+            .filter_map(|k| Address::from_str(k).ok())
+            .filter(|a| !self.ctx.has_loaded(a))
+            .collect()
+    }
+
     pub(crate) fn set_recorded(&mut self, recorded: OnchainRecord) {
         self.recorded = Some(recorded);
     }
